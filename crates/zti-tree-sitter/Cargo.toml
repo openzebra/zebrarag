@@ -1,0 +1,15 @@
+[package]
+name = "zti-tree-sitter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zti-ts-core.workspace = true
+zti-ts-rust.workspace = true
+zti-ts-typescript.workspace = true
+zti-ts-dart.workspace = true
+zti-ts-solidity.workspace = true

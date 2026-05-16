@@ -1,0 +1,17 @@
+[package]
+name = "zti-dsl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zti-tree-sitter.workspace = true
+zti-ts-core.workspace = true
+zti-common.workspace = true
+ignore.workspace = true
+blake3.workspace = true
+serde.workspace = true
+globset = "0.4"

@@ -1,0 +1,97 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/zti-common",
+  "crates/zti-hw-core",
+  "crates/zti-hw-cpu",
+  "crates/zti-hw-metal",
+  "crates/zti-hw-cuda",
+  "crates/zti-hw-vulkan",
+  "crates/zti-hw",
+  "crates/zti-ts-core",
+  "crates/zti-ts-rust",
+  "crates/zti-ts-typescript",
+  "crates/zti-ts-dart",
+  "crates/zti-ts-solidity",
+  "crates/zti-tree-sitter",
+  "crates/zti-dsl",
+  "crates/zti-embed",
+  "crates/zti-rerank",
+  "crates/zti-store",
+  "crates/zti-pipeline",
+  "crates/zti-protocol",
+  "crates/zti-ipc-client",
+  "crates/zti-daemon",
+  "crates/apps/zebra-dsl",
+  "crates/apps/zebra-embed",
+  "crates/apps/zebra-mcp",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.91"
+license      = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow             = "1.0"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+tokio   = { version = "1", features = ["rt-multi-thread","macros","net","io-util","fs","sync","signal","process","time"] }
+futures = "0.3"
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode    = { version = "2", features = ["derive", "serde"] }
+
+blake3 = "1"
+ignore = "0.4"
+dirs   = "5"
+fs2    = "0.4"
+sysinfo = "0.39"
+
+tree-sitter            = "0.26"
+tree-sitter-rust       = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-dart       = "0.2"
+tree-sitter-solidity   = "1"
+
+ort         = { version = "2.0.0-rc.12", default-features = false, features = ["std","ndarray","tracing","download-binaries","tls-native","copy-dylibs","api-24"] }
+tokenizers  = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+hf-hub      = { version = "1.0.0-rc.1", default-features = false, features = ["blocking","rustls-tls"] }
+ndarray     = "0.16"
+
+bitpolar = { version = "0.3", features = ["parallel","serde-support"] }
+
+lancedb     = "0.29"
+arrow       = "58"
+arrow-array = "58"
+
+clap      = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+rustyline = "18"
+
+rmcp = { version = "1.7", features = ["server","macros","transport-io"] }
+schemars = "1"
+
+zti-common       = { path = "crates/zti-common" }
+zti-hw-core      = { path = "crates/zti-hw-core" }
+zti-hw-cpu       = { path = "crates/zti-hw-cpu" }
+zti-hw-metal     = { path = "crates/zti-hw-metal" }
+zti-hw-cuda      = { path = "crates/zti-hw-cuda" }
+zti-hw-vulkan    = { path = "crates/zti-hw-vulkan" }
+zti-hw           = { path = "crates/zti-hw" }
+zti-ts-core      = { path = "crates/zti-ts-core" }
+zti-ts-rust      = { path = "crates/zti-ts-rust" }
+zti-ts-typescript = { path = "crates/zti-ts-typescript" }
+zti-ts-dart      = { path = "crates/zti-ts-dart" }
+zti-ts-solidity  = { path = "crates/zti-ts-solidity" }
+zti-tree-sitter  = { path = "crates/zti-tree-sitter" }
+zti-dsl          = { path = "crates/zti-dsl" }
+zti-embed        = { path = "crates/zti-embed" }
+zti-rerank       = { path = "crates/zti-rerank" }
+zti-store        = { path = "crates/zti-store" }
+zti-pipeline     = { path = "crates/zti-pipeline" }
+zti-protocol     = { path = "crates/zti-protocol" }
+zti-ipc-client   = { path = "crates/zti-ipc-client" }
