@@ -4,7 +4,7 @@ pub mod model;
 pub mod render;
 
 pub use chunking::{Chunk, DslChunker};
-pub use index::{SourceFile, build_index, build_index_from_sources};
+pub use index::{SourceFile, build_index, build_index_from_sources, files_by_language, glob_match_files};
 pub use model::{FileEntry, ProjectIndex};
 pub use render::tree::AsciiTreeRenderer;
 pub use render::{render_symbol_inline, InlineOpts, LEGEND_LINE};

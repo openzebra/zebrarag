@@ -74,6 +74,9 @@ rustyline = "18"
 
 rmcp = { version = "1.7", features = ["server","macros","transport-io"] }
 schemars = "1"
+globset = "0.4"
+
+indoc = "2"
 
 zti-common       = { path = "crates/zti-common" }
 zti-hw-core      = { path = "crates/zti-hw-core" }

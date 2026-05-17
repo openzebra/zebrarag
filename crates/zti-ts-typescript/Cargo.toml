@@ -11,3 +11,6 @@ tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true
 zti-ts-core.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

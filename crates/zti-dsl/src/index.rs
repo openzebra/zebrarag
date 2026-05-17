@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use ignore::WalkBuilder;
 
+use zti_ts_core::walker::LanguageFrontend;
 use zti_tree_sitter::{Language, detect_from_path, frontend_for};
 
 use crate::model::{FileEntry, ProjectIndex};
@@ -268,4 +269,191 @@ fn build_forward_edges(edges: &[zti_ts_core::types::Edge]) -> HashMap<u32, Vec<z
         forward.entry(edge.from).or_default().push(edge.clone());
     }
     forward
+}
+
+pub fn files_by_language(files: &[FileEntry], lang: zti_tree_sitter::Language) -> Vec<u16> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.language == lang)
+        .map(|(i, _)| i as u16)
+        .collect()
+}
+
+pub fn glob_match_files(files: &[FileEntry], root: &str, pattern: &str) -> Result<Vec<u16>, String> {
+    let glob = globset::Glob::new(pattern)
+        .map_err(|e| format!("Invalid glob '{}': {}", pattern, e))?
+        .compile_matcher();
+    Ok(files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            let relative = f.path.strip_prefix(root).unwrap_or(&f.path);
+            let rel = relative.trim_start_matches('/');
+            glob.is_match(rel) || glob.is_match(&f.path)
+        })
+        .map(|(i, _)| i as u16)
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use zti_ts_core::types::{Edge, EdgeKind, Kind, Symbol, Target};
+    use zti_tree_sitter::Language;
+
+    use crate::model::{FileEntry, ProjectIndex};
+
+    use super::*;
+
+    fn sym(id: u32, name: &str, qualified: &str, file_idx: u16) -> Symbol {
+        Symbol {
+            id,
+            kind: Kind::Method,
+            name: name.to_string(),
+            qualified: qualified.to_string(),
+            file_idx,
+            line: 1,
+            end_line: 1,
+            signature: String::new(),
+            doc: None,
+            base_classes: Vec::new(),
+            parent: None,
+            traits: Vec::new(),
+        }
+    }
+
+    fn file_entry(idx: u16, path: &str) -> FileEntry {
+        let _ = idx;
+        FileEntry {
+            path: path.to_string(),
+            language: Language::Rust,
+            imports: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn ambiguous_bare_name_is_not_in_qualified_map() {
+        let symbols = vec![
+            sym(0, "parse", "parse", 0),
+            sym(1, "parse", "parse", 1),
+            sym(2, "parse", "parse", 2),
+        ];
+        let files = vec![
+            file_entry(0, "/p/a.rs"),
+            file_entry(1, "/p/b.rs"),
+            file_entry(2, "/p/c.rs"),
+        ];
+        let map = build_qualified_map(&symbols, &files);
+        assert!(
+            !map.contains_key("parse"),
+            "ambiguous bare name `parse` must not collapse to a single id"
+        );
+        assert_eq!(map.get("a::parse"), Some(&0));
+        assert_eq!(map.get("b::parse"), Some(&1));
+        assert_eq!(map.get("c::parse"), Some(&2));
+    }
+
+    #[test]
+    fn unique_bare_name_resolves() {
+        let symbols = vec![sym(0, "only_one", "only_one", 0)];
+        let files = vec![file_entry(0, "/p/a.rs")];
+        let map = build_qualified_map(&symbols, &files);
+        assert_eq!(map.get("only_one"), Some(&0));
+    }
+
+    #[test]
+    fn resolve_in_same_file_finds_sibling() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "parse", "parse", 0),
+            sym(2, "parse", "parse", 1),
+        ];
+        let got = resolve_in_same_file("parse", 0, &symbols);
+        assert_eq!(got, Some(1), "must resolve to the parse in caller's file");
+    }
+
+    #[test]
+    fn resolve_edges_routes_ambiguous_to_same_file_not_random() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "parse", "parse", 0),
+            sym(2, "parse", "parse", 1),
+            sym(3, "parse", "parse", 2),
+        ];
+        let files = vec![
+            file_entry(0, "/p/a.rs"),
+            file_entry(1, "/p/b.rs"),
+            file_entry(2, "/p/c.rs"),
+        ];
+        let mut edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("parse".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        let map = build_qualified_map(&symbols, &files);
+        resolve_edges(&mut edges, &files, &map, &symbols);
+        match &edges[0].to {
+            Target::Resolved(id) => assert_eq!(*id, 1, "should land on same-file parse"),
+            other => panic!("expected Resolved(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_edges_external_when_no_match() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "parse", "parse", 1),
+            sym(2, "parse", "parse", 2),
+        ];
+        let files = vec![
+            file_entry(0, "/p/a.rs"),
+            file_entry(1, "/p/b.rs"),
+            file_entry(2, "/p/c.rs"),
+        ];
+        let mut edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("parse".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        let map = build_qualified_map(&symbols, &files);
+        resolve_edges(&mut edges, &files, &map, &symbols);
+        assert!(
+            matches!(edges[0].to, Target::External(_)),
+            "ambiguous, no same-file sibling -> External, got {:?}",
+            edges[0].to
+        );
+    }
+
+    #[test]
+    fn files_by_language_returns_correct_indices() {
+        let files = vec![
+            FileEntry { path: "/p/a.rs".into(), language: Language::Rust, imports: HashMap::new() },
+            FileEntry { path: "/p/b.dart".into(), language: Language::Dart, imports: HashMap::new() },
+            FileEntry { path: "/p/c.rs".into(), language: Language::Rust, imports: HashMap::new() },
+        ];
+        assert_eq!(files_by_language(&files, Language::Rust), vec![0u16, 2u16]);
+        assert_eq!(files_by_language(&files, Language::Dart), vec![1u16]);
+        assert!(files_by_language(&files, Language::Ts).is_empty());
+    }
+
+    #[test]
+    fn glob_match_files_returns_err_on_bad_glob() {
+        let files = vec![
+            FileEntry { path: "/p/a.rs".into(), language: Language::Rust, imports: HashMap::new() },
+        ];
+        assert!(glob_match_files(&files, "/p", "[invalid").is_err());
+    }
+
+    #[test]
+    fn glob_match_files_matches_paths() {
+        let files = vec![
+            FileEntry { path: "/p/src/a.rs".into(), language: Language::Rust, imports: HashMap::new() },
+            FileEntry { path: "/p/src/b.dart".into(), language: Language::Dart, imports: HashMap::new() },
+            FileEntry { path: "/p/lib/c.rs".into(), language: Language::Rust, imports: HashMap::new() },
+        ];
+        let result = glob_match_files(&files, "/p", "src/**/*.rs").unwrap();
+        assert_eq!(result, vec![0u16]);
+    }
 }

@@ -14,3 +14,7 @@ zti-common.workspace = true
 ignore.workspace = true
 blake3.workspace = true
 serde.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

@@ -4,4 +4,4 @@ pub mod registry;
 
 pub use detect::detect_from_path;
 pub use parse_args::{parse_kinds, parse_language};
-pub use registry::{Language, frontend_for};
+pub use registry::{Frontend, Language, frontend_for};

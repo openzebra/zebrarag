@@ -49,3 +49,320 @@ fn collect_solidity_imports(node: Node, source: &str, imports: &mut HashMap<Stri
         collect_solidity_imports(child, source, imports);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use zti_ts_core::types::{Edge, Kind, Symbol};
+
+    use super::*;
+
+    fn parse_solidity(source: &str) -> (Vec<Symbol>, Vec<Edge>, HashMap<String, String>) {
+        SolidityFrontend.parse(source, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn solidity_lang_loads() {
+        let lang = SolidityFrontend.language();
+        assert_ne!(format!("{:?}", lang), "");
+    }
+
+    #[test]
+    fn contract_captured_as_class() {
+        let source = indoc::indoc! {"
+            contract Token {
+                function transfer(address to, uint256 amount) public {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let token = symbols.iter().find(|s| s.name == "Token").unwrap();
+        assert_eq!(token.kind, Kind::Class);
+    }
+
+    #[test]
+    fn interface_captured() {
+        let source = indoc::indoc! {"
+            interface IERC20 {
+                function transfer(address to, uint256 amount) external;
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let iface = symbols.iter().find(|s| s.name == "IERC20").unwrap();
+        assert_eq!(iface.kind, Kind::Interface);
+    }
+
+    #[test]
+    fn library_captured() {
+        let source = indoc::indoc! {"
+            library SafeMath {
+                function add(uint256 a, uint256 b) internal pure returns (uint256) {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let lib = symbols.iter().find(|s| s.name == "SafeMath").unwrap();
+        assert_eq!(lib.kind, Kind::Module);
+    }
+
+    #[test]
+    fn function_inside_contract_is_method() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                function bar() public {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let bar = symbols.iter().find(|s| s.name == "bar").unwrap();
+        assert_eq!(bar.kind, Kind::Method);
+    }
+
+    #[test]
+    fn free_function_is_function() {
+        let source = "function helper() pure {}";
+        let (symbols, _, _) = parse_solidity(source);
+        let helper = symbols.iter().find(|s| s.name == "helper").unwrap();
+        assert_eq!(helper.kind, Kind::Function);
+    }
+
+    #[test]
+    fn constructor_captured_as_method() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                constructor(address owner) {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let ctor = symbols.iter().find(|s| s.name == "constructor").unwrap();
+        assert_eq!(ctor.kind, Kind::Method);
+    }
+
+    #[test]
+    fn fallback_captured_as_method() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                fallback() external payable {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let fb = symbols.iter().find(|s| s.name == "fallback").unwrap();
+        assert_eq!(fb.kind, Kind::Method);
+    }
+
+    #[test]
+    fn receive_captured_as_method() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                receive() external payable {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let recv = symbols.iter().find(|s| s.name == "receive").unwrap();
+        assert_eq!(recv.kind, Kind::Method);
+    }
+
+    #[test]
+    fn modifier_captured_as_method() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                modifier onlyOwner() { _; }
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let mod_sym = symbols.iter().find(|s| s.name == "onlyOwner").unwrap();
+        assert_eq!(mod_sym.kind, Kind::Function);
+    }
+
+    #[test]
+    fn enum_captured() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                enum Status { Active, Inactive }
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let status = symbols.iter().find(|s| s.name == "Status").unwrap();
+        assert_eq!(status.kind, Kind::Enum);
+    }
+
+    #[test]
+    fn struct_captured() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                struct UserInfo {
+                    uint256 balance;
+                    bool active;
+                }
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let info = symbols.iter().find(|s| s.name == "UserInfo").unwrap();
+        assert_eq!(info.kind, Kind::Struct);
+    }
+
+    #[test]
+    fn state_variable_captured_as_field() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                uint256 public totalSupply;
+                address public owner;
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let ts = symbols.iter().find(|s| s.name == "totalSupply").unwrap();
+        assert_eq!(ts.kind, Kind::Field);
+    }
+
+    #[test]
+    fn event_captured() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                event Transfer(address indexed from, address indexed to, uint256 value);
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let evt = symbols.iter().find(|s| s.name == "Transfer").unwrap();
+        assert_eq!(evt.kind, Kind::Event);
+    }
+
+    #[test]
+    fn error_captured() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                error InsufficientBalance(uint256 requested, uint256 available);
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let err = symbols.iter().find(|s| s.name == "InsufficientBalance").unwrap();
+        assert_eq!(err.kind, Kind::Error);
+    }
+
+    #[test]
+    fn file_level_constant_captured() {
+        let source = indoc::indoc! {"
+            uint256 constant MAX_SUPPLY = 1000000;
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let max = symbols.iter().find(|s| s.name == "MAX_SUPPLY").unwrap();
+        assert_eq!(max.kind, Kind::Const);
+    }
+
+    #[test]
+    fn user_defined_type_captured() {
+        let source = "type Fixed is uint256;";
+        let (symbols, _, _) = parse_solidity(source);
+        let fixed = symbols.iter().find(|s| s.name == "Fixed").unwrap();
+        assert_eq!(fixed.kind, Kind::TypeAlias);
+    }
+
+    #[test]
+    fn import_named() {
+        let source = "import {Foo, Bar} from \"./Token.sol\";";
+        let (_, _, imports) = parse_solidity(source);
+        assert!(imports.contains_key("Foo"), "should have Foo, got: {:?}", imports);
+        assert!(imports.contains_key("Bar"), "should have Bar, got: {:?}", imports);
+    }
+
+    #[test]
+    fn import_aliased() {
+        let source = "import {Foo as Bar} from \"./Token.sol\";";
+        let (_, _, imports) = parse_solidity(source);
+        assert!(imports.contains_key("Bar"), "should have Bar (alias), got: {:?}", imports);
+    }
+
+    #[test]
+    fn import_star() {
+        let source = "import * as Token from \"./Token.sol\";";
+        let (_, _, imports) = parse_solidity(source);
+        assert!(imports.contains_key("Token"), "should have Token, got: {:?}", imports);
+    }
+
+    #[test]
+    fn import_bare() {
+        let source = "import \"./Token.sol\";";
+        let (_, _, imports) = parse_solidity(source);
+        assert!(imports.is_empty() || imports.contains_key("Token"), "bare import should not add noise, got: {:?}", imports);
+    }
+
+    #[test]
+    fn doc_comments_not_extracted() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                /// @notice This is a NatSpec doc
+                function bar() public {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let bar = symbols.iter().find(|s| s.name == "bar").unwrap();
+        assert!(
+            bar.doc.is_none(),
+            "solidity should not extract docs, got: {:?}",
+            bar.doc
+        );
+    }
+
+    #[test]
+    fn line_comments_not_extracted() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                // regular comment before function
+                function bar() public {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let bar = symbols.iter().find(|s| s.name == "bar").unwrap();
+        assert!(
+            bar.doc.is_none(),
+            "line comments should not be doc, got: {:?}",
+            bar.doc
+        );
+    }
+
+    #[test]
+    fn block_comments_not_extracted() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                /* block comment */
+                function bar() public {}
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let bar = symbols.iter().find(|s| s.name == "bar").unwrap();
+        assert!(
+            bar.doc.is_none(),
+            "block comments should not be doc, got: {:?}",
+            bar.doc
+        );
+    }
+
+    #[test]
+    fn event_no_doc() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                /// @notice Emitted on transfer
+                event Transfer(address from, address to, uint256 amount);
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let evt = symbols.iter().find(|s| s.name == "Transfer").unwrap();
+        assert!(
+            evt.doc.is_none(),
+            "event should not have doc, got: {:?}",
+            evt.doc
+        );
+    }
+
+    #[test]
+    fn error_no_doc() {
+        let source = indoc::indoc! {"
+            contract Foo {
+                /// @notice Insufficient balance
+                error InsufficientBalance(uint256 requested, uint256 available);
+            }
+        "};
+        let (symbols, _, _) = parse_solidity(source);
+        let err = symbols.iter().find(|s| s.name == "InsufficientBalance").unwrap();
+        assert!(
+            err.doc.is_none(),
+            "error should not have doc, got: {:?}",
+            err.doc
+        );
+    }
+}

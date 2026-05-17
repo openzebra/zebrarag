@@ -8,8 +8,13 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
+tree-sitter.workspace = true
 zti-ts-core.workspace = true
 zti-ts-rust.workspace = true
 zti-ts-typescript.workspace = true
 zti-ts-dart.workspace = true
 zti-ts-solidity.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

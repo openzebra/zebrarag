@@ -6,7 +6,7 @@ use zti_ts_core::types::{Edge, EdgeKind, Kind, Target};
 
 use crate::model::ProjectIndex;
 
-pub const LEGEND_LINE: &str = "# k short = Kind   f=fn m=method s=struct e=enum C=class I=iface t=typealias c=const v=static .=field/variant E=event X=error M=mod";
+pub const LEGEND_LINE: &str = "# k short = Kind   f#=fn m#=method s#=struct e#=enum C#=class I#=iface t#=typealias c#=const v#=static .=field/variant E#=event X#=error M#=mod";
 
 pub struct InlineOpts {
     pub max_inline_targets: usize,
@@ -222,4 +222,131 @@ pub fn render_files_only(index: &ProjectIndex, file_indices: &[u16]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use zti_ts_core::types::Kind;
+    use zti_tree_sitter::Language;
+
+    use crate::model::{FileEntry, ProjectIndex};
+
+    use super::*;
+
+    fn mk_index(symbols: Vec<zti_ts_core::types::Symbol>, files: Vec<FileEntry>) -> ProjectIndex {
+        ProjectIndex {
+            symbols,
+            edges: Vec::new(),
+            files,
+            qualified_map: HashMap::new(),
+            reverse_edges: HashMap::new(),
+            forward_edges: HashMap::new(),
+            root: "/p".into(),
+        }
+    }
+
+    fn mk_sym(id: u32, name: &str, kind: Kind, file_idx: u16) -> zti_ts_core::types::Symbol {
+        zti_ts_core::types::Symbol {
+            id,
+            kind,
+            name: name.to_string(),
+            qualified: name.to_string(),
+            file_idx,
+            line: 1,
+            end_line: 1,
+            signature: String::new(),
+            doc: None,
+            base_classes: Vec::new(),
+            parent: None,
+            traits: Vec::new(),
+        }
+    }
+
+    fn mk_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            language: Language::Rust,
+            imports: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn legend_mentions_every_emitted_kind_prefix() {
+        for marker in ["f#", "m#", "c#", "v#", "s#", "C#", "e#", "t#", "I#", "M#"] {
+            assert!(
+                LEGEND_LINE.contains(marker),
+                "LEGEND_LINE missing marker `{}`",
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn no_trailing_whitespace_on_any_line() {
+        let idx = mk_index(
+            vec![mk_sym(0, "Empty", Kind::Struct, 0)],
+            vec![mk_file("/p/a.rs")],
+        );
+        let out = DslRenderer::new(&idx, 8000).render(None, None);
+        for (i, line) in out.lines().enumerate() {
+            assert_eq!(
+                line.trim_end(),
+                line,
+                "trailing whitespace on line {}: <{}>",
+                i + 1,
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn struct_with_no_fields_renders_clean() {
+        let idx = mk_index(
+            vec![mk_sym(0, "Empty", Kind::Struct, 0)],
+            vec![mk_file("/p/a.rs")],
+        );
+        let out = DslRenderer::new(&idx, 8000).render(None, None);
+        assert!(out.contains("s#0 Empty"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn struct_with_fields_renders_field_list() {
+        let mut field = mk_sym(1, "x", Kind::Field, 0);
+        field.parent = Some(0);
+        let idx = mk_index(
+            vec![mk_sym(0, "Point", Kind::Struct, 0), field],
+            vec![mk_file("/p/a.rs")],
+        );
+        let out = DslRenderer::new(&idx, 8000).render(None, None);
+        assert!(out.contains("s#0 Point"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn render_files_only_emits_tree_without_symbols() {
+        let idx = mk_index(
+            vec![
+                mk_sym(0, "foo", Kind::Function, 0),
+                mk_sym(1, "bar", Kind::Function, 1),
+                mk_sym(2, "Baz", Kind::Struct, 2),
+            ],
+            vec![
+                mk_file("/p/src/main.rs"),
+                mk_file("/p/src/lib.rs"),
+                mk_file("/p/src/mod.rs"),
+            ],
+        );
+        let all: Vec<u16> = (0..3).collect();
+        let out = render_files_only(&idx, &all);
+
+        assert!(out.starts_with("FILES"), "should start with FILES header, got:\n{}", out);
+        assert!(out.contains("src/"), "should contain src dir, got:\n{}", out);
+        assert!(out.contains("main.rs"), "should contain main.rs, got:\n{}", out);
+        assert!(out.contains("lib.rs"), "should contain lib.rs, got:\n{}", out);
+        assert!(out.contains("mod.rs"), "should contain mod.rs, got:\n{}", out);
+        assert!(!out.contains("f#"), "should NOT contain symbol DSL, got:\n{}", out);
+        assert!(!out.contains("s#"), "should NOT contain symbol DSL, got:\n{}", out);
+        assert!(!out.contains("foo"), "should NOT contain symbol names, got:\n{}", out);
+    }
 }
