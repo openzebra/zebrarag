@@ -1,6 +1,8 @@
+use std::io::Write;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
 
@@ -30,8 +32,26 @@ async fn async_main() -> Result<()> {
         .init();
 
     let pid_path = zti_common::paths::daemon_pid()?;
-    let pid = std::process::id().to_string();
-    std::fs::write(&pid_path, &pid)?;
+    let mut pid_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&pid_path)
+        .with_context(|| format!("opening {}", pid_path.display()))?;
+
+    if let Err(e) = pid_file.try_lock_exclusive() {
+        eprintln!(
+            "another daemon is running (cannot lock {}): {}",
+            pid_path.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+
+    pid_file.set_len(0)?;
+    write!(pid_file, "{}", std::process::id())?;
+    pid_file.flush()?;
 
     let socket_path = zti_common::paths::daemon_socket()?;
     if socket_path.exists() {
@@ -46,7 +66,7 @@ async fn async_main() -> Result<()> {
     let hw = zti_hw::probe();
     tracing::info!(device = ?hw.device, "hardware detected");
 
-    let state = Arc::new(DaemonState::new(engine, hw));
+    let state = Arc::new(DaemonState::new(engine, hw, pid_file));
 
     let listener = UnixListener::bind(&socket_path)?;
     tracing::info!("daemon listening on {}", socket_path.display());

@@ -1,35 +1,38 @@
-use anyhow::Result;
-
 pub enum PoolingStrategy {
     Mean,
     Cls,
 }
 
-pub fn pool(strategy: &PoolingStrategy, embeddings: &[&[f32]], attention_mask: &[u32]) -> Result<Vec<f32>> {
-    if embeddings.is_empty() {
-        anyhow::bail!("empty embeddings for pooling");
-    }
-    let dim = embeddings[0].len();
+/// Pool a single row from a contiguous (seq * dim) slice into a `Vec<f32>` of
+/// length `dim`. Mean pooling respects the attention mask; CLS takes index 0.
+/// Zero-copy on the input; returns the pooled vector owned (downstream
+/// normalize mutates it in-place, so we can't return a borrow).
+pub fn pool_row(
+    strategy: &PoolingStrategy,
+    data: &[f32],
+    dim: usize,
+    seq: usize,
+    mask: &[u32],
+) -> Vec<f32> {
     match strategy {
         PoolingStrategy::Mean => {
             let mut sum = vec![0.0f32; dim];
             let mut count = 0u32;
-            for (i, emb) in embeddings.iter().enumerate() {
-                if attention_mask.get(i).copied().unwrap_or(1) == 1 {
-                    for (j, s) in sum.iter_mut().enumerate() {
-                        *s += emb[j];
+            for j in 0..seq {
+                if mask.get(j).copied().unwrap_or(1) == 1 {
+                    let off = j * dim;
+                    for k in 0..dim {
+                        sum[k] += data[off + k];
                     }
                     count += 1;
                 }
             }
-            if count == 0 {
-                count = 1;
+            let c = if count == 0 { 1.0 } else { count as f32 };
+            for x in &mut sum {
+                *x /= c;
             }
-            Ok(sum.into_iter().map(|v| v / count as f32).collect())
+            sum
         }
-        PoolingStrategy::Cls => {
-            let cls = embeddings.first().ok_or_else(|| anyhow::anyhow!("no CLS token"))?;
-            Ok(cls.to_vec())
-        }
+        PoolingStrategy::Cls => data[..dim].to_vec(),
     }
 }

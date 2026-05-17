@@ -13,6 +13,18 @@ pub enum Language {
     Solidity,
 }
 
+impl Language {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Language::Rust => "rust",
+            Language::Ts => "typescript",
+            Language::Tsx => "tsx",
+            Language::Dart => "dart",
+            Language::Solidity => "solidity",
+        }
+    }
+}
+
 pub fn frontend_for(lang: Language) -> Box<dyn LanguageFrontend> {
     match lang {
         Language::Rust => Box::new(RustFrontend),

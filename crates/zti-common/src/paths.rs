@@ -3,9 +3,14 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 pub fn data_dir() -> Result<PathBuf> {
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("zebra_tree_indexer");
+    let dir = match std::env::var_os("ZEBRA_DATA_DIR") {
+        Some(s) => PathBuf::from(s),
+        None => dirs::home_dir()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ZEBRA_DATA_DIR is unset and home_dir() is unresolvable")
+            })?
+            .join(".zebra_tree_indexer"),
+    };
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }

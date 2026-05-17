@@ -40,10 +40,21 @@ const BERT_QUERY_PREFIX: &str = "Represent this sentence for searching relevant 
 
 const BERT_FAMILY_PREFIXES: &[&str] = &["bge-", "mxbai-", "gte-", "e5-"];
 
+const ONNX_CANDIDATES: &[&str] = &[
+    "onnx/model.onnx",
+    "model.onnx",
+    "onnx/model_quantized.onnx",
+];
+
+const TOKENIZER_CANDIDATES: &[&str] = &["tokenizer.json", "onnx/tokenizer.json"];
+
 fn lookup_quirks(model_name: &str) -> Option<FamilyQuirks> {
     let lower = model_name.to_lowercase();
 
-    if lower.contains("bge-small-en-v1.5") || lower.contains("bge-base-en-v1.5") || lower.contains("bge-large-en-v1.5") {
+    if lower.contains("bge-small-en-v1.5")
+        || lower.contains("bge-base-en-v1.5")
+        || lower.contains("bge-large-en-v1.5")
+    {
         return Some(FamilyQuirks {
             query_prefix: Some(BERT_QUERY_PREFIX),
             pooling: PoolingStrategyEnum::Cls,
@@ -72,33 +83,23 @@ pub fn resolve_profile(model_id: &str) -> Result<ModelProfile> {
 
     let quirks = lookup_quirks(model_id);
 
-    let pooling = quirks.as_ref().map(|q| q.pooling).unwrap_or(PoolingStrategyEnum::Mean);
+    let pooling = quirks
+        .as_ref()
+        .map(|q| q.pooling)
+        .unwrap_or(PoolingStrategyEnum::Mean);
     let query_prefix = quirks.and_then(|q| q.query_prefix.map(String::from));
-    let dim = guess_dim(model_id);
-    let max_length = 512;
 
+    // dim and max_length are placeholders; engine overrides them after the
+    // ONNX session and tokenizer are loaded.
     Ok(ModelProfile {
         model_id: model_id.to_string(),
         onnx_path,
         tokenizer_path,
-        dim,
-        max_length,
+        dim: 0,
+        max_length: 512,
         pooling,
         query_prefix,
     })
-}
-
-fn guess_dim(model_id: &str) -> usize {
-    let lower = model_id.to_lowercase();
-    if lower.contains("small") {
-        384
-    } else if lower.contains("base") {
-        768
-    } else if lower.contains("large") {
-        1024
-    } else {
-        768
-    }
 }
 
 pub fn download_model(model_id: &str) -> Result<PathBuf> {
@@ -118,7 +119,7 @@ pub fn download_model(model_id: &str) -> Result<PathBuf> {
         tracing::info!("downloading ONNX model for {}", model_id);
         let client = hf_hub::HFClientSync::new()?;
         let repo = client.model(owner, name);
-        let downloaded = repo.download_file().filename("onnx/model.onnx".to_string()).send()?;
+        let downloaded = try_download(&repo, ONNX_CANDIDATES)?;
         std::fs::copy(&downloaded, &onnx_path)?;
     }
 
@@ -126,9 +127,37 @@ pub fn download_model(model_id: &str) -> Result<PathBuf> {
         tracing::info!("downloading tokenizer for {}", model_id);
         let client = hf_hub::HFClientSync::new()?;
         let repo = client.model(owner, name);
-        let downloaded = repo.download_file().filename("tokenizer.json".to_string()).send()?;
+        let downloaded = try_download(&repo, TOKENIZER_CANDIDATES)?;
         std::fs::copy(&downloaded, &tokenizer_path)?;
     }
 
     Ok(model_dir)
+}
+
+fn try_download(
+    repo: &hf_hub::HFRepositorySync<hf_hub::RepoTypeModel>,
+    candidates: &[&str],
+) -> Result<PathBuf> {
+    let mut last_err: Option<String> = None;
+    for fname in candidates {
+        match repo
+            .download_file()
+            .filename(fname.to_string())
+            .send()
+        {
+            Ok(p) => {
+                tracing::debug!(filename = fname, "downloaded {}", p.display());
+                return Ok(p);
+            }
+            Err(e) => {
+                tracing::debug!(filename = fname, "candidate not found: {}", e);
+                last_err = Some(format!("{} -> {}", fname, e));
+            }
+        }
+    }
+    anyhow::bail!(
+        "none of {:?} could be downloaded ({})",
+        candidates,
+        last_err.unwrap_or_else(|| "no attempts".to_string())
+    )
 }

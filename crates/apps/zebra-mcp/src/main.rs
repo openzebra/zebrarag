@@ -182,10 +182,17 @@ impl ZebraMcpServer {
     async fn index(&self, Parameters(params): Parameters<IndexParams>) -> String {
         async {
             let mut client = self.client().await?;
-            let resp = client.request(Request::Index(IndexReq {
-                project_root: params.project_root,
-                refresh: params.refresh.unwrap_or(false),
-            })).await?;
+            // Index streams IndexProgress frames; in MCP we just drain them
+            // (no progressToken plumbing yet) and report the terminal stats.
+            let resp = client
+                .request_streaming(
+                    Request::Index(IndexReq {
+                        project_root: params.project_root,
+                        refresh: params.refresh.unwrap_or(false),
+                    }),
+                    |_progress| {},
+                )
+                .await?;
             match resp {
                 Response::Index(Ok(stats)) => Ok(format!(
                     "Indexed {} chunks in {} files ({:.1}s)",

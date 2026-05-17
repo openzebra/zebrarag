@@ -1,4 +1,6 @@
-use crate::model::{Edge, EdgeKind, ProjectIndex, Target};
+use zti_ts_core::types::{Edge, EdgeKind, Target};
+
+use crate::model::ProjectIndex;
 
 pub struct AsciiTreeRenderer<'a> {
     index: &'a ProjectIndex,

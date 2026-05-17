@@ -14,8 +14,8 @@ pub fn handle(state: &DaemonState) -> Response {
         data_dir,
         socket_path,
         model_id: state.engine.profile().model_id.clone(),
-        device: format!("{:?}", state.hardware.device),
-        cpus: state.hardware.cpus,
+        device: state.hardware.device.as_str().to_string(),
+        cpus: state.hardware.cpus as u32,
         mem_total_mb: state.hardware.mem_total / (1024 * 1024),
     })
 }

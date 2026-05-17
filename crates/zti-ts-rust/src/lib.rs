@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
-use tree_sitter::Parser;
+use tree_sitter::Node;
 use zti_ts_core::config::{LangConfig, RUST_CONFIG};
-use zti_ts_core::types::{Edge, Symbol};
-use zti_ts_core::walker::{LanguageFrontend, parse_file};
+use zti_ts_core::walker::LanguageFrontend;
 
 pub struct RustFrontend;
 
@@ -17,26 +15,14 @@ impl LanguageFrontend for RustFrontend {
         &RUST_CONFIG
     }
 
-    fn parse(&self, source: &str, file_idx: u16, id_start: u32) -> Result<(Vec<Symbol>, Vec<Edge>, HashMap<String, String>)> {
-        let mut parser = Parser::new();
-        parser.set_language(&self.language())?;
-        let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("parse failed"))?;
-
-        let (symbols, edges) = parse_file(&tree, source, file_idx, self.config(), id_start);
-
-        let imports = extract_rust_imports(tree.root_node(), source);
-
-        Ok((symbols, edges, imports))
+    fn extract_imports(&self, root: Node, source: &str) -> HashMap<String, String> {
+        let mut imports = HashMap::new();
+        collect_rust_imports(root, source, &mut imports);
+        imports
     }
 }
 
-fn extract_rust_imports(node: tree_sitter::Node, source: &str) -> HashMap<String, String> {
-    let mut imports = HashMap::new();
-    collect_rust_imports(node, source, &mut imports);
-    imports
-}
-
-fn collect_rust_imports(node: tree_sitter::Node, source: &str, imports: &mut HashMap<String, String>) {
+fn collect_rust_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
     if node.kind() == "use_declaration"
         && let Some(arg) = node.child_by_field_name("argument") {
             let path = arg.utf8_text(source.as_bytes()).unwrap_or("");

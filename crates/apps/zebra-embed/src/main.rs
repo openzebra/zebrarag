@@ -82,16 +82,59 @@ async fn main() -> Result<()> {
             client.handshake().await?;
 
             let root_str = root.canonicalize()?.to_string_lossy().to_string();
-            let resp = client.request(Request::Index(IndexReq {
-                project_root: root_str,
-                refresh,
-            })).await?;
+
+            use indicatif::{ProgressBar, ProgressStyle};
+            use std::cell::RefCell;
+            let bar = RefCell::new(None::<ProgressBar>);
+
+            let resp = client
+                .request_streaming(
+                    Request::Index(IndexReq {
+                        project_root: root_str,
+                        refresh,
+                    }),
+                    |frame| {
+                        if let Response::IndexProgress(p) = frame {
+                            let mut slot = bar.borrow_mut();
+                            match p.phase.as_str() {
+                                "start" => {
+                                    if let Some(old) = slot.take() {
+                                        old.finish_and_clear();
+                                    }
+                                    let b = ProgressBar::new(p.total);
+                                    b.set_style(
+                                        ProgressStyle::with_template(
+                                            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                                        )
+                                        .unwrap_or_else(|_| ProgressStyle::default_bar()),
+                                    );
+                                    *slot = Some(b);
+                                }
+                                "embed" => {
+                                    if let Some(b) = slot.as_ref() {
+                                        b.set_position(p.current);
+                                    }
+                                }
+                                "finish" => {
+                                    if let Some(b) = slot.take() {
+                                        b.finish_with_message(p.message);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                )
+                .await?;
 
             match resp {
                 Response::Index(Ok(stats)) => {
-                    println!("Indexed {} chunks in {} files ({:.1}s)",
-                        stats.total_chunks, stats.total_files,
-                        stats.duration_ms as f64 / 1000.0);
+                    println!(
+                        "Indexed {} chunks in {} files ({:.1}s)",
+                        stats.total_chunks,
+                        stats.total_files,
+                        stats.duration_ms as f64 / 1000.0
+                    );
                 }
                 Response::Index(Err(e)) => {
                     eprintln!("Error: {}", e.message);

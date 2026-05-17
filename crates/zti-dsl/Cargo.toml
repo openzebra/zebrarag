@@ -14,4 +14,3 @@ zti-common.workspace = true
 ignore.workspace = true
 blake3.workspace = true
 serde.workspace = true
-globset = "0.4"

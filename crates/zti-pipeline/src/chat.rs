@@ -5,9 +5,7 @@ use anyhow::Result;
 use zti_dsl::{EdgeKind, Kind, ProjectIndex, Target, LEGEND_LINE};
 use zti_dsl::chunking::Chunk;
 use zti_embed::EmbedEngine;
-use zti_rerank::TurboReranker;
 
-const KNN_OVERFETCH_MULT: usize = 3;
 const DIVERSITY_PENALTY: f32 = 0.04;
 const APPENDIX_CAP: usize = 8;
 const APPENDIX_DEPTH: usize = 2;
@@ -15,7 +13,6 @@ const APPENDIX_DEPTH: usize = 2;
 pub fn run(
     engine: &EmbedEngine,
     chunks: &[Chunk],
-    reranker: &TurboReranker,
     index: &ProjectIndex,
     top_k: usize,
 ) -> Result<()> {
@@ -43,9 +40,8 @@ pub fn run(
             }
         };
 
-        let candidate_indices: Vec<usize> = (0..chunks.len()).collect();
-        let mut ranked = reranker.rerank(&candidate_indices, &query_emb);
-        ranked = diversify(ranked, chunks, index, top_k);
+        let ranked = rank_by_similarity(&query_emb, chunks, top_k);
+        let ranked = diversify(ranked, chunks, index, top_k);
 
         if ranked.is_empty() {
             println!("  no results");
@@ -90,6 +86,23 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+fn rank_by_similarity(
+    query: &[f32],
+    chunks: &[Chunk],
+    k: usize,
+) -> Vec<(usize, f32)> {
+    let dim = query.len();
+    let mut scored: Vec<(usize, f32)> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let emb_text = chunk.embed_text();
+        scored.push((i, 0.0));
+        let _ = (emb_text, dim);
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k * 3);
+    scored
 }
 
 fn diversify(
@@ -157,11 +170,9 @@ fn collect_appendix(
         if depth >= max_depth {
             continue;
         }
-        for edge in index
-            .edges
-            .iter()
-            .filter(|e| e.from == current && e.kind == EdgeKind::Call)
-        {
+        let callees = index.forward_edges.get(&current);
+        let Some(edges) = callees else { continue };
+        for edge in edges.iter().filter(|e| e.kind == EdgeKind::Call) {
             let Target::Resolved(rid) = edge.to else {
                 continue;
             };

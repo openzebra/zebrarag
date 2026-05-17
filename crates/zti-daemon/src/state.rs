@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use zti_common::ids;
 use zti_dsl::ProjectIndex;
@@ -20,20 +22,30 @@ pub struct DaemonState {
     pub hardware: Hardware,
     pub registry: RwLock<HashMap<[u8; 32], Arc<LoadedProject>>>,
     pub started_at_ns: u64,
+    pub started_at: Instant,
+    pub shutdown_tx: watch::Sender<bool>,
+    pub shutdown_rx: watch::Receiver<bool>,
+    _pid_lock: File,
 }
 
 impl DaemonState {
-    pub fn new(engine: EmbedEngine, hardware: Hardware) -> Self {
+    pub fn new(engine: EmbedEngine, hardware: Hardware, pid_lock: File) -> Self {
         let started_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         Self {
             engine: Arc::new(engine),
             hardware,
             registry: RwLock::new(HashMap::new()),
             started_at_ns,
+            started_at: Instant::now(),
+            shutdown_tx,
+            shutdown_rx,
+            _pid_lock: pid_lock,
         }
     }
 

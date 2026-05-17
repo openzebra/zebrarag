@@ -1,5 +1,6 @@
 use zti_protocol::request::ProjectMapReq;
 use zti_protocol::response::{ErrorBody, ProjectMapBody, Response};
+use zti_tree_sitter::Language;
 
 use crate::handlers::dsl_file_tree::ensure_dsl_index;
 use crate::state::DaemonState;
@@ -14,7 +15,14 @@ pub async fn handle(req: &ProjectMapReq, state: &DaemonState) -> Response {
         }
     };
 
-    let index = ensure_dsl_index(&project, &req.project_root).await;
+    let index = match ensure_dsl_index(&project, &req.project_root).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return Response::DslProjectMap(Err(ErrorBody {
+                message: e.to_string(),
+            }));
+        }
+    };
 
     let lang = parse_language(&req.language);
     let file_filter: Option<Vec<u16>> = lang.map(|l| {
@@ -39,27 +47,16 @@ pub async fn handle(req: &ProjectMapReq, state: &DaemonState) -> Response {
     Response::DslProjectMap(Ok(ProjectMapBody { text }))
 }
 
-fn parse_language(s: &str) -> Option<zti_dsl::model::Language> {
+fn parse_language(s: &str) -> Option<Language> {
     match s.to_ascii_lowercase().as_str() {
-        "rs" | "rust" => Some(zti_dsl::model::Language::Rust),
-        "ts" | "tsx" | "typescript" => Some(zti_dsl::model::Language::TypeScript),
-        "dart" => Some(zti_dsl::model::Language::Dart),
-        "sol" | "solidity" => Some(zti_dsl::model::Language::Solidity),
+        "rs" | "rust" => Some(Language::Rust),
+        "ts" | "tsx" | "typescript" => Some(Language::Ts),
+        "dart" => Some(Language::Dart),
+        "sol" | "solidity" => Some(Language::Solidity),
         _ => None,
     }
 }
 
-fn parse_kinds(kinds: &[String]) -> Vec<zti_dsl::model::Kind> {
-    kinds.iter().filter_map(|k| match k.as_str() {
-        "fn" | "function" => Some(zti_dsl::model::Kind::Function),
-        "method" => Some(zti_dsl::model::Kind::Method),
-        "struct" => Some(zti_dsl::model::Kind::Struct),
-        "enum" => Some(zti_dsl::model::Kind::Enum),
-        "class" => Some(zti_dsl::model::Kind::Class),
-        "interface" => Some(zti_dsl::model::Kind::Interface),
-        "const" => Some(zti_dsl::model::Kind::Const),
-        "static" => Some(zti_dsl::model::Kind::Static),
-        "module" | "mod" => Some(zti_dsl::model::Kind::Module),
-        _ => None,
-    }).collect()
+fn parse_kinds(kinds: &[String]) -> Vec<zti_ts_core::types::Kind> {
+    kinds.iter().filter_map(|k| zti_ts_core::types::Kind::from_str_lossy(k)).collect()
 }

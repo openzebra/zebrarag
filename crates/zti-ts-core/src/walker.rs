@@ -4,7 +4,7 @@ use anyhow::Result;
 use tree_sitter::{Node, Tree, TreeCursor};
 
 use crate::config::{extract_name, LangConfig};
-use crate::types::{Edge, EdgeKind, Symbol, Target};
+use crate::types::{Edge, EdgeKind, ParseResult, Symbol, Target};
 
 pub fn parse_file(
     tree: &Tree,
@@ -104,8 +104,8 @@ fn walk_node(cursor: &mut TreeCursor, symbols: &mut Vec<Symbol>, state: &mut Wal
         symbols.push(Symbol {
             id,
             kind,
-            name: name.clone(),
-            qualified: qualified.clone(),
+            name,
+            qualified,
             file_idx: state.file_idx,
             line,
             end_line,
@@ -116,7 +116,8 @@ fn walk_node(cursor: &mut TreeCursor, symbols: &mut Vec<Symbol>, state: &mut Wal
             traits,
         });
 
-        state.push_scope(id, name);
+        let name_for_scope = symbols.last().unwrap().name.clone();
+        state.push_scope(id, name_for_scope);
 
         collect_edges(&node, state, id);
 
@@ -198,23 +199,43 @@ fn collect_identifiers(node: &Node, source: &str, out: &mut Vec<String>) {
 }
 
 fn collect_edges(node: &Node, state: &mut WalkState, from_id: u32) {
-    collect_call_edges(node, state, from_id);
-    collect_ref_edges(node, state, from_id);
-}
-
-fn collect_call_edges(node: &Node, state: &mut WalkState, from_id: u32) {
     let call_kind = state.config.call_node;
     let call_field = state.config.call_field;
+    let ref_kind = state.config.ref_node;
 
-    for child in node.children(&mut node.walk()) {
-        if child.kind() == call_kind
-            && let Some(func_node) = child.child_by_field_name(call_field) {
+    collect_edges_recursive(node, state, from_id, call_kind, call_field, ref_kind);
+}
+
+fn collect_edges_recursive(
+    node: &Node,
+    state: &mut WalkState,
+    from_id: u32,
+    call_kind: &'static str,
+    call_field: &'static str,
+    ref_kind: &'static str,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+
+        if kind == call_kind {
+            if let Some(func_node) = child.child_by_field_name(call_field) {
                 let callee = resolve_call_name(&func_node, state.source);
                 let line = child.start_position().row as u32 + 1;
                 state.add_edge(from_id, Target::Unresolved(callee), EdgeKind::Call, line);
             }
-        if child.kind() != call_kind && child.child_count() > 0 {
-            collect_call_edges(&child, state, from_id);
+        }
+
+        if kind == ref_kind {
+            let text = child.utf8_text(state.source.as_bytes()).unwrap_or("").to_string();
+            let line = child.start_position().row as u32 + 1;
+            if !text.is_empty() {
+                state.add_edge(from_id, Target::Unresolved(text), EdgeKind::Ref, line);
+            }
+        }
+
+        if child.child_count() > 0 {
+            collect_edges_recursive(&child, state, from_id, call_kind, call_field, ref_kind);
         }
     }
 }
@@ -238,52 +259,19 @@ fn resolve_call_name(node: &Node, source: &str) -> String {
     node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
 }
 
-fn collect_ref_edges(node: &Node, state: &mut WalkState, from_id: u32) {
-    let ref_kind = state.config.ref_node;
-
-    for child in node.children(&mut node.walk()) {
-        if child.kind() == ref_kind {
-            let text = child.utf8_text(state.source.as_bytes()).unwrap_or("").to_string();
-            let line = child.start_position().row as u32 + 1;
-            if !text.is_empty() {
-                state.add_edge(from_id, Target::Unresolved(text), EdgeKind::Ref, line);
-            }
-        }
-    }
-}
-
 pub trait LanguageFrontend {
     fn language(&self) -> tree_sitter::Language;
     fn config(&self) -> &'static LangConfig;
-    fn parse(&self, source: &str, file_idx: u16, id_start: u32) -> Result<(Vec<Symbol>, Vec<Edge>, HashMap<String, String>)>;
-}
+    fn extract_imports(&self, root: Node, source: &str) -> HashMap<String, String>;
 
-pub fn extract_imports_generic(node: &Node, source: &str, import_node_kind: &str) -> HashMap<String, String> {
-    let mut imports = HashMap::new();
-    do_extract_imports(node, source, import_node_kind, &mut imports);
-    imports
-}
+    fn parse(&self, source: &str, file_idx: u16, id_start: u32) -> ParseResult {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&self.language())?;
+        let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("parse failed"))?;
 
-fn do_extract_imports(node: &Node, source: &str, import_kind: &str, imports: &mut HashMap<String, String>) {
-    if node.kind() == import_kind {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
-        let local_name = extract_import_local_name(node, source);
-        if let Some(name) = local_name {
-            imports.entry(name).or_insert(text);
-        }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        do_extract_imports(&child, source, import_kind, imports);
-    }
-}
+        let (symbols, edges) = parse_file(&tree, source, file_idx, self.config(), id_start);
+        let imports = self.extract_imports(tree.root_node(), source);
 
-fn extract_import_local_name(node: &Node, source: &str) -> Option<String> {
-    for child in node.children(&mut node.walk()) {
-        let kind = child.kind();
-        if kind == "identifier" || kind == "property_identifier" {
-            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
-        }
+        Ok((symbols, edges, imports))
     }
-    None
 }

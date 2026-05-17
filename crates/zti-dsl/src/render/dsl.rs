@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::model::{Edge, EdgeKind, Kind, ProjectIndex, Target};
+use zti_ts_core::types::{Edge, EdgeKind, Kind, Target};
+
+use crate::model::ProjectIndex;
 
 pub const LEGEND_LINE: &str = "# k short = Kind   f=fn m=method s=struct e=enum C=class I=iface t=typealias c=const v=static .=field/variant E=event X=error M=mod";
 
@@ -83,10 +85,10 @@ pub fn render_symbol_inline(
         .map(|v| v.iter().filter(|e| e.kind == EdgeKind::Call).collect())
         .unwrap_or_default();
 
-    let callees: Vec<&Edge> = index.edges
-        .iter()
-        .filter(|e| e.from == id && e.kind == EdgeKind::Call)
-        .collect();
+    let callees: Vec<&Edge> = index.forward_edges
+        .get(&id)
+        .map(|v| v.iter().filter(|e| e.kind == EdgeKind::Call).collect())
+        .unwrap_or_default();
 
     if !callers.is_empty() {
         out.push(' ');

@@ -12,6 +12,7 @@ pub fn chunks_schema(dim: usize) -> Schema {
         Field::new("start_line", DataType::UInt32, false),
         Field::new("end_line", DataType::UInt32, false),
         Field::new("content", DataType::Utf8, false),
+        Field::new("turbo_code", DataType::Binary, true),
         Field::new("indexed_at_ns", DataType::UInt64, false),
         Field::new(
             "embedding",

@@ -5,7 +5,6 @@ use zti_rerank::TurboReranker;
 use zti_store::chunks_table::ChunkHit;
 
 const KNN_OVERFETCH_MULT: usize = 3;
-const DIVERSITY_PENALTY: f32 = 0.04;
 
 pub struct SearchOpts {
     pub limit: usize,
@@ -25,14 +24,25 @@ pub async fn search(
     reranker: &TurboReranker,
     opts: &SearchOpts,
 ) -> Result<Vec<Hit>> {
-    let query_emb = engine.embed_query(query)?;
+    let query_emb = engine.embed_query_async(query).await?;
 
     let raw_k = opts.limit.saturating_mul(KNN_OVERFETCH_MULT);
     let chunks_table = db.chunks_table(engine.dim()).await?;
-    let candidates = chunks_table.knn(&query_emb, raw_k).await?;
+    let candidates = chunks_table
+        .knn(
+            &query_emb,
+            raw_k,
+            opts.languages.as_deref(),
+            opts.path_glob.as_deref(),
+        )
+        .await?;
 
-    let candidate_indices: Vec<usize> = (0..candidates.len()).collect();
-    let ranked = reranker.rerank(&candidate_indices, &query_emb);
+    let rerank_input: Vec<(&[u8], f32)> = candidates
+        .iter()
+        .map(|c| (c.turbo_code.as_slice(), c.score))
+        .collect();
+
+    let ranked = reranker.rerank(&rerank_input, &query_emb);
 
     let mut hits: Vec<Hit> = ranked
         .into_iter()
@@ -44,7 +54,6 @@ pub async fn search(
         })
         .collect();
 
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     hits.truncate(opts.limit);
 
     Ok(hits)

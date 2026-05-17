@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 pub type ParseResult = Result<(Vec<Symbol>, Vec<Edge>, HashMap<String, String>)>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub id: u32,
     pub kind: Kind,
@@ -20,7 +21,7 @@ pub struct Symbol {
     pub traits: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     Function,
     Method,
@@ -57,9 +58,48 @@ impl Kind {
             Kind::Error => "X",
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::Function => "function",
+            Kind::Method => "method",
+            Kind::Const => "const",
+            Kind::Static => "static",
+            Kind::Struct => "struct",
+            Kind::Enum => "enum",
+            Kind::TypeAlias => "typealias",
+            Kind::Class => "class",
+            Kind::Interface => "interface",
+            Kind::Module => "module",
+            Kind::Field => "field",
+            Kind::Variant => "variant",
+            Kind::Event => "event",
+            Kind::Error => "error",
+        }
+    }
+
+    pub fn from_str_lossy(s: &str) -> Option<Self> {
+        match s {
+            "fn" | "function" => Some(Kind::Function),
+            "method" => Some(Kind::Method),
+            "struct" => Some(Kind::Struct),
+            "enum" => Some(Kind::Enum),
+            "class" => Some(Kind::Class),
+            "interface" => Some(Kind::Interface),
+            "const" => Some(Kind::Const),
+            "static" => Some(Kind::Static),
+            "module" | "mod" => Some(Kind::Module),
+            "field" => Some(Kind::Field),
+            "variant" => Some(Kind::Variant),
+            "typealias" | "type" => Some(Kind::TypeAlias),
+            "event" => Some(Kind::Event),
+            "error" => Some(Kind::Error),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Target {
     Unresolved(String),
     Resolved(u32),
@@ -76,13 +116,13 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeKind {
     Call,
     Ref,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub from: u32,
     pub to: Target,

@@ -14,7 +14,14 @@ pub async fn handle(req: &SymbolBodyReq, state: &DaemonState) -> Response {
         }
     };
 
-    let index = ensure_dsl_index(&project, &req.project_root).await;
+    let index = match ensure_dsl_index(&project, &req.project_root).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            return Response::DslSymbolBody(Err(ErrorBody {
+                message: e.to_string(),
+            }));
+        }
+    };
 
     let sym = match index.symbols.get(req.symbol_id as usize) {
         Some(s) => s,

@@ -1,15 +1,19 @@
 use std::path::Path;
 
 use anyhow::Result;
+use arrow::array::{
+    BinaryBuilder, FixedSizeBinaryBuilder, Float32Array, RecordBatch, StringArray, StringBuilder,
+    UInt32Array, UInt64Array,
+};
 use tracing::info;
 
 use zti_common::ids::project_id;
-use zti_dsl::{DslChunker, ProjectIndex, build_index};
+use zti_dsl::{DslChunker, build_index};
 use zti_embed::EmbedEngine;
 use zti_rerank::TurboReranker;
 use zti_store::Db;
 
-use crate::manifest::{FileSnapshot, walk_source_files};
+use crate::manifest::{Changes, FileSnapshot, detect_changes, walk_source_files};
 use crate::progress::ProgressReporter;
 
 pub struct IndexStats {
@@ -32,7 +36,57 @@ pub async fn index_project(
     let root_str = root.to_string_lossy();
     info!("indexing {}", root_str);
 
-    let dsl_index = build_index(&root_str)?;
+    let snapshots = walk_source_files(root);
+    info!("found {} source files", snapshots.len());
+
+    let files_table = db.files_table().await?;
+    let previous = files_table.list().await.unwrap_or_default();
+
+    let changes = detect_changes(&snapshots, &previous);
+    info!(
+        "changes: {} added, {} modified, {} removed, {} unchanged",
+        changes.added.len(),
+        changes.modified.len(),
+        changes.removed.len(),
+        changes.unchanged.len(),
+    );
+
+    let need_reindex: Vec<String> = changes
+        .added
+        .iter()
+        .chain(changes.modified.iter())
+        .cloned()
+        .collect();
+
+    let to_delete: Vec<&str> = changes
+        .removed
+        .iter()
+        .chain(changes.modified.iter())
+        .map(|s| s.as_str())
+        .collect();
+
+    if !to_delete.is_empty() {
+        let chunks_table = db.chunks_table(engine.dim()).await?;
+        chunks_table.delete_for_files(&to_delete).await?;
+        files_table.delete_for_paths(&to_delete).await?;
+        info!("deleted chunks for {} files", to_delete.len());
+    }
+
+    if need_reindex.is_empty() {
+        reporter.finish_with_message("nothing to reindex");
+        let elapsed = start.elapsed();
+        let total_files = snapshots.len();
+        return Ok(IndexStats {
+            total_chunks: 0,
+            total_files,
+            new_chunks: 0,
+            reindexed_files: 0,
+            duration_ms: elapsed.as_millis() as u64,
+        });
+    }
+
+    let root_owned = root.to_path_buf();
+    let dsl_index = build_index(&root_owned.to_string_lossy())?;
     info!(
         "dsl-graph: {} symbols, {} edges, {} files",
         dsl_index.symbols.len(),
@@ -40,55 +94,150 @@ pub async fn index_project(
         dsl_index.files.len(),
     );
 
-    let snapshots = walk_source_files(root);
-    info!("found {} source files", snapshots.len());
-
     let chunker = DslChunker::new(&dsl_index);
 
-    let mut all_chunks: Vec<zti_dsl::chunking::Chunk> = Vec::new();
-    let mut pending_chunks: Vec<zti_dsl::chunking::Chunk> = Vec::new();
-
-    for (rel, snap) in &snapshots {
+    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, String)> = Vec::new();
+    for rel in &need_reindex {
+        let snap = match snapshots.get(rel) {
+            Some(s) => s,
+            None => continue,
+        };
         let full_path = root.join(rel);
         let label = full_path.display().to_string();
         let chunks = chunker.chunks_for_file(&label, &snap.contents);
-        if !chunks.is_empty() {
-            pending_chunks.extend(chunks);
+        for c in chunks {
+            all_pending.push((c, snap.language.clone()));
         }
     }
 
-    info!("collected {} chunks from {} files", pending_chunks.len(), snapshots.len());
+    info!("collected {} chunks from {} files", all_pending.len(), need_reindex.len());
 
-    reporter.start(pending_chunks.len() as u64);
+    reporter.start(all_pending.len() as u64);
 
     let batch_size = 32;
     let mut total_embedded = 0usize;
-    let mut reranker = TurboReranker::new(engine.dim())?;
+    let reranker = TurboReranker::new(engine.dim())?;
+    let mut chunks_table = db.chunks_table(engine.dim()).await?;
 
-    let mut iter = pending_chunks.into_iter();
-    while let Some(first) = iter.next() {
-        let mut batch = vec![first];
-        while batch.len() < batch_size {
+    let mut iter = all_pending.into_iter();
+    while let Some((first_chunk, first_lang)) = iter.next() {
+        let mut batch_items = vec![(first_chunk, first_lang)];
+        while batch_items.len() < batch_size {
             match iter.next() {
-                Some(c) => batch.push(c),
+                Some((c, l)) => batch_items.push((c, l)),
                 None => break,
             }
         }
 
-        let bodies: Vec<String> = batch.iter().map(|c| c.embed_text()).collect();
+        let bodies: Vec<String> = batch_items.iter().map(|(c, _)| c.embed_text()).collect();
         let bodies_ref: Vec<&str> = bodies.iter().map(|s| s.as_str()).collect();
 
-        match engine.embed_batch(&bodies_ref) {
+        match engine.embed_batch_async(&bodies_ref).await {
             Ok(embs) => {
-                for (chunk, emb) in batch.into_iter().zip(embs) {
+                let dim = engine.dim();
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+
+                let n = batch_items.len();
+                let mut chunk_id_builder = FixedSizeBinaryBuilder::new(16);
+                let mut file_path_builder = StringBuilder::new();
+                let mut language_builder = StringBuilder::new();
+                let mut symbol_qualified_builder = StringBuilder::new();
+                let mut symbol_kind_builder = StringBuilder::new();
+                let mut parent_qualified_builder = StringBuilder::new();
+                let mut start_line_builder = UInt32Array::builder(n);
+                let mut end_line_builder = UInt32Array::builder(n);
+                let mut content_builder = StringBuilder::new();
+                let mut turbo_code_builder = BinaryBuilder::new();
+                let mut indexed_at_builder = UInt64Array::builder(n);
+                let mut embeddings: Vec<f32> = Vec::with_capacity(n * dim);
+
+                let zipped: Vec<_> = batch_items
+                    .into_iter()
+                    .zip(embs.into_iter())
+                    .collect();
+
+                for ((chunk, lang), emb) in zipped {
                     if emb.iter().any(|v| v.is_nan()) {
-                        tracing::warn!("NaN in embedding for {}:{}-{}, skipping", chunk.file, chunk.start_line, chunk.end_line);
+                        tracing::warn!(
+                            "NaN in embedding for {}:{}-{}, skipping",
+                            chunk.file,
+                            chunk.start_line,
+                            chunk.end_line
+                        );
                         reporter.inc(1);
                         continue;
                     }
-                    reranker.encode(&emb)?;
-                    all_chunks.push(chunk);
+
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(chunk.file.as_bytes());
+                    hasher.update(&chunk.start_line.to_le_bytes());
+                    hasher.update(&chunk.end_line.to_le_bytes());
+                    hasher.update(chunk.qualified.as_bytes());
+                    let hash = hasher.finalize();
+                    let mut chunk_id = [0u8; 16];
+                    chunk_id.copy_from_slice(&hash.as_bytes()[..16]);
+
+                    let turbo = match reranker.encode(&emb) {
+                        Ok(t) => Some(t),
+                        Err(e) => {
+                            tracing::debug!("turbo encode failed: {}", e);
+                            None
+                        }
+                    };
+
+                    chunk_id_builder.append_value(chunk_id);
+                    file_path_builder.append_value(&chunk.file);
+                    language_builder.append_value(&lang);
+                    symbol_qualified_builder.append_value(&chunk.qualified);
+                    symbol_kind_builder.append_value(chunk.kind.as_str());
+                    parent_qualified_builder.append_null();
+                    start_line_builder.append_value(chunk.start_line);
+                    end_line_builder.append_value(chunk.end_line);
+                    content_builder.append_value(&chunk.body);
+                    match &turbo {
+                        Some(t) => turbo_code_builder.append_value(t),
+                        None => turbo_code_builder.append_null(),
+                    }
+                    indexed_at_builder.append_value(now_ns);
+                    embeddings.extend_from_slice(&emb);
+
                     total_embedded += 1;
+                }
+
+                if !embeddings.is_empty() {
+                    let embedding_arr = arrow::array::FixedSizeListArray::new(
+                        std::sync::Arc::new(arrow::datatypes::Field::new(
+                            "item",
+                            arrow::datatypes::DataType::Float32,
+                            false,
+                        )),
+                        dim as i32,
+                        std::sync::Arc::new(Float32Array::from(embeddings)),
+                        None,
+                    );
+
+                    let record = RecordBatch::try_new(
+                        std::sync::Arc::new(zti_store::schema::chunks_schema(dim)),
+                        vec![
+                            std::sync::Arc::new(chunk_id_builder.finish()),
+                            std::sync::Arc::new(file_path_builder.finish()),
+                            std::sync::Arc::new(language_builder.finish()),
+                            std::sync::Arc::new(symbol_qualified_builder.finish()),
+                            std::sync::Arc::new(symbol_kind_builder.finish()),
+                            std::sync::Arc::new(parent_qualified_builder.finish()),
+                            std::sync::Arc::new(start_line_builder.finish()),
+                            std::sync::Arc::new(end_line_builder.finish()),
+                            std::sync::Arc::new(content_builder.finish()),
+                            std::sync::Arc::new(turbo_code_builder.finish()),
+                            std::sync::Arc::new(indexed_at_builder.finish()),
+                            std::sync::Arc::new(embedding_arr),
+                        ],
+                    )?;
+
+                    chunks_table.upsert(record).await?;
                 }
             }
             Err(e) => {
@@ -97,6 +246,12 @@ pub async fn index_project(
         }
         reporter.inc(batch_size as u64);
     }
+
+    chunks_table.index_vector().await?;
+
+    upsert_files(&files_table, &snapshots, &need_reindex).await?;
+
+    upsert_project(db, &pid, root_str, total_embedded, snapshots.len(), engine).await?;
 
     reporter.finish_with_message(&format!("embedded {} passages", total_embedded));
 
@@ -109,10 +264,97 @@ pub async fn index_project(
     );
 
     Ok(IndexStats {
-        total_chunks: all_chunks.len(),
+        total_chunks: total_embedded,
         total_files: snapshots.len(),
         new_chunks: total_embedded,
-        reindexed_files: 0,
+        reindexed_files: need_reindex.len(),
         duration_ms: elapsed.as_millis() as u64,
     })
+}
+
+async fn upsert_files(
+    files_table: &zti_store::files_table::FilesTable,
+    snapshots: &std::collections::HashMap<String, FileSnapshot>,
+    changed_paths: &[String],
+) -> Result<()> {
+    for path in changed_paths {
+        let snap = match snapshots.get(path) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let mut blake3_builder = FixedSizeBinaryBuilder::new(32);
+        blake3_builder.append_value(snap.blake3);
+
+        let record = RecordBatch::try_new(
+            std::sync::Arc::new(zti_store::schema::files_schema()),
+            vec![
+                std::sync::Arc::new(StringArray::from(vec![path.clone()])),
+                std::sync::Arc::new(blake3_builder.finish()),
+                std::sync::Arc::new(UInt64Array::from(vec![snap.mtime_ns as u64])),
+                std::sync::Arc::new(UInt64Array::from(vec![snap.size_bytes])),
+                std::sync::Arc::new(StringArray::from(vec![snap.language.clone()])),
+                std::sync::Arc::new(arrow::array::ListArray::new_null(
+                    std::sync::Arc::new(arrow::datatypes::Field::new(
+                        "item",
+                        arrow::datatypes::DataType::FixedSizeBinary(16),
+                        false,
+                    )),
+                    1,
+                )),
+                std::sync::Arc::new(UInt64Array::from(vec![
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64,
+                ])),
+            ],
+        )?;
+
+        files_table.upsert(record).await?;
+    }
+    Ok(())
+}
+
+async fn upsert_project(
+    db: &Db,
+    pid: &[u8; 32],
+    root: std::borrow::Cow<'_, str>,
+    total_chunks: usize,
+    total_files: usize,
+    engine: &EmbedEngine,
+) -> Result<()> {
+    let projects_table = db.projects_table().await?;
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    let mut project_id_builder = FixedSizeBinaryBuilder::new(32);
+    project_id_builder.append_value(pid);
+
+    let record = RecordBatch::try_new(
+        std::sync::Arc::new(zti_store::schema::projects_schema()),
+        vec![
+            std::sync::Arc::new(project_id_builder.finish()),
+            std::sync::Arc::new(StringArray::from(vec![root.to_string()])),
+            std::sync::Arc::new(arrow::array::ListArray::new_null(
+                std::sync::Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    arrow::datatypes::DataType::Utf8,
+                    false,
+                )),
+                1,
+            )),
+            std::sync::Arc::new(StringArray::from(vec![engine.profile().model_id.clone()])),
+            std::sync::Arc::new(UInt32Array::from(vec![engine.dim() as u32])),
+            std::sync::Arc::new(UInt64Array::from(vec![total_chunks as u64])),
+            std::sync::Arc::new(UInt64Array::from(vec![total_files as u64])),
+            std::sync::Arc::new(UInt64Array::from(vec![now_ns])),
+            std::sync::Arc::new(UInt64Array::from(vec![now_ns])),
+        ],
+    )?;
+
+    projects_table.upsert(record).await?;
+    Ok(())
 }

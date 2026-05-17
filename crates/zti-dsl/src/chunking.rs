@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Kind, ProjectIndex};
+use zti_ts_core::types::Kind;
+
+use crate::model::ProjectIndex;
 use crate::render::{render_symbol_inline, InlineOpts};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +73,7 @@ impl<'a> DslChunker<'a> {
         fallback.map(|i| i as u16)
     }
 
-    fn make_chunk(&self, sym: &crate::model::Symbol, lines: &[&str]) -> Option<Chunk> {
+    fn make_chunk(&self, sym: &zti_ts_core::types::Symbol, lines: &[&str]) -> Option<Chunk> {
         let start = (sym.line as usize).saturating_sub(1);
         let end = (sym.end_line as usize).min(lines.len());
         if start >= end {

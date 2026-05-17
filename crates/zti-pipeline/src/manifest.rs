@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
 use ignore::WalkBuilder;
-use serde::{Deserialize, Serialize};
 
+use zti_store::FileRow;
 use zti_tree_sitter::detect_from_path;
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,13 @@ pub struct FileSnapshot {
     pub size_bytes: u64,
     pub contents: String,
     pub language: String,
+}
+
+pub struct Changes {
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub removed: Vec<String>,
+    pub unchanged: Vec<String>,
 }
 
 pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
@@ -73,7 +80,7 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
                 blake3,
                 size_bytes: metadata.len(),
                 contents,
-                language: format!("{:?}", lang),
+                language: lang.as_str().to_string(),
             },
         );
     }
@@ -83,18 +90,43 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
 
 pub fn detect_changes(
     current: &HashMap<String, FileSnapshot>,
-    previous: &HashSet<String>,
-) -> (Vec<String>, Vec<String>) {
-    let mut changed = Vec::new();
+    previous: &[FileRow],
+) -> Changes {
+    let mut prev_map: HashMap<&str, &[u8]> = HashMap::with_capacity(previous.len());
+    for row in previous {
+        prev_map.insert(&row.file_path, &row.blake3);
+    }
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
     let mut unchanged = Vec::new();
 
     for (rel, snap) in current {
-        if previous.contains(rel) {
-            unchanged.push(rel.clone());
-        } else {
-            changed.push(rel.clone());
+        match prev_map.get(rel.as_str()) {
+            Some(&prev_hash) => {
+                if snap.blake3.as_slice() == prev_hash {
+                    unchanged.push(rel.clone());
+                } else {
+                    modified.push(rel.clone());
+                }
+            }
+            None => {
+                added.push(rel.clone());
+            }
         }
     }
 
-    (changed, unchanged)
+    let current_set: HashMap<&str, ()> = current.keys().map(|k| (k.as_str(), ())).collect();
+    let removed = previous
+        .iter()
+        .filter(|row| !current_set.contains_key(row.file_path.as_str()))
+        .map(|row| row.file_path.clone())
+        .collect();
+
+    Changes {
+        added,
+        modified,
+        removed,
+        unchanged,
+    }
 }

@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
-use tree_sitter::Parser;
+use tree_sitter::Node;
 use zti_ts_core::config::{LangConfig, SOLIDITY_CONFIG};
-use zti_ts_core::types::{Edge, Symbol};
-use zti_ts_core::walker::{LanguageFrontend, parse_file};
+use zti_ts_core::walker::LanguageFrontend;
 
 pub struct SolidityFrontend;
 
@@ -17,26 +15,14 @@ impl LanguageFrontend for SolidityFrontend {
         &SOLIDITY_CONFIG
     }
 
-    fn parse(&self, source: &str, file_idx: u16, id_start: u32) -> Result<(Vec<Symbol>, Vec<Edge>, HashMap<String, String>)> {
-        let mut parser = Parser::new();
-        parser.set_language(&self.language())?;
-        let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("parse failed"))?;
-
-        let (symbols, edges) = parse_file(&tree, source, file_idx, self.config(), id_start);
-
-        let imports = extract_solidity_imports(tree.root_node(), source);
-
-        Ok((symbols, edges, imports))
+    fn extract_imports(&self, root: Node, source: &str) -> HashMap<String, String> {
+        let mut imports = HashMap::new();
+        collect_solidity_imports(root, source, &mut imports);
+        imports
     }
 }
 
-fn extract_solidity_imports(node: tree_sitter::Node, source: &str) -> HashMap<String, String> {
-    let mut imports = HashMap::new();
-    collect_solidity_imports(node, source, &mut imports);
-    imports
-}
-
-fn collect_solidity_imports(node: tree_sitter::Node, source: &str, imports: &mut HashMap<String, String>) {
+fn collect_solidity_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
     if node.kind() == "import_directive" {
         let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
 
