@@ -14,6 +14,9 @@ use zti_protocol::response::*;
 #[derive(Parser)]
 #[command(name = "zebra-embed", version, about = "Index / search / chat via daemon")]
 struct Cli {
+    #[arg(short, long, global = true)]
+    model: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -70,8 +73,8 @@ enum Commands {
 /// Connect to the daemon (auto-spawning if needed) and complete the mandatory
 /// handshake. Every subcommand uses this — including `Stop`. Replaces what was
 /// previously ~10 lines of duplicated boilerplate per command.
-async fn open_client() -> Result<Client> {
-    let mut client = Client::connect(Duration::from_secs(10)).await?;
+async fn open_client(model: &str) -> Result<Client> {
+    let mut client = Client::connect(Duration::from_secs(10), model).await?;
     client.handshake().await?;
     Ok(client)
 }
@@ -110,9 +113,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let model = &cli.model;
     match cli.command {
         Commands::Index { root, refresh } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon(&root)?;
             let bar = RefCell::new(None::<ProgressBar>);
 
@@ -167,7 +171,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Search { root, query, limit, lang, glob } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon(&root)?;
             let resp = client
                 .request(Request::Search(SearchReq {
@@ -190,7 +194,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Chat { root, limit } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon(&root)?;
             let mut rl = rustyline::DefaultEditor::new()?;
             println!("zebra-embed chat — type a query, :q or Ctrl-D to exit.");
@@ -230,7 +234,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Status { root } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon_opt(root)?;
             let resp = client
                 .request(Request::ProjectStatus(ProjectStatusReq { project_root }))
@@ -247,7 +251,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Doctor { root } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon_opt(root)?;
             let resp = client.request(Request::Doctor(DoctorReq { project_root })).await?;
             match resp {
@@ -267,7 +271,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Env => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let resp = client.request(Request::DaemonEnv).await?;
             match resp {
                 Response::DaemonEnv(env) => {
@@ -282,14 +286,14 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Stop => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let resp = client.request(Request::Stop).await?;
             if matches!(resp, Response::Stop(())) {
                 println!("Daemon stopped.");
             }
         }
         Commands::Remove { root } => {
-            let mut client = open_client().await?;
+            let mut client = open_client(model).await?;
             let project_root = canon(&root)?;
             let resp = client
                 .request(Request::RemoveProject(RemoveProjectReq { project_root }))

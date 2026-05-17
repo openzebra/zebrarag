@@ -68,7 +68,7 @@ lancedb     = "0.29"
 arrow       = "58"
 arrow-array = "58"
 
-clap      = { version = "4", features = ["derive"] }
+clap      = { version = "4", features = ["derive", "env"] }
 indicatif = "0.18"
 rustyline = "18"
 

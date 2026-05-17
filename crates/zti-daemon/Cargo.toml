@@ -24,6 +24,7 @@ zti-hw.workspace = true
 zti-hw-core.workspace = true
 zti-common.workspace = true
 zti-rerank.workspace = true
+clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

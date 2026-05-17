@@ -2,9 +2,12 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
+use zti_embed::EmbedEngine;
+use zti_hw::Hardware;
 
 mod handlers;
 mod listener;
@@ -13,23 +16,15 @@ mod state;
 
 use state::DaemonState;
 
-fn main() -> Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async_main())
+#[derive(Parser)]
+#[command(name = "zti-daemon", about = "Zebra tree indexer daemon")]
+struct Cli {
+    #[arg(short, long)]
+    model: String,
 }
 
-async fn async_main() -> Result<()> {
-    let log_path = zti_common::paths::daemon_log()?;
-    let log_file = std::fs::File::create(&log_path)?;
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(log_file)
-        .with_ansi(false)
-        .init();
+fn main() -> Result<()> {
+    let Cli { model } = Cli::parse();
 
     let pid_path = zti_common::paths::daemon_pid()?;
     let mut pid_file = std::fs::OpenOptions::new()
@@ -53,19 +48,39 @@ async fn async_main() -> Result<()> {
     write!(pid_file, "{}", std::process::id())?;
     pid_file.flush()?;
 
+    let log_path = zti_common::paths::daemon_log()?;
+    let log_file = std::fs::File::create(&log_path)?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_writer(log_file)
+        .with_ansi(false)
+        .init();
+
     let socket_path = zti_common::paths::daemon_socket()?;
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
     }
 
-    let model_id = std::env::var("ZEBRA_MODEL")
-        .unwrap_or_else(|_| "BAAI/bge-small-en-v1.5".to_string());
-
-    tracing::info!("loading model: {}", model_id);
-    let engine = zti_embed::EmbedEngine::load(&model_id)?;
+    tracing::info!("loading model: {}", model);
+    let engine = EmbedEngine::load(&model)?;
     let hw = zti_hw::probe();
     tracing::info!(device = ?hw.device, "hardware detected");
 
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async_main(engine, hw, pid_file, pid_path, socket_path))
+}
+
+async fn async_main(
+    engine: EmbedEngine,
+    hw: Hardware,
+    pid_file: std::fs::File,
+    pid_path: std::path::PathBuf,
+    socket_path: std::path::PathBuf,
+) -> Result<()> {
     let state = Arc::new(DaemonState::new(engine, hw, pid_file));
 
     let listener = UnixListener::bind(&socket_path)?;

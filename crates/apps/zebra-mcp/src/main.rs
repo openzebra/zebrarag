@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::Parser;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
@@ -12,6 +13,13 @@ use tracing_subscriber::EnvFilter;
 use zti_ipc_client::Client;
 use zti_protocol::request::*;
 use zti_protocol::response::*;
+
+#[derive(Parser)]
+#[command(name = "zebra-mcp", about = "Zebra MCP server (stdio)")]
+struct Cli {
+    #[arg(short, long)]
+    model: String,
+}
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct FileTreeParams {
@@ -62,21 +70,21 @@ pub struct ProjectRootParam {
 
 #[derive(Debug, Clone)]
 struct ZebraMcpServer {
-    // Populated/consumed by `#[rmcp::tool_router]` macro expansion; dead-code
-    // analysis can't see the macro reads.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    model: String,
 }
 
 impl ZebraMcpServer {
-    fn new() -> Self {
+    fn new(model: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            model,
         }
     }
 
     async fn client(&self) -> Result<Client, ErrorData> {
-        let mut client = Client::connect(Duration::from_secs(10))
+        let mut client = Client::connect(Duration::from_secs(10), &self.model)
             .await
             .map_err(daemon_err)?;
         client.handshake().await.map_err(daemon_err)?;
@@ -418,7 +426,8 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let server = ZebraMcpServer::new();
+    let Cli { model } = Cli::parse();
+    let server = ZebraMcpServer::new(model);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
 
