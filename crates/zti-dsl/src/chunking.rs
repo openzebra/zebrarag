@@ -1,10 +1,14 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use zti_common::line_byte_range;
 use zti_ts_core::types::Kind;
 
 use crate::model::ProjectIndex;
-use crate::render::{render_symbol_inline, InlineOpts};
+use crate::render::{build_children_by_parent, render_symbol_rich};
+
+const RICH_MAX_TARGETS: usize = 24;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
@@ -30,14 +34,14 @@ impl Chunk {
 
 pub struct DslChunker<'a> {
     index: &'a ProjectIndex,
-    opts: InlineOpts,
+    children_by_parent: HashMap<u32, Vec<u32>>,
 }
 
 impl<'a> DslChunker<'a> {
     pub fn new(index: &'a ProjectIndex) -> Self {
         Self {
             index,
-            opts: InlineOpts::for_embedding(),
+            children_by_parent: build_children_by_parent(index),
         }
     }
 
@@ -87,8 +91,14 @@ impl<'a> DslChunker<'a> {
         }
         let body = source[range].to_string();
 
-        let mut header = String::with_capacity(256);
-        render_symbol_inline(self.index, sym.id, &self.opts, &mut header);
+        let mut header = String::with_capacity(384);
+        render_symbol_rich(
+            self.index,
+            sym.id,
+            &self.children_by_parent,
+            RICH_MAX_TARGETS,
+            &mut header,
+        );
 
         let file = self.index.files.get(sym.file_idx as usize)?;
         Some(Chunk {

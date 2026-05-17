@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,8 @@ pub struct SearchHit {
     pub chunk_id: Vec<u8>,
     pub file_path: String,
     pub symbol_qualified: String,
+    pub symbol_kind: String,
+    pub sym_id: u32,
     pub start_line: u32,
     pub end_line: u32,
     pub content: String,
@@ -37,6 +41,8 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResults {
     pub hits: Vec<SearchHit>,
+    pub appendix: Vec<SearchHit>,
+    pub legend: Cow<'static, str>,
     pub total: usize,
 }
 

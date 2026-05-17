@@ -11,6 +11,7 @@ use rmcp::{tool, ErrorData, ServiceExt};
 use tracing_subscriber::EnvFilter;
 
 use zti_ipc_client::Client;
+use zti_protocol::format_search_results;
 use zti_protocol::request::*;
 use zti_protocol::response::*;
 
@@ -219,23 +220,7 @@ impl ZebraMcpServer {
             .await
             .map_err(daemon_err)?;
         match resp {
-            Response::Search(Ok(results)) => {
-                let mut out = String::new();
-                use std::fmt::Write as _;
-                for (i, hit) in results.hits.iter().enumerate() {
-                    let _ = writeln!(
-                        out,
-                        "#{} {:.4} {} ({}:{}-{})",
-                        i + 1,
-                        hit.score,
-                        hit.symbol_qualified,
-                        hit.file_path,
-                        hit.start_line,
-                        hit.end_line
-                    );
-                }
-                Ok(ok_text(out))
-            }
+            Response::Search(Ok(results)) => Ok(ok_text(format_search_results(&results))),
             Response::Search(Err(e)) => Err(body_err(&e)),
             _ => Err(unexpected_response()),
         }

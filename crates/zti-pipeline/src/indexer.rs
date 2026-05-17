@@ -1,20 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
 use arrow::array::{
-    BinaryBuilder, FixedSizeBinaryBuilder, Float32Array, RecordBatch, StringArray, StringBuilder,
-    UInt32Array, UInt64Array,
+    BinaryBuilder, FixedSizeBinaryBuilder, Float32Array, ListBuilder, RecordBatch, StringArray,
+    StringBuilder, UInt32Array, UInt32Builder, UInt64Array,
 };
 use tracing::info;
 
 use zti_common::ids::project_id;
-use zti_dsl::{DslChunker, SourceFile, build_index_from_sources};
+use zti_dsl::{DslChunker, EdgeKind, SourceFile, Target, build_index_from_sources};
 use zti_embed::EmbedEngine;
 use zti_rerank::TurboReranker;
 use zti_store::Db;
 use zti_tree_sitter::Language;
+
+const APPENDIX_DEPTH: usize = 2;
+const APPENDIX_CAP_PER_CHUNK: usize = 32;
 
 use crate::manifest::{FileSnapshot, detect_changes, walk_source_files};
 use crate::progress::ProgressReporter;
@@ -122,6 +125,41 @@ pub async fn index_project(
 
     info!("collected {} chunks from {} files", all_pending.len(), need_reindex.len());
 
+    let chunk_sym_set: HashSet<u32> =
+        all_pending.iter().map(|(c, _)| c.sym_id).collect();
+
+    let appendix_for = |sym_id: u32| -> Vec<u32> {
+        let mut visited: HashSet<u32> = HashSet::with_capacity(16);
+        let mut queue: VecDeque<(u32, usize)> = VecDeque::with_capacity(16);
+        let mut out: Vec<u32> = Vec::with_capacity(APPENDIX_CAP_PER_CHUNK);
+        visited.insert(sym_id);
+        queue.push_back((sym_id, 0));
+        while let Some((cur, depth)) = queue.pop_front() {
+            if depth >= APPENDIX_DEPTH {
+                continue;
+            }
+            let Some(edges) = dsl_index.forward_edges.get(&cur) else {
+                continue;
+            };
+            for edge in edges.iter().filter(|e| e.kind == EdgeKind::Call) {
+                let Target::Resolved(rid) = edge.to else {
+                    continue;
+                };
+                if !visited.insert(rid) {
+                    continue;
+                }
+                if !chunk_sym_set.contains(&rid) {
+                    continue;
+                }
+                if out.len() < APPENDIX_CAP_PER_CHUNK {
+                    out.push(rid);
+                }
+                queue.push_back((rid, depth + 1));
+            }
+        }
+        out
+    };
+
     reporter.start(all_pending.len() as u64);
 
     let batch_size = 32;
@@ -156,7 +194,9 @@ pub async fn index_project(
                 let mut language_builder = StringBuilder::new();
                 let mut symbol_qualified_builder = StringBuilder::new();
                 let mut symbol_kind_builder = StringBuilder::new();
-                let mut parent_qualified_builder = StringBuilder::new();
+                let mut sym_id_builder = UInt32Array::builder(n);
+                let mut parent_sym_id_builder = UInt32Array::builder(n);
+                let mut appendix_sym_ids_builder = ListBuilder::new(UInt32Builder::new());
                 let mut start_line_builder = UInt32Array::builder(n);
                 let mut end_line_builder = UInt32Array::builder(n);
                 let mut content_builder = StringBuilder::new();
@@ -195,12 +235,30 @@ pub async fn index_project(
                         }
                     };
 
+                    let parent_sym_id = dsl_index
+                        .symbols
+                        .get(chunk.sym_id as usize)
+                        .and_then(|s| s.parent);
+                    let appendix_ids = appendix_for(chunk.sym_id);
+
                     chunk_id_builder.append_value(chunk_id)?;
                     file_path_builder.append_value(&chunk.file);
                     language_builder.append_value(lang.as_str());
                     symbol_qualified_builder.append_value(&chunk.qualified);
                     symbol_kind_builder.append_value(chunk.kind.as_str());
-                    parent_qualified_builder.append_null();
+                    sym_id_builder.append_value(chunk.sym_id);
+                    match parent_sym_id {
+                        Some(p) => parent_sym_id_builder.append_value(p),
+                        None => parent_sym_id_builder.append_null(),
+                    }
+                    if appendix_ids.is_empty() {
+                        appendix_sym_ids_builder.append_null();
+                    } else {
+                        for id in &appendix_ids {
+                            appendix_sym_ids_builder.values().append_value(*id);
+                        }
+                        appendix_sym_ids_builder.append(true);
+                    }
                     start_line_builder.append_value(chunk.start_line);
                     end_line_builder.append_value(chunk.end_line);
                     content_builder.append_value(&chunk.body);
@@ -234,7 +292,9 @@ pub async fn index_project(
                             std::sync::Arc::new(language_builder.finish()),
                             std::sync::Arc::new(symbol_qualified_builder.finish()),
                             std::sync::Arc::new(symbol_kind_builder.finish()),
-                            std::sync::Arc::new(parent_qualified_builder.finish()),
+                            std::sync::Arc::new(sym_id_builder.finish()),
+                            std::sync::Arc::new(parent_sym_id_builder.finish()),
+                            std::sync::Arc::new(appendix_sym_ids_builder.finish()),
                             std::sync::Arc::new(start_line_builder.finish()),
                             std::sync::Arc::new(end_line_builder.finish()),
                             std::sync::Arc::new(content_builder.finish()),

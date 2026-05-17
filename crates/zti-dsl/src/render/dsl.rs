@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use zti_ts_core::types::{Edge, EdgeKind, Kind, Target};
@@ -7,6 +7,19 @@ use zti_ts_core::types::{Edge, EdgeKind, Kind, Target};
 use crate::model::ProjectIndex;
 
 pub const LEGEND_LINE: &str = "# k short = Kind   f#=fn m#=method s#=struct e#=enum C#=class I#=iface t#=typealias c#=const v#=static .=field/variant E#=event X#=error M#=mod";
+
+/// One-pass: for every symbol with a `parent`, push its id under that
+/// parent. Used by `render_symbol_rich` so the ≈ siblings line is O(siblings)
+/// instead of O(all symbols) per render. Build once per index.
+pub fn build_children_by_parent(index: &ProjectIndex) -> HashMap<u32, Vec<u32>> {
+    let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(index.symbols.len() / 4);
+    for sym in &index.symbols {
+        if let Some(p) = sym.parent {
+            map.entry(p).or_default().push(sym.id);
+        }
+    }
+    map
+}
 
 pub struct InlineOpts {
     pub max_inline_targets: usize,
@@ -116,6 +129,143 @@ pub fn render_symbol_inline(
             out.push_str(&format_target(&edge.to));
         },
     );
+}
+
+/// Multi-line rich rendering for chat-style output. Produces:
+/// ```text
+/// {kind#id} {name}  {rel_path}:{line}-{end_line} "doc?"
+///     sig {signature?}
+///     → {call targets}
+///     > {ref targets}
+///     ≈ {sibling names}
+/// ```
+/// Each subsection is omitted when empty. `children_by_parent` must be the
+/// map returned by [`build_children_by_parent`] for `index`.
+pub fn render_symbol_rich(
+    index: &ProjectIndex,
+    id: u32,
+    children_by_parent: &HashMap<u32, Vec<u32>>,
+    max_targets: usize,
+    out: &mut String,
+) {
+    let Some(sym) = index.symbols.get(id as usize) else {
+        return;
+    };
+    let file = index.files.get(sym.file_idx as usize);
+
+    // Line 1: kind#id name  file:lines "doc"
+    out.push_str(sym.kind.short());
+    out.push('#');
+    let _ = write!(out, "{}", sym.id);
+    out.push(' ');
+    out.push_str(&sym.name);
+
+    if let Some(f) = file {
+        let rel = f.path.strip_prefix(&index.root).unwrap_or(&f.path);
+        let rel = rel.trim_start_matches('/');
+        out.push_str("  ");
+        out.push_str(rel);
+        let _ = write!(out, ":{}-{}", sym.line, sym.end_line);
+    } else {
+        let _ = write!(out, " :{}-{}", sym.line, sym.end_line);
+    }
+
+    if let Some(ref doc) = sym.doc
+        && let Some(first) = doc.lines().next()
+    {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            out.push_str(" \"");
+            out.push_str(trimmed);
+            out.push('"');
+        }
+    }
+
+    // Line 2: sig <signature>
+    if !sym.signature.is_empty() {
+        out.push_str("\n  sig ");
+        out.push_str(sym.signature.trim());
+    }
+
+    // Line 3: → calls
+    write_rich_edge_line(out, index, id, EdgeKind::Call, "\n  → ", max_targets);
+
+    // Line 4: > uses
+    write_rich_edge_line(out, index, id, EdgeKind::Ref, "\n  > ", max_targets);
+
+    // Line 5: ≈ siblings
+    if let Some(parent_id) = sym.parent
+        && let Some(sibs) = children_by_parent.get(&parent_id)
+    {
+        let mut first = true;
+        let mut written = 0usize;
+        for &cid in sibs {
+            if cid == sym.id {
+                continue;
+            }
+            let Some(other) = index.symbols.get(cid as usize) else {
+                continue;
+            };
+            if first {
+                out.push_str("\n  ≈ ");
+                first = false;
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&other.name);
+            written += 1;
+            if written >= max_targets {
+                out.push_str(", ...");
+                break;
+            }
+        }
+    }
+}
+
+fn write_rich_edge_line(
+    out: &mut String,
+    index: &ProjectIndex,
+    id: u32,
+    kind: EdgeKind,
+    prefix: &str,
+    max: usize,
+) {
+    let Some(edges) = index.forward_edges.get(&id) else {
+        return;
+    };
+    let mut overflow = false;
+    for (written, edge) in edges.iter().filter(|e| e.kind == kind).enumerate() {
+        if written >= max {
+            overflow = true;
+            break;
+        }
+        if written == 0 {
+            out.push_str(prefix);
+        } else {
+            out.push_str(", ");
+        }
+        match &edge.to {
+            Target::Resolved(rid) => {
+                if let Some(ts) = index.symbols.get(*rid as usize) {
+                    out.push_str(ts.kind.short());
+                    out.push('#');
+                    let _ = write!(out, "{}", rid);
+                    out.push(' ');
+                    out.push_str(&ts.name);
+                } else {
+                    out.push('#');
+                    let _ = write!(out, "{}", rid);
+                }
+            }
+            Target::Unresolved(name) | Target::External(name) => {
+                out.push('*');
+                out.push_str(name);
+            }
+        }
+    }
+    if overflow {
+        out.push_str(", ...");
+    }
 }
 
 /// Inline-render up to `max` edge targets, followed by `...` if the iterator

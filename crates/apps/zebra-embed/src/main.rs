@@ -8,6 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::EnvFilter;
 
 use zti_ipc_client::Client;
+use zti_protocol::format_search_results;
 use zti_protocol::request::*;
 use zti_protocol::response::*;
 
@@ -86,20 +87,6 @@ fn canon(p: &Path) -> Result<String> {
 
 fn canon_opt(p: Option<PathBuf>) -> Result<Option<String>> {
     p.map(|r| canon(&r)).transpose()
-}
-
-fn print_search_hits(hits: &[SearchHit]) {
-    for (i, hit) in hits.iter().enumerate() {
-        println!(
-            "#{} {:.4} {} ({}:{}-{})",
-            i + 1,
-            hit.score,
-            hit.symbol_qualified,
-            hit.file_path,
-            hit.start_line,
-            hit.end_line
-        );
-    }
 }
 
 #[tokio::main]
@@ -187,7 +174,7 @@ async fn main() -> Result<()> {
                 .await?;
             match resp {
                 Response::Search(Ok(results)) => {
-                    print_search_hits(&results.hits);
+                    print!("{}", format_search_results(&results));
                     println!("{} results", results.total);
                 }
                 Response::Search(Err(e)) => eprintln!("Error: {}", e.message),
@@ -223,11 +210,7 @@ async fn main() -> Result<()> {
                     .await?;
                 match resp {
                     Response::Search(Ok(results)) => {
-                        if results.hits.is_empty() {
-                            println!("  no results");
-                        } else {
-                            print_search_hits(&results.hits);
-                        }
+                        print!("{}", format_search_results(&results));
                     }
                     Response::Search(Err(e)) => eprintln!("Error: {}", e.message),
                     other => eprintln!("Unexpected response: {:?}", other),
