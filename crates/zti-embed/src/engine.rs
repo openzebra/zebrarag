@@ -16,12 +16,14 @@ pub struct EmbedEngine {
     tokenizer: Tokenizer,
     profile: ModelProfile,
     hardware: Hardware,
+    needs_token_type_ids: bool,
 }
 
 struct Prepared {
     input_ids: Vec<i64>,
-    attention_mask_i64: Vec<i64>,
-    attention_mask_u32: Vec<u32>,
+    attention_mask: Vec<i64>,
+    token_type_ids_i64: Option<Vec<i64>>,
+    valid_counts: Vec<usize>,
     batch: usize,
     seq: usize,
     dim: usize,
@@ -52,6 +54,11 @@ impl EmbedEngine {
         let session = builder.commit_from_file(&profile.onnx_path)?;
         let tokenizer = Tokenizer::from_file(&profile.tokenizer_path)?;
 
+        let needs_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
+
         if let Some(last_dim) = session
             .outputs()
             .first()
@@ -74,6 +81,7 @@ impl EmbedEngine {
                 tokenizer,
                 profile: profile.clone(),
                 hardware: *hw,
+                needs_token_type_ids,
             };
             let probe = engine_tmp.embed_batch(&["a"])?;
             let probed = probe.first().map(|v| v.len()).unwrap_or(0);
@@ -91,6 +99,7 @@ impl EmbedEngine {
                 tokenizer: engine_tmp.tokenizer,
                 profile,
                 hardware: *hw,
+                needs_token_type_ids,
             });
         }
 
@@ -106,6 +115,7 @@ impl EmbedEngine {
             tokenizer,
             profile,
             hardware: *hw,
+            needs_token_type_ids,
         })
     }
 
@@ -135,23 +145,26 @@ impl EmbedEngine {
 
         let total = batch * seq;
         let mut input_ids = vec![0i64; total];
-        let mut attention_mask_i64 = vec![0i64; total];
-        let mut attention_mask_u32 = vec![0u32; total];
+        let mut attention_mask = vec![0i64; total];
+
+        let token_type_ids_i64 = self.needs_token_type_ids.then(|| vec![0i64; total]);
+        let mut valid_counts = vec![0usize; batch];
 
         for (i, tok) in encs.iter().enumerate() {
             let len = tok.ids.len().min(seq);
             let base = i * seq;
+            valid_counts[i] = len;
             for j in 0..len {
                 input_ids[base + j] = tok.ids[j] as i64;
-                attention_mask_i64[base + j] = tok.mask[j] as i64;
-                attention_mask_u32[base + j] = tok.mask[j];
+                attention_mask[base + j] = tok.mask[j] as i64;
             }
         }
 
         Ok(Some(Prepared {
             input_ids,
-            attention_mask_i64,
-            attention_mask_u32,
+            attention_mask,
+            token_type_ids_i64,
+            valid_counts,
             batch,
             seq,
             dim,
@@ -214,8 +227,9 @@ impl EmbedEngine {
 fn run_and_pool(session: &Mutex<Session>, prep: Prepared) -> Result<Vec<Vec<f32>>> {
     let Prepared {
         input_ids,
-        attention_mask_i64,
-        attention_mask_u32,
+        attention_mask,
+        token_type_ids_i64,
+        valid_counts,
         batch,
         seq,
         dim,
@@ -223,12 +237,17 @@ fn run_and_pool(session: &Mutex<Session>, prep: Prepared) -> Result<Vec<Vec<f32>
     } = prep;
 
     let ids_tensor = ort::value::Tensor::from_array(([batch, seq], input_ids))?;
-    let mask_tensor = ort::value::Tensor::from_array(([batch, seq], attention_mask_i64))?;
+    let mask_tensor = ort::value::Tensor::from_array(([batch, seq], attention_mask))?;
 
-    let inputs = ort::inputs![
+    let mut inputs = ort::inputs![
         "input_ids" => ids_tensor,
         "attention_mask" => mask_tensor,
     ];
+
+    if let Some(tt) = token_type_ids_i64 {
+        let tt_tensor = ort::value::Tensor::from_array(([batch, seq], tt))?;
+        inputs.extend(ort::inputs!["token_type_ids" => tt_tensor]);
+    }
 
     let mut session = session
         .lock()
@@ -241,8 +260,7 @@ fn run_and_pool(session: &Mutex<Session>, prep: Prepared) -> Result<Vec<Vec<f32>
     for i in 0..batch {
         let row_start = i * stride;
         let row_data = &data[row_start..row_start + stride];
-        let row_mask = &attention_mask_u32[i * seq..(i + 1) * seq];
-        let mut pooled = pool_row(&strategy, row_data, dim, seq, row_mask);
+        let mut pooled = pool_row(&strategy, row_data, dim, valid_counts[i]);
         normalize_l2(&mut pooled);
         results.push(pooled);
     }

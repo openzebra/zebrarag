@@ -7,27 +7,20 @@ pub enum PoolingStrategy {
 /// length `dim`. Mean pooling respects the attention mask; CLS takes index 0.
 /// Zero-copy on the input; returns the pooled vector owned (downstream
 /// normalize mutates it in-place, so we can't return a borrow).
-pub fn pool_row(
-    strategy: &PoolingStrategy,
-    data: &[f32],
-    dim: usize,
-    seq: usize,
-    mask: &[u32],
-) -> Vec<f32> {
+pub fn pool_row(strategy: &PoolingStrategy, data: &[f32], dim: usize, valid: usize) -> Vec<f32> {
     match strategy {
         PoolingStrategy::Mean => {
             let mut sum = vec![0.0f32; dim];
-            let mut count = 0u32;
-            for j in 0..seq {
-                if mask.get(j).copied().unwrap_or(1) == 1 {
-                    let off = j * dim;
-                    for k in 0..dim {
-                        sum[k] += data[off + k];
-                    }
-                    count += 1;
+            if valid == 0 {
+                return sum;
+            }
+            for j in 0..valid {
+                let row = &data[j * dim..(j + 1) * dim];
+                for (s, &v) in sum.iter_mut().zip(row) {
+                    *s += v;
                 }
             }
-            let c = if count == 0 { 1.0 } else { count as f32 };
+            let c = valid as f32;
             for x in &mut sum {
                 *x /= c;
             }

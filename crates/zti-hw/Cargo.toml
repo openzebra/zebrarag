@@ -5,19 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-default = ["cpu"]
-cpu     = ["dep:zti-hw-cpu"]
-metal   = ["dep:zti-hw-metal"]
-cuda    = ["dep:zti-hw-cuda"]
-vulkan  = ["dep:zti-hw-vulkan"]
-
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
 ort.workspace = true
 zti-hw-core.workspace = true
-zti-hw-cpu     = { workspace = true, optional = true }
-zti-hw-metal   = { workspace = true, optional = true }
-zti-hw-cuda    = { workspace = true, optional = true }
-zti-hw-vulkan  = { workspace = true, optional = true }
+zti-hw-cpu.workspace = true
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+zti-hw-metal.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+zti-hw-cuda.workspace = true
+zti-hw-vulkan.workspace = true

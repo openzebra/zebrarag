@@ -2,19 +2,14 @@ use ort::ep::ExecutionProviderDispatch;
 
 pub use zti_hw_core::{BackendKind, Capability, Device, Hardware};
 
-/// Devices whose backend crates are linked into this build. The Vec init +
-/// cfg-gated pushes is intentional — array literals don't support per-element
-/// `#[cfg(..)]` cleanly.
-#[allow(clippy::vec_init_then_push)]
 pub fn supported_devices() -> Vec<Device> {
     let mut devs = Vec::with_capacity(4);
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     devs.push(Device::Metal);
-    #[cfg(feature = "cuda")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     devs.push(Device::Cuda);
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     devs.push(Device::Vulkan);
-    #[cfg(feature = "cpu")]
     devs.push(Device::Cpu);
     devs
 }
@@ -26,16 +21,15 @@ pub fn probe() -> Hardware {
 pub fn register() -> Vec<ExecutionProviderDispatch> {
     let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     eps.extend(zti_hw_metal::register());
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     eps.extend(zti_hw_cuda::register());
 
-    #[cfg(feature = "vulkan")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     eps.extend(zti_hw_vulkan::register());
 
-    #[cfg(feature = "cpu")]
     eps.extend(zti_hw_cpu::register());
 
     eps

@@ -8,5 +8,5 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
-ort.workspace = true
+ort = { workspace = true, features = ["coreml"] }
 zti-hw-core.workspace = true
