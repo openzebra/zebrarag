@@ -24,7 +24,7 @@ impl LanguageFrontend for DartFrontend {
 
 fn collect_dart_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
     if node.kind() == "import_specification" {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+        let text = node.utf8_text(source.as_bytes()).unwrap_or("");
         let uri = node
             .child_by_field_name("uri")
             .and_then(|u| u.utf8_text(source.as_bytes()).ok())
@@ -32,30 +32,70 @@ fn collect_dart_imports(node: Node, source: &str, imports: &mut HashMap<String, 
             .trim_matches('"')
             .trim_matches('\'');
 
-        let show_clause = node.child_by_field_name("prefix");
-        if show_clause.is_some()
-            && let Some(name) = show_clause
-                && let Ok(n) = name.utf8_text(source.as_bytes()) {
-                    imports.entry(n.to_string()).or_insert_with(|| text.clone());
-                }
-
-        let last_segment = uri.rsplit('/').next().unwrap_or(uri);
-        let base = last_segment
-            .trim_end_matches(".dart")
-            .trim_end_matches('/');
-        if !base.is_empty() {
-            let parts: Vec<&str> = base.split('_').collect();
-            let class_name: String = parts
-                .iter()
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        let mut alias: Option<String> = None;
+        let mut shown: Vec<String> = Vec::with_capacity(8);
+        let mut prev_was_as = false;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let ck = child.kind();
+            if ck == "as" {
+                prev_was_as = true;
+                continue;
+            }
+            if prev_was_as {
+                if ck == "identifier"
+                    && let Ok(name) = child.utf8_text(source.as_bytes()) {
+                        alias = Some(name.to_string());
                     }
-                })
-                .collect();
-            imports.entry(class_name).or_insert_with(|| text.clone());
+                prev_was_as = false;
+                continue;
+            }
+            if ck == "combinator" {
+                let mut cc = child.walk();
+                let mut is_show = false;
+                for c2 in child.children(&mut cc) {
+                    if c2.kind() == "show" {
+                        is_show = true;
+                        continue;
+                    }
+                    if is_show && c2.kind() == "identifier"
+                        && let Ok(name) = c2.utf8_text(source.as_bytes()) {
+                            shown.push(name.to_string());
+                        }
+                }
+            }
+        }
+
+        let text_owned = || text.to_string();
+
+        let has_alias = alias.is_some();
+        if let Some(a) = alias {
+            imports.entry(a).or_insert_with(text_owned);
+        }
+        let has_shown = !shown.is_empty();
+        for s in shown {
+            imports.entry(s).or_insert_with(text_owned);
+        }
+
+        if !has_alias && !has_shown {
+            let last_segment = uri.rsplit('/').next().unwrap_or(uri);
+            let base = last_segment
+                .trim_end_matches(".dart")
+                .trim_end_matches('/');
+            if !base.is_empty() {
+                let parts: Vec<&str> = base.split('_').collect();
+                let class_name: String = parts
+                    .iter()
+                    .map(|p| {
+                        let mut c = p.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                        }
+                    })
+                    .collect();
+                imports.entry(class_name).or_insert_with(text_owned);
+            }
         }
     }
     let mut cursor = node.walk();

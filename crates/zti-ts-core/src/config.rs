@@ -8,21 +8,28 @@ pub struct NameField {
     pub field: &'static str,
 }
 
+#[derive(Debug)]
+pub struct TransparentScope {
+    pub node_kind: &'static str,
+    pub target_field: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct LangConfig {
     pub scope_nodes: &'static [&'static str],
     pub name_fields: &'static [NameField],
     pub kind_map: &'static [(&'static str, Kind)],
     pub container_kinds: &'static [Kind],
-    pub call_node: &'static str,
+    pub call_nodes: &'static [&'static str],
     pub call_field: &'static str,
     pub ref_node: &'static str,
     pub ref_field: &'static str,
     pub import_node: &'static str,
-    /// Extra directories to skip during traversal — per-language.
-    /// Used e.g. by Solidity to skip Foundry's `lib/`, `out/`, `cache/`.
-    /// Empty for languages without an opinion.
     pub extra_skip_dirs: &'static [&'static str],
+    pub transparent_scope_kinds: &'static [TransparentScope],
+    pub extract_docs: bool,
+    pub instance_field_kinds: &'static [&'static str],
+    pub no_retag_kinds: &'static [&'static str],
 }
 
 impl LangConfig {
@@ -41,17 +48,119 @@ impl LangConfig {
     }
 }
 
-pub fn extract_name<'a>(node: &Node, source: &'a str, config: &LangConfig) -> Option<&'a str> {
-    for field_def in config.name_fields {
-        if node.kind() == field_def.node_kind
-            && let Some(child) = node.child_by_field_name(field_def.field) {
-                let text = child.utf8_text(source.as_bytes()).ok()?;
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
+fn read_field(node: &Node, source: &str, field: &str) -> Option<String> {
+    let child = node.child_by_field_name(field)?;
+    let text = child.utf8_text(source.as_bytes()).ok()?;
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn first_named_identifier(node: &Node, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "type_identifier"
+                | "field_identifier"
+                | "property_identifier"
+                | "private_property_identifier"
+        ) && let Ok(text) = child.utf8_text(source.as_bytes())
+            && !text.is_empty()
+        {
+            return Some(text.to_string());
+        }
     }
     None
+}
+
+pub fn extract_name(node: &Node, source: &str, config: &LangConfig) -> Option<String> {
+    for field_def in config.name_fields {
+        if node.kind() == field_def.node_kind
+            && let Some(name) = read_field(node, source, field_def.field)
+        {
+            return Some(name);
+        }
+    }
+
+    let kind = node.kind();
+
+    if kind == "extension_declaration" {
+        if let Some(name) = read_field(node, source, "name") {
+            return Some(name);
+        }
+        let mut on_type = None;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "on" {
+                on_type = Some(child);
+            } else if on_type.is_some()
+                && let Ok(text) = child.utf8_text(source.as_bytes())
+                && !text.is_empty()
+            {
+                return Some(format!("_extOn{}", text));
+            }
+        }
+    }
+
+    if kind == "operator_signature"
+        && let Some(op) = read_field(node, source, "operator")
+    {
+        return Some(op);
+    }
+
+    if matches!(
+        kind,
+        "function_declaration" | "method_declaration" | "method_signature"
+    ) {
+        let sig = node.child_by_field_name("signature").or_else(|| {
+            let mut c = node.walk();
+            node.children(&mut c)
+                .find(|ch| matches!(ch.kind(), "function_signature" | "method_signature"))
+        });
+        if let Some(sig) = sig
+            && let Some(name) = extract_name(&sig, source, config)
+        {
+            return Some(name);
+        }
+    }
+
+    if kind == "constructor_definition" {
+        return Some("constructor".to_string());
+    }
+
+    if kind == "fallback_receive_definition" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let ck = child.kind();
+            if (ck == "fallback" || ck == "receive")
+                && let Ok(text) = child.utf8_text(source.as_bytes())
+            {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    if kind == "variable_declarator"
+        && let Some(name) = read_field(node, source, "name")
+    {
+        return Some(name);
+    }
+
+    if matches!(
+        kind,
+        "top_level_variable_declaration" | "initialized_identifier" | "static_final_declaration"
+    ) {
+        if let Some(name) = read_field(node, source, "name") {
+            return Some(name);
+        }
+        if kind == "initialized_identifier"
+            && let Some(name) = first_named_identifier(node, source)
+        {
+            return Some(name);
+        }
+    }
+
+    first_named_identifier(node, source)
 }
 
 pub static RUST_CONFIG: LangConfig = LangConfig {
@@ -76,7 +185,6 @@ pub static RUST_CONFIG: LangConfig = LangConfig {
         NameField { node_kind: "type_item", field: "name" },
         NameField { node_kind: "const_item", field: "name" },
         NameField { node_kind: "static_item", field: "name" },
-        NameField { node_kind: "impl_item", field: "trait" },
         NameField { node_kind: "field_item", field: "name" },
         NameField { node_kind: "enum_variant", field: "name" },
         NameField { node_kind: "function_signature_item", field: "name" },
@@ -94,18 +202,23 @@ pub static RUST_CONFIG: LangConfig = LangConfig {
         ("type_item", Kind::TypeAlias),
         ("const_item", Kind::Const),
         ("static_item", Kind::Static),
-        ("impl_item", Kind::Module),
         ("field_item", Kind::Field),
         ("macro_definition", Kind::Function),
         ("metavariable", Kind::Const),
     ],
     container_kinds: &[Kind::Struct, Kind::Enum, Kind::Interface, Kind::Module, Kind::Class],
-    call_node: "call_expression",
+    call_nodes: &["call_expression", "macro_invocation"],
     call_field: "function",
     ref_node: "scoped_identifier",
     ref_field: "name",
     import_node: "use_declaration",
     extra_skip_dirs: &[],
+    transparent_scope_kinds: &[
+        TransparentScope { node_kind: "impl_item", target_field: "type" },
+    ],
+    extract_docs: true,
+    instance_field_kinds: &[],
+    no_retag_kinds: &[],
 };
 
 pub static TYPESCRIPT_CONFIG: LangConfig = LangConfig {
@@ -143,21 +256,26 @@ pub static TYPESCRIPT_CONFIG: LangConfig = LangConfig {
         ("arrow_function", Kind::Function),
         ("public_field_definition", Kind::Field),
         ("enum_assignment", Kind::Variant),
+        ("variable_declarator", Kind::Const),
     ],
     container_kinds: &[Kind::Class, Kind::Enum, Kind::Interface, Kind::Module],
-    call_node: "call_expression",
+    call_nodes: &["call_expression"],
     call_field: "function",
     ref_node: "identifier",
     ref_field: "name",
     import_node: "import_statement",
     extra_skip_dirs: &[],
+    transparent_scope_kinds: &[],
+    extract_docs: true,
+    instance_field_kinds: &[],
+    no_retag_kinds: &[],
 };
 
 pub static DART_CONFIG: LangConfig = LangConfig {
     scope_nodes: &[
         "function_signature",
         "function_body",
-        "class_definition",
+        "class_declaration",
         "mixin_declaration",
         "enum_declaration",
         "extension_declaration",
@@ -165,13 +283,20 @@ pub static DART_CONFIG: LangConfig = LangConfig {
         "getter_signature",
         "setter_signature",
         "constructor_signature",
+        "operator_signature",
+        "factory_constructor_signature",
         "type_alias",
         "local_function_statement",
+        "top_level_variable_declaration",
+        "initialized_identifier",
+        "static_final_declaration",
+        "function_declaration",
+        "method_declaration",
         "program",
     ],
     name_fields: &[
         NameField { node_kind: "function_signature", field: "name" },
-        NameField { node_kind: "class_definition", field: "name" },
+        NameField { node_kind: "class_declaration", field: "name" },
         NameField { node_kind: "mixin_declaration", field: "name" },
         NameField { node_kind: "enum_declaration", field: "name" },
         NameField { node_kind: "extension_declaration", field: "name" },
@@ -182,28 +307,38 @@ pub static DART_CONFIG: LangConfig = LangConfig {
         NameField { node_kind: "type_alias", field: "name" },
         NameField { node_kind: "enum_constant", field: "name" },
         NameField { node_kind: "field", field: "name" },
+        NameField { node_kind: "static_final_declaration", field: "name" },
     ],
     kind_map: &[
-        ("function_signature", Kind::Function),
-        ("class_definition", Kind::Class),
+        ("function_declaration", Kind::Function),
+        ("method_declaration", Kind::Function),
+        ("class_declaration", Kind::Class),
         ("mixin_declaration", Kind::Class),
         ("enum_declaration", Kind::Enum),
         ("enum_constant", Kind::Variant),
-        ("extension_declaration", Kind::Module),
-        ("method_signature", Kind::Method),
+        ("extension_declaration", Kind::Class),
         ("getter_signature", Kind::Method),
         ("setter_signature", Kind::Method),
         ("constructor_signature", Kind::Method),
+        ("operator_signature", Kind::Method),
+        ("factory_constructor_signature", Kind::Method),
         ("type_alias", Kind::TypeAlias),
         ("field", Kind::Field),
+        ("top_level_variable_declaration", Kind::Const),
+        ("initialized_identifier", Kind::Const),
+        ("static_final_declaration", Kind::Const),
     ],
-    container_kinds: &[Kind::Class, Kind::Enum, Kind::Module],
-    call_node: "method_call_expression",
+    container_kinds: &[Kind::Class, Kind::Enum, Kind::Interface, Kind::Module],
+    call_nodes: &["function_expression_invocation", "call_expression"],
     call_field: "name",
     ref_node: "identifier",
     ref_field: "name",
     import_node: "import_specification",
     extra_skip_dirs: &[],
+    transparent_scope_kinds: &[],
+    extract_docs: true,
+    instance_field_kinds: &["initialized_identifier"],
+    no_retag_kinds: &[],
 };
 
 pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
@@ -214,10 +349,11 @@ pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
         "function_definition",
         "modifier_definition",
         "event_definition",
-        "error_definition",
-        "struct_definition",
-        "enum_definition",
+        "error_declaration",
+        "struct_declaration",
+        "enum_declaration",
         "state_variable_declaration",
+        "constant_variable_declaration",
         "using_directive",
         "source_unit",
     ],
@@ -228,15 +364,13 @@ pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
         NameField { node_kind: "function_definition", field: "name" },
         NameField { node_kind: "modifier_definition", field: "name" },
         NameField { node_kind: "event_definition", field: "name" },
-        NameField { node_kind: "error_definition", field: "name" },
-        NameField { node_kind: "struct_definition", field: "name" },
-        NameField { node_kind: "enum_definition", field: "name" },
+        NameField { node_kind: "struct_declaration", field: "name" },
+        NameField { node_kind: "enum_declaration", field: "name" },
         NameField { node_kind: "state_variable_declaration", field: "name" },
-        NameField { node_kind: "receive_function", field: "name" },
-        NameField { node_kind: "fallback_function", field: "name" },
-        NameField { node_kind: "constructor_definition", field: "name" },
+        NameField { node_kind: "constant_variable_declaration", field: "name" },
         NameField { node_kind: "enum_value", field: "name" },
         NameField { node_kind: "struct_member", field: "name" },
+        NameField { node_kind: "user_defined_type_definition", field: "name" },
     ],
     kind_map: &[
         ("contract_declaration", Kind::Class),
@@ -245,22 +379,26 @@ pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
         ("function_definition", Kind::Function),
         ("modifier_definition", Kind::Function),
         ("event_definition", Kind::Event),
-        ("error_definition", Kind::Error),
-        ("struct_definition", Kind::Struct),
-        ("enum_definition", Kind::Enum),
+        ("error_declaration", Kind::Error),
+        ("struct_declaration", Kind::Struct),
+        ("enum_declaration", Kind::Enum),
         ("enum_value", Kind::Variant),
         ("state_variable_declaration", Kind::Field),
+        ("constant_variable_declaration", Kind::Const),
         ("struct_member", Kind::Field),
         ("constructor_definition", Kind::Method),
-        ("receive_function", Kind::Method),
-        ("fallback_function", Kind::Method),
+        ("fallback_receive_definition", Kind::Method),
+        ("user_defined_type_definition", Kind::TypeAlias),
     ],
     container_kinds: &[Kind::Class, Kind::Interface, Kind::Module, Kind::Struct, Kind::Enum],
-    call_node: "function_call_expression",
+    call_nodes: &["function_call_expression", "call_expression"],
     call_field: "name",
     ref_node: "identifier",
     ref_field: "name",
     import_node: "import_directive",
-    // Foundry layout — third-party deps + build artifacts that hide real code.
     extra_skip_dirs: &["lib", "out", "cache", "broadcast"],
+    transparent_scope_kinds: &[],
+    extract_docs: false,
+    instance_field_kinds: &[],
+    no_retag_kinds: &["modifier_definition"],
 };

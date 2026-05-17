@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use tree_sitter::{Node, Tree, TreeCursor};
 
-use crate::config::{extract_name, LangConfig};
-use crate::types::{Edge, EdgeKind, ParseResult, Symbol, Target};
+use crate::config::LangConfig;
+use crate::types::{Edge, EdgeKind, Kind, ParseResult, Symbol, Target};
 
 pub fn parse_file(
     tree: &Tree,
@@ -12,19 +12,23 @@ pub fn parse_file(
     config: &LangConfig,
     id_start: u32,
 ) -> (Vec<Symbol>, Vec<Edge>) {
-    let mut symbols = Vec::new();
-    let mut edges = Vec::new();
+    let mut symbols = Vec::with_capacity(64);
+    let mut edges = Vec::with_capacity(64);
+    let mut name_map: HashMap<String, u32> = HashMap::with_capacity(64);
     let mut state = WalkState {
         file_idx,
         next_id: id_start,
-        scope_stack: Vec::new(),
-        scope_qual: Vec::new(),
+        scope_stack: Vec::with_capacity(8),
+        qual_buf: String::with_capacity(128),
+        qual_lens: Vec::with_capacity(8),
         edges: &mut edges,
         config,
         source,
+        fn_depth: 0,
+        container_depth: 0,
     };
     let mut cursor = tree.root_node().walk();
-    walk_node(&mut cursor, &mut symbols, &mut state);
+    walk_node(&mut cursor, &mut symbols, &mut name_map, &mut state);
     (symbols, edges)
 }
 
@@ -32,25 +36,55 @@ struct WalkState<'a> {
     file_idx: u16,
     next_id: u32,
     scope_stack: Vec<u32>,
-    scope_qual: Vec<String>,
+    qual_buf: String,
+    qual_lens: Vec<usize>,
     edges: &'a mut Vec<Edge>,
     config: &'a LangConfig,
     source: &'a str,
+    fn_depth: u16,
+    container_depth: u16,
 }
 
 impl<'a> WalkState<'a> {
-    fn push_scope(&mut self, id: u32, qual: String) {
+    fn push_scope(&mut self, id: u32, name: &str, is_container: bool, is_fn: bool) {
         self.scope_stack.push(id);
-        self.scope_qual.push(qual);
+        if !self.qual_buf.is_empty() {
+            self.qual_buf.push_str("::");
+        }
+        let prev_len = self.qual_buf.len();
+        self.qual_buf.push_str(name);
+        self.qual_lens.push(prev_len);
+        if is_container {
+            self.container_depth += 1;
+        }
+        if is_fn {
+            self.fn_depth += 1;
+        }
     }
 
-    fn pop_scope(&mut self) {
+    fn pop_scope(&mut self, was_container: bool, was_fn: bool) {
         self.scope_stack.pop();
-        self.scope_qual.pop();
+        if let Some(prev_len) = self.qual_lens.pop() {
+            self.qual_buf.truncate(prev_len);
+        }
+        if was_container {
+            self.container_depth -= 1;
+        }
+        if was_fn {
+            self.fn_depth -= 1;
+        }
     }
 
-    fn current_qual(&self) -> String {
-        self.scope_qual.join("::")
+    fn push_transparent(&mut self, id: u32) {
+        self.scope_stack.push(id);
+        self.qual_lens.push(self.qual_buf.len());
+        self.container_depth += 1;
+    }
+
+    fn pop_transparent(&mut self) {
+        self.scope_stack.pop();
+        let _ = self.qual_lens.pop();
+        self.container_depth -= 1;
     }
 
     fn parent_id(&self) -> Option<u32> {
@@ -66,43 +100,130 @@ impl<'a> WalkState<'a> {
     fn add_edge(&mut self, from: u32, to: Target, kind: EdgeKind, line: u32) {
         self.edges.push(Edge { from, to, kind, line });
     }
+
+    fn is_inside_fn(&self) -> bool {
+        self.fn_depth > 0
+    }
+
+    fn is_inside_container(&self) -> bool {
+        self.container_depth > 0
+    }
 }
 
-fn walk_node(cursor: &mut TreeCursor, symbols: &mut Vec<Symbol>, state: &mut WalkState) {
+fn walk_children(
+    cursor: &mut TreeCursor,
+    symbols: &mut Vec<Symbol>,
+    name_map: &mut HashMap<String, u32>,
+    state: &mut WalkState,
+) {
+    if cursor.goto_first_child() {
+        loop {
+            walk_node(cursor, symbols, name_map, state);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
+    }
+}
+
+fn walk_node(
+    cursor: &mut TreeCursor,
+    symbols: &mut Vec<Symbol>,
+    name_map: &mut HashMap<String, u32>,
+    state: &mut WalkState,
+) {
     let node = cursor.node();
 
-    if let Some(kind) = state.config.kind_for(&node) {
-        let name = extract_name(&node, state.source, state.config)
-            .unwrap_or("")
-            .to_string();
+    for ts in state.config.transparent_scope_kinds {
+        if node.kind() == ts.node_kind {
+            let target_id = node
+                .child_by_field_name(ts.target_field)
+                .and_then(|c| c.utf8_text(state.source.as_bytes()).ok())
+                .and_then(|name| name_map.get(name).copied());
+
+            if let Some(id) = target_id {
+                state.push_transparent(id);
+                walk_children(cursor, symbols, name_map, state);
+                state.pop_transparent();
+            } else {
+                walk_children(cursor, symbols, name_map, state);
+            }
+            return;
+        }
+    }
+
+    if let Some(mut kind) = state.config.kind_for(&node) {
+        if kind == Kind::Const && state.is_inside_fn() {
+            walk_children(cursor, symbols, name_map, state);
+            return;
+        }
+
+        if state.config.instance_field_kinds.contains(&node.kind())
+            && !state.is_inside_fn()
+            && state.is_inside_container()
+            && kind == Kind::Const
+        {
+            walk_children(cursor, symbols, name_map, state);
+            return;
+        }
+
+        if kind == Kind::Const && node.kind() == "variable_declarator" {
+            let has_arrow_value = node
+                .child_by_field_name("value")
+                .is_some_and(|v| v.kind() == "arrow_function");
+            if has_arrow_value {
+                kind = Kind::Function;
+            }
+        }
+
+        if kind == Kind::Function
+            && state.is_inside_container()
+            && !state.config.no_retag_kinds.contains(&node.kind())
+        {
+            kind = Kind::Method;
+        }
+
+        let Some(name) = crate::config::extract_name(&node, state.source, state.config) else {
+            walk_children(cursor, symbols, name_map, state);
+            return;
+        };
 
         let id = state.alloc_id();
         let parent = state.parent_id();
 
-        let qual_prefix = state.current_qual();
-        let qualified = if qual_prefix.is_empty() {
+        let qualified = if state.qual_buf.is_empty() {
             name.clone()
         } else {
-            format!("{}::{}", qual_prefix, name)
+            let mut q = String::with_capacity(state.qual_buf.len() + 2 + name.len());
+            q.push_str(&state.qual_buf);
+            q.push_str("::");
+            q.push_str(&name);
+            q
         };
 
         let (line, end_line) = lines_of(&node);
 
-        let sig = node.utf8_text(state.source.as_bytes())
+        let sig = node
+            .utf8_text(state.source.as_bytes())
             .unwrap_or("")
             .lines()
             .next()
             .unwrap_or("")
             .to_string();
 
-        let doc = extract_doc(&node, state.source);
+        let doc = extract_doc(&node, state.source, state.config);
 
-        let base_classes = extract_base_classes(&node, state.source, state.config);
-        let traits = extract_traits(&node, state.source, state.config);
+        let base_classes = extract_base_classes(&node, state.source);
+        let traits = extract_traits(&node, state.source);
 
-        // Reserve the scope key BEFORE moving `name` into Symbol, so we
-        // don't pay for `symbols.last().unwrap().name.clone()` indirection.
-        let scope_name = name.clone();
+        let is_container = state.config.container_kinds.contains(&kind);
+        let is_fn = kind == Kind::Function || kind == Kind::Method;
+
+        if is_container {
+            name_map.insert(name.clone(), id);
+        }
+
         symbols.push(Symbol {
             id,
             kind,
@@ -117,70 +238,107 @@ fn walk_node(cursor: &mut TreeCursor, symbols: &mut Vec<Symbol>, state: &mut Wal
             parent,
             traits,
         });
-        state.push_scope(id, scope_name);
+
+        state.push_scope(id, &symbols.last().unwrap().name, is_container, is_fn);
 
         collect_edges(&node, state, id);
 
-        if cursor.goto_first_child() {
-            loop {
-                walk_node(cursor, symbols, state);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-            cursor.goto_parent();
-        }
+        walk_children(cursor, symbols, name_map, state);
 
-        state.pop_scope();
+        state.pop_scope(is_container, is_fn);
         return;
     }
 
-    if cursor.goto_first_child() {
-        loop {
-            walk_node(cursor, symbols, state);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-        cursor.goto_parent();
-    }
+    walk_children(cursor, symbols, name_map, state);
 }
 
 fn lines_of(node: &Node) -> (u32, u32) {
-    let start = node.start_position().row + 1;
-    let end = node.end_position().row;
-    (start as u32, end as u32)
+    let start = node.start_position().row as u32 + 1;
+    let end = node.end_position().row as u32 + 1;
+    (start, end)
 }
 
-fn extract_doc(node: &Node, source: &str) -> Option<String> {
-    let prev = node.prev_named_sibling()?;
-    let text = prev.utf8_text(source.as_bytes()).ok()?;
-    if text.starts_with("///") || text.starts_with("/**") || text.starts_with("//") {
-        Some(text.to_string())
+fn is_doc_marker(text: &str) -> bool {
+    text.starts_with("///")
+        || text.starts_with("//!")
+        || text.starts_with("/**")
+        || text.starts_with("/*!")
+}
+
+fn strip_doc_markers(text: &str) -> &str {
+    let trimmed = if let Some(rest) = text.strip_prefix("///") {
+        rest
+    } else if let Some(rest) = text.strip_prefix("//!") {
+        rest
+    } else if let Some(rest) = text.strip_prefix("/**") {
+        rest.trim_end_matches("*/")
+    } else if let Some(rest) = text.strip_prefix("/*!") {
+        rest.trim_end_matches("*/")
     } else {
-        None
-    }
+        text
+    };
+    trimmed.trim()
 }
 
-fn extract_base_classes(node: &Node, source: &str, _config: &LangConfig) -> Vec<String> {
-    let mut bases = Vec::new();
+fn extract_doc(node: &Node, source: &str, config: &LangConfig) -> Option<String> {
+    if !config.extract_docs {
+        return None;
+    }
+
+    let mut prev = node.prev_named_sibling()?;
+    while matches!(prev.kind(), "attribute_item" | "attribute" | "meta") {
+        prev = prev.prev_named_sibling()?;
+    }
+
+    // Walk backwards collecting contiguous doc-comment siblings (newest first).
+    let mut lines: Vec<&str> = Vec::with_capacity(4);
+    let mut cur = Some(prev);
+    while let Some(n) = cur {
+        let text = n.utf8_text(source.as_bytes()).ok()?;
+        if !is_doc_marker(text) {
+            break;
+        }
+        lines.push(text);
+        cur = n.prev_named_sibling();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+
+    let total: usize = lines.iter().map(|s| s.len()).sum::<usize>() + lines.len();
+    let mut buf = String::with_capacity(total);
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            buf.push('\n');
+        }
+        buf.push_str(strip_doc_markers(line));
+    }
+    Some(buf)
+}
+
+fn extract_base_classes(node: &Node, source: &str) -> Vec<String> {
+    let mut bases = Vec::with_capacity(4);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "superclass" || child.kind() == "base_class_clause" || child.kind() == "implements_clause" {
-            collect_identifiers(&child, source, &mut bases);
-        }
-        if child.kind() == "type_arguments" || child.kind() == "generic_type" {
+        if matches!(
+            child.kind(),
+            "superclass" | "base_class_clause" | "implements_clause"
+        ) {
             collect_identifiers(&child, source, &mut bases);
         }
     }
     bases
 }
 
-fn extract_traits(node: &Node, source: &str, _config: &LangConfig) -> Vec<String> {
-    let mut traits = Vec::new();
+fn extract_traits(node: &Node, source: &str) -> Vec<String> {
+    let mut traits = Vec::with_capacity(4);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "trait_bounds" || child.kind() == "implements_clause" || child.kind() == "with_clause" {
+        if matches!(
+            child.kind(),
+            "trait_bounds" | "implements_clause" | "with_clause"
+        ) {
             collect_identifiers(&child, source, &mut traits);
         }
     }
@@ -188,10 +346,13 @@ fn extract_traits(node: &Node, source: &str, _config: &LangConfig) -> Vec<String
 }
 
 fn collect_identifiers(node: &Node, source: &str, out: &mut Vec<String>) {
-    if (node.kind() == "identifier" || node.kind() == "type_identifier" || node.kind() == "scoped_identifier")
-        && let Ok(text) = node.utf8_text(source.as_bytes()) {
-            out.push(text.to_string());
-        }
+    if (node.kind() == "identifier"
+        || node.kind() == "type_identifier"
+        || node.kind() == "scoped_identifier")
+        && let Ok(text) = node.utf8_text(source.as_bytes())
+    {
+        out.push(text.to_string());
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_identifiers(&child, source, out);
@@ -199,63 +360,78 @@ fn collect_identifiers(node: &Node, source: &str, out: &mut Vec<String>) {
 }
 
 fn collect_edges(node: &Node, state: &mut WalkState, from_id: u32) {
-    let call_kind = state.config.call_node;
     let call_field = state.config.call_field;
     let ref_kind = state.config.ref_node;
 
-    collect_edges_recursive(node, state, from_id, call_kind, call_field, ref_kind);
+    collect_edges_recursive(node, state, from_id, call_field, ref_kind);
 }
 
 fn collect_edges_recursive(
     node: &Node,
     state: &mut WalkState,
     from_id: u32,
-    call_kind: &'static str,
     call_field: &'static str,
     ref_kind: &'static str,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
+        // Stop at nested symbol boundaries — their own emit collects their edges.
+        // Without this, calls inside nested fns/methods get attributed to the
+        // outer scope too (double-counting).
+        if state.config.kind_for(&child).is_some() {
+            continue;
+        }
+
         let kind = child.kind();
 
-        if kind == call_kind
-            && let Some(func_node) = child.child_by_field_name(call_field)
-        {
-            let callee = resolve_call_name(&func_node, state.source);
-            let line = child.start_position().row as u32 + 1;
-            state.add_edge(from_id, Target::Unresolved(callee), EdgeKind::Call, line);
+        if state.config.call_nodes.contains(&kind) {
+            let func_node = child
+                .child_by_field_name(call_field)
+                .or_else(|| child.child(0));
+            if let Some(fn_node) = func_node {
+                let callee = resolve_call_name(&fn_node, state.source);
+                let line = child.start_position().row as u32 + 1;
+                if !callee.is_empty() {
+                    state.add_edge(from_id, Target::Unresolved(callee), EdgeKind::Call, line);
+                }
+            }
         }
 
         if kind == ref_kind {
-            let text = child.utf8_text(state.source.as_bytes()).unwrap_or("").to_string();
-            let line = child.start_position().row as u32 + 1;
+            let text = child.utf8_text(state.source.as_bytes()).unwrap_or("");
             if !text.is_empty() {
-                state.add_edge(from_id, Target::Unresolved(text), EdgeKind::Ref, line);
+                let line = child.start_position().row as u32 + 1;
+                state.add_edge(
+                    from_id,
+                    Target::Unresolved(text.to_string()),
+                    EdgeKind::Ref,
+                    line,
+                );
             }
         }
 
         if child.child_count() > 0 {
-            collect_edges_recursive(&child, state, from_id, call_kind, call_field, ref_kind);
+            collect_edges_recursive(&child, state, from_id, call_field, ref_kind);
         }
     }
 }
 
 fn resolve_call_name(node: &Node, source: &str) -> String {
-    if node.kind() == "scoped_identifier" || node.kind() == "field_expression" || node.kind() == "member_expression" {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("");
-        return text.to_string();
-    }
-    if node.kind() == "selector_expression" {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("");
-        return text.to_string();
+    if node.kind() == "scoped_identifier"
+        || node.kind() == "field_expression"
+        || node.kind() == "member_expression"
+        || node.kind() == "selector_expression"
+    {
+        return node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
     }
     if node.kind() == "identifier" || node.kind() == "property_identifier" {
         return node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
     }
     if (node.kind() == "generic_function" || node.kind() == "generic_type")
-        && let Some(child) = node.child(0) {
-            return resolve_call_name(&child, source);
-        }
+        && let Some(child) = node.child(0)
+    {
+        return resolve_call_name(&child, source);
+    }
     node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
 }
 

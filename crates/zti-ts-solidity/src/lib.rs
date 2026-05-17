@@ -16,7 +16,7 @@ impl LanguageFrontend for SolidityFrontend {
     }
 
     fn extract_imports(&self, root: Node, source: &str) -> HashMap<String, String> {
-        let mut imports = HashMap::new();
+        let mut imports = HashMap::with_capacity(4);
         collect_solidity_imports(root, source, &mut imports);
         imports
     }
@@ -25,8 +25,30 @@ impl LanguageFrontend for SolidityFrontend {
 fn collect_solidity_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
     if node.kind() == "import_directive" {
         let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+        let mut found_named = false;
 
-        if let Some(path_node) = node.child_by_field_name("path") {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "import_declaration" {
+                collect_solidity_import_names(child, source, &text, imports, &mut found_named);
+            }
+        }
+
+        if !found_named {
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                if child.kind() == "identifier"
+                    && let Ok(name) = child.utf8_text(source.as_bytes())
+                        && !name.is_empty() {
+                            imports.entry(name.to_string()).or_insert_with(|| text.clone());
+                            found_named = true;
+                        }
+            }
+        }
+
+        if !found_named
+            && let Some(path_node) = node.child_by_field_name("path")
+        {
             let path_text = path_node.utf8_text(source.as_bytes()).unwrap_or("");
             let clean = path_text.trim_matches('"').trim_matches('\'');
             let basename = clean.rsplit('/').next().unwrap_or(clean);
@@ -35,18 +57,44 @@ fn collect_solidity_imports(node: Node, source: &str, imports: &mut HashMap<Stri
                 imports.entry(name.to_string()).or_insert_with(|| text.clone());
             }
         }
-
-        for child in node.children(&mut node.walk()) {
-            if (child.kind() == "import_declaration" || child.kind() == "identifier")
-                && let Ok(name) = child.utf8_text(source.as_bytes())
-                    && !name.is_empty() {
-                        imports.entry(name.to_string()).or_insert_with(|| text.clone());
-                    }
-        }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_solidity_imports(child, source, imports);
+    }
+}
+
+fn collect_solidity_import_names(
+    node: Node,
+    source: &str,
+    text: &str,
+    imports: &mut HashMap<String, String>,
+    found_named: &mut bool,
+) {
+    let mut prev_was_as = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "as" {
+            prev_was_as = true;
+            continue;
+        }
+        if prev_was_as && child.kind() == "identifier" {
+            if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                imports.entry(name.to_string()).or_insert_with(|| text.to_string());
+                *found_named = true;
+            }
+            prev_was_as = false;
+            continue;
+        }
+        if child.kind() == "identifier" && !prev_was_as
+            && let Ok(name) = child.utf8_text(source.as_bytes())
+        {
+            imports.entry(name.to_string()).or_insert_with(|| text.to_string());
+            *found_named = true;
+        }
+        if child.child_count() > 0 && child.kind() != "identifier" && child.kind() != "as" {
+            collect_solidity_import_names(child, source, text, imports, found_named);
+        }
     }
 }
 

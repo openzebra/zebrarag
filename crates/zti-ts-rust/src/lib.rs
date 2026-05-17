@@ -44,7 +44,7 @@ fn collect_rust_imports(node: Node, source: &str, imports: &mut HashMap<String, 
 
 #[cfg(test)]
 mod tests {
-    use zti_ts_core::types::{Edge, Kind, Symbol, Target};
+    use zti_ts_core::types::{Edge, Kind, Symbol};
 
     use super::*;
 

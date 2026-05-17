@@ -25,7 +25,6 @@ mod tests {
     use zti_ts_core::types::Kind;
 
     use super::*;
-    use crate::registry::Language as Lang;
 
     #[test]
     fn parse_language_accepts_known_aliases() {

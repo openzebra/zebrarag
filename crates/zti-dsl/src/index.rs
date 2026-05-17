@@ -301,7 +301,7 @@ mod tests {
     use zti_ts_core::types::{Edge, EdgeKind, Kind, Symbol, Target};
     use zti_tree_sitter::Language;
 
-    use crate::model::{FileEntry, ProjectIndex};
+    use crate::model::FileEntry;
 
     use super::*;
 

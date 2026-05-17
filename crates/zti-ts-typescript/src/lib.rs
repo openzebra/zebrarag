@@ -16,7 +16,7 @@ impl LanguageFrontend for TypeScriptFrontend {
     }
 
     fn extract_imports(&self, root: Node, source: &str) -> HashMap<String, String> {
-        let mut imports = HashMap::new();
+        let mut imports = HashMap::with_capacity(8);
         collect_ts_imports(root, source, &mut imports);
         imports
     }
@@ -29,16 +29,39 @@ fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, St
             if child.kind() == "import_clause" {
                 for cc in child.children(&mut child.walk()) {
                     if cc.kind() == "identifier"
-                        && let Ok(name) = cc.utf8_text(source.as_bytes()) {
-                            imports.entry(name.to_string()).or_insert_with(|| text.clone());
-                        }
+                        && let Ok(name) = cc.utf8_text(source.as_bytes())
+                    {
+                        imports.entry(name.to_string()).or_insert_with(|| text.clone());
+                    }
                     if cc.kind() == "named_imports" || cc.kind() == "import_list" {
                         for specifier in cc.children(&mut cc.walk()) {
-                            if specifier.kind() == "import_specifier"
-                                && let Some(name_node) = specifier.child_by_field_name("name")
-                                    && let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                            if specifier.kind() == "import_specifier" {
+                                let key_node = specifier
+                                    .child_by_field_name("alias")
+                                    .or_else(|| specifier.child_by_field_name("name"));
+                                if let Some(kn) = key_node
+                                    && let Ok(name) = kn.utf8_text(source.as_bytes())
+                                {
+                                    imports.entry(name.to_string()).or_insert_with(|| text.clone());
+                                }
+                            }
+                        }
+                    }
+                    if cc.kind() == "namespace_import" {
+                        if let Some(id) = cc.child_by_field_name("name") {
+                            if let Ok(name) = id.utf8_text(source.as_bytes()) {
+                                imports.entry(name.to_string()).or_insert_with(|| text.clone());
+                            }
+                        } else {
+                            let mut saw_star = false;
+                            for nc in cc.children(&mut cc.walk()) {
+                                if nc.kind() == "*" {
+                                    saw_star = true;
+                                } else if saw_star && nc.kind() == "identifier"
+                                    && let Ok(name) = nc.utf8_text(source.as_bytes()) {
                                         imports.entry(name.to_string()).or_insert_with(|| text.clone());
                                     }
+                            }
                         }
                     }
                 }
