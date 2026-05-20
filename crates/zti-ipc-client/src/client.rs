@@ -14,8 +14,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn connect(timeout: Duration, model: Option<&str>) -> Result<Self> {
-        let stream = connect_or_spawn(timeout, model).await?;
+    pub async fn connect(timeout: Duration, model: Option<&str>, variant: Option<&str>) -> Result<Self> {
+        let stream = connect_or_spawn(timeout, model, variant).await?;
         Ok(Self { stream })
     }
 

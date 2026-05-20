@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use zti_hw::{Device, Hardware};
 
 use crate::pooling::PoolingStrategy;
 
@@ -107,16 +108,93 @@ impl TokenizerCfg {
     }
 }
 
-struct FamilyQuirks {
-    query_prefix: Option<&'static str>,
-    pooling: PoolingStrategyEnum,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum OnnxVariant {
+    Auto,
+    Fp32,
+    Fp16,
+    O4,
+    Int8,
+    Uint8,
+    Quantized,
+    Q4,
+    Q4f16,
+    Bnb4,
 }
 
-const BERT_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+impl OnnxVariant {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto      => "auto",
+            Self::Fp32      => "fp32",
+            Self::Fp16      => "fp16",
+            Self::O4        => "o4",
+            Self::Int8      => "int8",
+            Self::Uint8     => "uint8",
+            Self::Quantized => "quantized",
+            Self::Q4        => "q4",
+            Self::Q4f16     => "q4f16",
+            Self::Bnb4      => "bnb4",
+        }
+    }
+}
 
-const BERT_FAMILY_PREFIXES: &[&str] = &["bge-", "mxbai-", "gte-", "e5-"];
+impl std::fmt::Display for OnnxVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
-const ONNX_CANDIDATES: &[&str] = &["onnx/model.onnx", "model.onnx", "onnx/model_quantized.onnx"];
+fn classify(lower_filename: &str) -> Option<OnnxVariant> {
+    use OnnxVariant::*;
+
+    let stem = lower_filename.strip_suffix(".onnx")?;
+    if stem == "model" {
+        return Some(Fp32);
+    }
+    let body = stem
+        .strip_prefix("model_")
+        .or_else(|| stem.strip_prefix("model-"))
+        .unwrap_or(stem);
+
+    let mut best: Option<(OnnxVariant, u8)> = None;
+    for tok in body.split(['_', '-', '.']) {
+        let cur = match tok {
+            "q4f16"               => (Q4f16, 0),
+            "bnb4"                => (Bnb4, 1),
+            "q4"                  => (Q4, 2),
+            "fp16"                => (Fp16, 3),
+            "uint8"               => (Uint8, 4),
+            "int8" | "qint8"     => (Int8, 5),
+            "o4"                  => (O4, 6),
+            t if t.starts_with("quant") => (Quantized, 7),
+            _ => continue,
+        };
+        if best.is_none_or(|(_, p)| cur.1 < p) {
+            best = Some(cur);
+        }
+    }
+    best.map(|(v, _)| v)
+}
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+fn auto_variant_order(hw: &Hardware) -> &'static [OnnxVariant] {
+    use OnnxVariant::*;
+
+    match hw.device {
+        Device::Cuda   => &[O4, Fp16, Q4f16, Q4, Int8, Quantized, Fp32],
+        Device::Metal  => &[O4, Fp16, Q4f16, Int8, Quantized, Fp32],
+        Device::Vulkan => &[O4, Fp16, Q4f16, Int8, Quantized, Fp32],
+        Device::Npu    => &[Int8, Uint8, Quantized, Fp16, O4, Fp32],
+        Device::Cpu => match hw.mem_total {
+            m if m <  4 * GIB => &[Q4, Q4f16, Int8, Uint8, Quantized, Fp16, Fp32],
+            m if m <  8 * GIB => &[Int8, Quantized, Q4f16, Fp16, Fp32],
+            _                 => &[Int8, Quantized, Fp16, Fp32],
+        },
+    }
+}
 
 const TOKENIZER_CANDIDATES: &[&str] = &["tokenizer.json", "onnx/tokenizer.json"];
 
@@ -128,35 +206,47 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         .with_context(|| format!("parsing {}", path.display()))
 }
 
-fn lookup_quirks(model_name: &str) -> Option<FamilyQuirks> {
-    let lower = model_name.to_lowercase();
+#[derive(Debug, Clone, Deserialize)]
+struct PoolingConfig {
+    #[serde(default)]
+    pooling_mode_cls_token: Option<bool>,
+    #[serde(default)]
+    pooling_mode_mean_tokens: Option<bool>,
+}
 
-    if lower.contains("bge-small-en-v1.5")
-        || lower.contains("bge-base-en-v1.5")
-        || lower.contains("bge-large-en-v1.5")
+#[derive(Debug, Clone, Deserialize)]
+struct StConfig {
+    #[serde(default)]
+    prompts: Option<serde_json::Value>,
+}
+
+fn read_pooling_from_metadata(dir: &Path) -> PoolingStrategyEnum {
+    let pooling_path = dir.join("1_Pooling").join("config.json");
+    if let Ok(cfg) = read_json::<PoolingConfig>(&pooling_path) {
+        if cfg.pooling_mode_cls_token == Some(true) {
+            return PoolingStrategyEnum::Cls;
+        }
+        if cfg.pooling_mode_mean_tokens == Some(true) {
+            return PoolingStrategyEnum::Mean;
+        }
+    }
+    PoolingStrategyEnum::Mean
+}
+
+fn read_query_prefix_from_metadata(dir: &Path) -> Option<String> {
+    let st_path = dir.join("config_sentence_transformers.json");
+    let cfg = read_json::<StConfig>(&st_path).ok()?;
+    let prompts = cfg.prompts?;
+    if let Some(obj) = prompts.as_object()
+        && let Some(query_prompt) = obj.get("query").and_then(|v| v.as_str())
     {
-        return Some(FamilyQuirks {
-            query_prefix: Some(BERT_QUERY_PREFIX),
-            pooling: PoolingStrategyEnum::Cls,
-        });
-    }
-    if lower.contains("mxbai-embed-large") {
-        return Some(FamilyQuirks {
-            query_prefix: Some(BERT_QUERY_PREFIX),
-            pooling: PoolingStrategyEnum::Cls,
-        });
-    }
-    if BERT_FAMILY_PREFIXES.iter().any(|p| lower.starts_with(p)) {
-        return Some(FamilyQuirks {
-            query_prefix: Some(BERT_QUERY_PREFIX),
-            pooling: PoolingStrategyEnum::Cls,
-        });
+        return Some(query_prompt.to_string());
     }
     None
 }
 
-pub fn resolve_profile(model_id: &str) -> Result<ModelProfile> {
-    let files = resolve_model_files(model_id)?;
+pub fn resolve_profile(model_id: &str, variant: OnnxVariant, hw: &Hardware) -> Result<ModelProfile> {
+    let files = resolve_model_files(model_id, variant, hw)?;
     let cfg: ModelConfig = read_json(&files.config_path)?;
 
     let tok_cfg_limit: usize = files
@@ -181,12 +271,9 @@ pub fn resolve_profile(model_id: &str) -> Result<ModelProfile> {
         "resolved max_length",
     );
 
-    let quirks = lookup_quirks(model_id);
-    let pooling = quirks
-        .as_ref()
-        .map(|q| q.pooling)
-        .unwrap_or(PoolingStrategyEnum::Mean);
-    let query_prefix = quirks.and_then(|q| q.query_prefix.map(String::from));
+    let onnx_dir = files.onnx_path.parent().unwrap_or(files.config_path.parent().unwrap_or(Path::new(".")));
+    let pooling = read_pooling_from_metadata(onnx_dir);
+    let query_prefix = read_query_prefix_from_metadata(onnx_dir);
 
     Ok(ModelProfile {
         model_id: model_id.to_string(),
@@ -203,16 +290,16 @@ pub fn resolve_profile(model_id: &str) -> Result<ModelProfile> {
     })
 }
 
-pub fn resolve_model_files(model_id: &str) -> Result<ResolvedModel> {
+pub fn resolve_model_files(model_id: &str, variant: OnnxVariant, hw: &Hardware) -> Result<ResolvedModel> {
     let p = Path::new(model_id);
     if p.exists() {
-        resolve_local(p)
+        resolve_local(p, variant, hw)
     } else {
-        resolve_hf(model_id)
+        resolve_hf(model_id, variant, hw)
     }
 }
 
-fn resolve_local(p: &Path) -> Result<ResolvedModel> {
+fn resolve_local(p: &Path, variant: OnnxVariant, hw: &Hardware) -> Result<ResolvedModel> {
     let (dir, explicit_onnx) = if p.is_dir() {
         (p, None)
     } else if p.extension().and_then(|s| s.to_str()) == Some("onnx") {
@@ -226,7 +313,7 @@ fn resolve_local(p: &Path) -> Result<ResolvedModel> {
 
     let onnx_path = match explicit_onnx {
         Some(file) => file.to_path_buf(),
-        None => find_onnx_in(dir)?,
+        None => find_onnx_in(dir, variant, hw)?,
     };
     let tokenizer_path = find_tokenizer_in(dir)?;
 
@@ -256,30 +343,99 @@ fn resolve_local(p: &Path) -> Result<ResolvedModel> {
     })
 }
 
-fn find_onnx_in(dir: &Path) -> Result<PathBuf> {
-    for c in ONNX_CANDIDATES {
-        let p = dir.join(c);
-        if p.exists() {
-            return Ok(p);
+fn find_onnx_in(dir: &Path, variant: OnnxVariant, hw: &Hardware) -> Result<PathBuf> {
+    let one;
+    let order: &[OnnxVariant] = match variant {
+        OnnxVariant::Auto => auto_variant_order(hw),
+        v => {
+            one = [v];
+            &one
+        }
+    };
+
+    let mut best_rank: usize = usize::MAX;
+    let mut best_path: Option<PathBuf> = None;
+
+    let mut unknown_path: Option<PathBuf> = None;
+    let mut unknown_count: usize = 0;
+
+    let mut lower = String::with_capacity(64);
+
+    for sub in ["", "onnx"] {
+        let joined;
+        let scan_dir: &Path = if sub.is_empty() {
+            dir
+        } else {
+            joined = dir.join(sub);
+            &joined
+        };
+        if !scan_dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(scan_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("onnx") {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+
+            lower.clear();
+            lower.push_str(name);
+            lower.make_ascii_lowercase();
+
+            match classify(&lower) {
+                Some(v) => {
+                    tracing::debug!(file = name, variant = ?v, "discovered onnx");
+                    if let Some(rank) = order.iter().position(|cv| *cv == v)
+                        && rank < best_rank
+                    {
+                        best_rank = rank;
+                        best_path = Some(path);
+                    }
+                }
+                None => {
+                    unknown_count += 1;
+                    if unknown_path.is_none() {
+                        unknown_path = Some(path);
+                    }
+                }
+            }
         }
     }
 
-    let mut found: Option<PathBuf> = None;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("onnx") {
-            if found.is_some() {
-                anyhow::bail!(
-                    "multiple .onnx files in {} — pass the specific file path \
-                     instead of the directory",
-                    dir.display()
-                );
-            }
-            found = Some(path);
-        }
+    if let Some(p) = best_path {
+        tracing::info!(path = %p.display(), "selected ONNX variant");
+        return Ok(p);
     }
-    found.ok_or_else(|| anyhow::anyhow!("no .onnx file found in {}", dir.display()))
+
+    if variant != OnnxVariant::Auto {
+        anyhow::bail!(
+            "requested ONNX variant {} not available in {}",
+            variant,
+            dir.display(),
+        );
+    }
+
+    if unknown_count == 1
+        && let Some(p) = unknown_path
+    {
+        tracing::warn!(
+            path = %p.display(),
+            "no classified variant; using lone unrecognised .onnx",
+        );
+        return Ok(p);
+    }
+    if unknown_count > 1 {
+        anyhow::bail!(
+            "multiple unrecognised .onnx files in {} — pass --variant or a \
+             direct .onnx path",
+            dir.display(),
+        );
+    }
+    anyhow::bail!("no .onnx file found in {}", dir.display())
 }
 
 fn find_tokenizer_in(dir: &Path) -> Result<PathBuf> {
@@ -307,7 +463,7 @@ fn split_model_id(model_id: &str) -> Result<(&str, &str)> {
     }
 }
 
-fn resolve_hf(model_id: &str) -> Result<ResolvedModel> {
+fn resolve_hf(model_id: &str, variant: OnnxVariant, hw: &Hardware) -> Result<ResolvedModel> {
     let (owner, name) = split_model_id(model_id)?;
 
     let model_dir = zti_common::paths::models_dir()?.join(model_id.replace('/', "_"));
@@ -346,7 +502,7 @@ fn resolve_hf(model_id: &str) -> Result<ResolvedModel> {
     } else {
         !(model_dir.join("config.json").exists()
             && find_tokenizer_in(&model_dir).is_ok()
-            && find_onnx_in(&model_dir).is_ok())
+            && find_onnx_in(&model_dir, variant, hw).is_ok())
     };
 
     if need_clone {
@@ -397,5 +553,5 @@ fn resolve_hf(model_id: &str) -> Result<ResolvedModel> {
         tracing::debug!(model = model_id, "HF repo already cloned, skipping");
     }
 
-    resolve_local(&model_dir)
+    resolve_local(&model_dir, variant, hw)
 }

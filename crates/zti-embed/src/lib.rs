@@ -6,4 +6,4 @@ pub mod pooling;
 pub mod tokenizer;
 
 pub use engine::EmbedEngine;
-pub use model_registry::ModelProfile;
+pub use model_registry::{ModelProfile, OnnxVariant};

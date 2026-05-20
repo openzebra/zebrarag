@@ -7,7 +7,7 @@ use ort::session::{RunOptions, SessionOutputs};
 use ort::value::ValueType;
 use tokio::sync::Mutex;
 
-use crate::model_registry::{ModelProfile, resolve_profile};
+use crate::model_registry::{ModelProfile, OnnxVariant, resolve_profile};
 use crate::normalize::normalize_l2;
 use crate::pooling::{PoolingStrategy, pool_row};
 use crate::tokenizer::Tokenizer;
@@ -36,11 +36,19 @@ impl EmbedEngine {
     pub fn load(model_id: &str) -> Result<Self> {
         let hw = probe();
         tracing::info!(device = ?hw.device, cpus = hw.cpus, "probing hardware");
-        Self::load_with_device(model_id, &hw)
+        Self::load_with_variant(model_id, &hw, OnnxVariant::Auto)
     }
 
     pub fn load_with_device(model_id: &str, hw: &Hardware) -> Result<Self> {
-        let mut profile = resolve_profile(model_id)?;
+        Self::load_with_variant(model_id, hw, OnnxVariant::Auto)
+    }
+
+    pub fn load_with_variant(
+        model_id: &str,
+        hw: &Hardware,
+        variant: OnnxVariant,
+    ) -> Result<Self> {
+        let mut profile = resolve_profile(model_id, variant, hw)?;
 
         tracing::info!(path = %profile.onnx_path.display(), "loading ONNX model");
 

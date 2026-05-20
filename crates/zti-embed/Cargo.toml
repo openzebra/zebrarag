@@ -18,3 +18,10 @@ zti-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 walkdir.workspace = true
+
+[features]
+clap = ["dep:clap"]
+
+[dependencies.clap]
+workspace = true
+optional = true

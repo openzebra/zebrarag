@@ -6,7 +6,7 @@ use clap::Parser;
 use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
-use zti_embed::EmbedEngine;
+use zti_embed::{EmbedEngine, OnnxVariant};
 use zti_hw::Hardware;
 
 mod handlers;
@@ -19,14 +19,15 @@ use state::DaemonState;
 #[derive(Parser)]
 #[command(name = "zti-daemon", about = "Zebra tree indexer daemon")]
 struct Cli {
-    /// HuggingFace repo id (e.g. `Xenova/bge-small-en-v1.5`) or a local
-    /// path to a .onnx file or a directory containing one.
     #[arg(short, long, default_value = "Xenova/bge-small-en-v1.5")]
     model: String,
+
+    #[arg(long, value_enum, default_value_t = OnnxVariant::Auto)]
+    variant: OnnxVariant,
 }
 
 fn main() -> Result<()> {
-    let Cli { model } = Cli::parse();
+    let Cli { model, variant } = Cli::parse();
 
     let pid_path = zti_common::paths::daemon_pid()?;
     let mut pid_file = std::fs::OpenOptions::new()
@@ -70,9 +71,9 @@ fn main() -> Result<()> {
     }
 
     tracing::info!("loading model: {}", model);
-    let engine = EmbedEngine::load(&model)?;
     let hw = zti_hw::probe();
     tracing::info!(device = ?hw.device, "hardware detected");
+    let engine = EmbedEngine::load_with_variant(&model, &hw, variant)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async_main(engine, hw, pid_file, pid_path, socket_path))
