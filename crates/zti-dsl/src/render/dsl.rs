@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use zti_tree_sitter::Language;
 use zti_ts_core::types::{EdgeKind, Kind, Target};
 
 use crate::model::ProjectIndex;
+use crate::render::MANIFEST_CAP;
 
 pub const LEGEND_LINE: &str = "# k short = Kind   f#=fn m#=method s#=struct e#=enum C#=class I#=iface t#=typealias c#=const v#=static .=field/variant E#=event X#=error M#=mod   PKG = project manifest";
 
@@ -15,13 +16,24 @@ const RUST_LEGEND: &str = "\
 Types: @=File, f=fn, m=method, s=struct, c=class/impl, t=trait, e=enum, v=var/field/variant, d=mod, k=const, y=typealias\n";
 
 /// O(N) once-per-index map: parent_id -> child ids. Used by render_symbol_rich
-/// so the siblings line is O(siblings) not O(all symbols).
+/// so the siblings line is O(siblings) not O(all symbols). Children are sorted
+/// by line at build time so render_node and rich-header siblings consume them
+/// in source order without per-call allocations.
 pub fn build_children_by_parent(index: &ProjectIndex) -> HashMap<u32, Vec<u32>> {
     let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(index.symbols.len() / 4);
     for sym in &index.symbols {
         if let Some(p) = sym.parent {
             map.entry(p).or_default().push(sym.id);
         }
+    }
+    for ids in map.values_mut() {
+        ids.sort_by_key(|cid| {
+            index
+                .symbols
+                .get(*cid as usize)
+                .map(|s| s.line)
+                .unwrap_or(0)
+        });
     }
     map
 }
@@ -70,8 +82,6 @@ fn lang_legend(lang: Language) -> &'static str {
     }
 }
 
-const MANIFEST_CAP: usize = 2048;
-
 fn symbol_or_descendant_matches(
     index: &ProjectIndex,
     children: &HashMap<u32, Vec<u32>>,
@@ -96,176 +106,145 @@ fn symbol_or_descendant_matches(
 
 fn load_manifest_content(root: &str, rel_path: &str) -> Option<String> {
     let full = if rel_path.starts_with('/') {
-        rel_path.to_string()
+        let mut s = String::with_capacity(rel_path.len());
+        s.push_str(rel_path);
+        s
     } else {
-        format!("{}/{}", root.trim_end_matches('/'), rel_path)
+        let root_trim = root.trim_end_matches('/');
+        let mut s = String::with_capacity(root_trim.len() + 1 + rel_path.len());
+        s.push_str(root_trim);
+        s.push('/');
+        s.push_str(rel_path);
+        s
     };
     let content = std::fs::read_to_string(&full).ok()?;
     if content.len() > MANIFEST_CAP {
         let end = content.ceil_char_boundary(MANIFEST_CAP);
-        Some(format!("{}\n...", &content[..end]))
+        let mut capped = String::with_capacity(end + 4);
+        capped.push_str(&content[..end]);
+        capped.push_str("\n...");
+        Some(capped)
     } else {
         Some(content)
     }
 }
 
-fn format_signature_ts(sig: &str) -> &str {
-    let trimmed = sig.trim();
-    if trimmed.is_empty() {
-        return trimmed;
-    }
-    let mut s = trimmed;
-    for prefix in [
-        "export default ",
-        "export ",
-        "declare ",
-        "public ",
-        "private ",
-        "protected ",
-        "async function ",
-        "function ",
-        "async ",
-        "static ",
-        "abstract ",
-        "class ",
-        "interface ",
-        "enum ",
-        "type ",
-        "const ",
-        "let ",
-        "var ",
-    ] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            s = rest;
-            break;
-        }
-    }
-    s.trim_end_matches(&['{', ';', ',', ' ', '\t'] as &[char])
-}
+const SIG_TAIL_TRIM: &[char] = &['{', ';', ',', ' ', '\t'];
 
-fn format_signature_dart(sig: &str) -> &str {
-    let trimmed = sig.trim();
-    if trimmed.is_empty() {
-        return trimmed;
-    }
-    let mut s = trimmed;
-    for prefix in [
-        "abstract ",
-        "external ",
-        "factory ",
-        "static ",
-        "late ",
-        "final ",
-        "const ",
-        "class ",
-        "mixin ",
-        "enum ",
-        "extension ",
-        "void ",
-        "String ",
-        "int ",
-        "double ",
-        "bool ",
-    ] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            s = rest;
-            break;
-        }
-    }
-    s.trim_end_matches(&['{', ';', ',', ' ', '\t'] as &[char])
-}
+// Order matters: longer-overlapping prefixes come first because the inner
+// match-and-break consumes the first hit per pass. The outer loop repeats
+// until no prefix matches, so chained keywords ("pub async fn …",
+// "export async function …") collapse to the bare signature.
+static RUST_PREFIXES: &[&str] = &[
+    "pub(crate) ",
+    "pub(super) ",
+    "pub ",
+    "unsafe fn ",
+    "async fn ",
+    "const fn ",
+    "fn ",
+    "unsafe ",
+    "async ",
+    "const ",
+    "static ",
+    "let ",
+    "struct ",
+    "enum ",
+    "trait ",
+    "mod ",
+    "impl ",
+    "type ",
+];
 
-fn format_signature_solidity(sig: &str) -> &str {
-    let trimmed = sig.trim();
-    if trimmed.is_empty() {
-        return trimmed;
-    }
-    let mut s = trimmed;
-    for prefix in [
-        "public ",
-        "private ",
-        "internal ",
-        "external ",
-        "pure ",
-        "view ",
-        "payable ",
-        "virtual ",
-        "override ",
-        "function ",
-        "event ",
-        "error ",
-        "struct ",
-        "contract ",
-        "interface ",
-        "library ",
-        "uint256 ",
-        "address ",
-        "bool ",
-        "string ",
-    ] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            s = rest;
-            break;
-        }
-    }
-    s.trim_end_matches(&['{', ';', ',', ' ', '\t'] as &[char])
-}
+static TS_PREFIXES: &[&str] = &[
+    "export default ",
+    "export ",
+    "declare ",
+    "public ",
+    "private ",
+    "protected ",
+    "async function ",
+    "function ",
+    "async ",
+    "static ",
+    "abstract ",
+    "readonly ",
+    "class ",
+    "interface ",
+    "enum ",
+    "type ",
+    "const ",
+    "let ",
+    "var ",
+];
 
-fn format_signature(sig: &str, lang: Language) -> &str {
-    match lang {
-        Language::Rust => format_signature_rust(sig),
-        Language::Ts | Language::Tsx => format_signature_ts(sig),
-        Language::Dart => format_signature_dart(sig),
-        Language::Solidity => format_signature_solidity(sig),
-    }
-}
+// Deliberately omits return types ("void ", "String ", "Future<…> ", …):
+// stripping them destroys reader-useful info, and enumerating every generic
+// container is hopeless.
+static DART_PREFIXES: &[&str] = &[
+    "abstract ",
+    "external ",
+    "factory ",
+    "static ",
+    "late ",
+    "final ",
+    "const ",
+    "class ",
+    "mixin ",
+    "enum ",
+    "extension ",
+    "typedef ",
+];
 
-fn format_signature_rust(sig: &str) -> &str {
-    let trimmed = sig.trim();
-    if trimmed.is_empty() {
-        return trimmed;
-    }
+// Deliberately omits primitive types ("uint256 ", "address ", …): for state
+// variables they are part of the signature, not boilerplate.
+static SOLIDITY_PREFIXES: &[&str] = &[
+    "public ",
+    "private ",
+    "internal ",
+    "external ",
+    "pure ",
+    "view ",
+    "payable ",
+    "virtual ",
+    "override ",
+    "function ",
+    "modifier ",
+    "event ",
+    "error ",
+    "struct ",
+    "contract ",
+    "interface ",
+    "library ",
+];
 
-    let mut s = trimmed;
-
-    let stripped = s
-        .strip_prefix("pub(crate) ")
-        .or_else(|| s.strip_prefix("pub(super) "))
-        .or_else(|| s.strip_prefix("pub "));
-    if let Some(rest) = stripped {
-        s = rest;
-    }
-
+fn strip_prefixes_loop<'a>(mut s: &'a str, prefixes: &[&str]) -> &'a str {
     loop {
         let before = s.as_ptr();
-        for prefix in [
-            "unsafe fn ",
-            "async fn ",
-            "const fn ",
-            "fn ",
-            "unsafe ",
-            "async ",
-            "const ",
-            "static ",
-            "let ",
-            "struct ",
-            "enum ",
-            "trait ",
-            "mod ",
-            "impl ",
-            "type ",
-        ] {
-            if let Some(rest) = s.strip_prefix(prefix) {
+        for &p in prefixes {
+            if let Some(rest) = s.strip_prefix(p) {
                 s = rest;
                 break;
             }
         }
         if s.as_ptr() == before {
-            break;
+            return s;
         }
     }
+}
 
-    s.trim_end_matches(&['{', ';', ',', ' ', '\t'] as &[char])
+fn format_signature(sig: &str, lang: Language) -> &str {
+    let trimmed = sig.trim();
+    if trimmed.is_empty() {
+        return trimmed;
+    }
+    let prefixes = match lang {
+        Language::Rust => RUST_PREFIXES,
+        Language::Ts | Language::Tsx => TS_PREFIXES,
+        Language::Dart => DART_PREFIXES,
+        Language::Solidity => SOLIDITY_PREFIXES,
+    };
+    strip_prefixes_loop(trimmed, prefixes).trim_end_matches(SIG_TAIL_TRIM)
 }
 
 fn render_node(
@@ -316,16 +295,7 @@ fn render_node(
     }
 
     if let Some(child_ids) = children.get(&id) {
-        let mut sorted: Vec<u32> = Vec::with_capacity(child_ids.len());
-        sorted.extend(child_ids.iter().copied());
-        sorted.sort_by_key(|cid| {
-            index
-                .symbols
-                .get(*cid as usize)
-                .map(|s| s.line)
-                .unwrap_or(0)
-        });
-        for cid in sorted {
+        for &cid in child_ids {
             if render_node(index, children, cid, depth + 1, out, lang, max_bytes) {
                 return true;
             }
@@ -502,7 +472,9 @@ impl<'a> DslRenderer<'a> {
 
         let filter_set: Option<HashSet<u16>> = file_filter.map(|f| f.iter().copied().collect());
 
-        let mut top_by_file: Vec<Vec<u32>> = vec![Vec::new(); self.index.files.len()];
+        let mut top_by_file: Vec<Vec<u32>> = (0..self.index.files.len())
+            .map(|_| Vec::with_capacity(8))
+            .collect();
         for sym in &self.index.symbols {
             if sym.parent.is_none() {
                 top_by_file[sym.file_idx as usize].push(sym.id);
@@ -518,27 +490,21 @@ impl<'a> DslRenderer<'a> {
             });
         }
 
-        let mut by_label: HashMap<&'static str, (Language, Vec<usize>)> = HashMap::with_capacity(4);
+        let mut by_label: BTreeMap<&'static str, (Language, Vec<usize>)> = BTreeMap::new();
         for (file_idx, file) in self.index.files.iter().enumerate() {
             if let Some(ref set) = filter_set
                 && !set.contains(&(file_idx as u16))
             {
                 continue;
             }
-            let label = lang_label(file.language);
             by_label
-                .entry(label)
+                .entry(lang_label(file.language))
                 .or_insert_with(|| (file.language, Vec::with_capacity(16)))
                 .1
                 .push(file_idx);
         }
-        let mut lang_files: Vec<(&'static str, Language, Vec<usize>)> = by_label
-            .into_iter()
-            .map(|(label, (lang, files))| (label, lang, files))
-            .collect();
-        lang_files.sort_by_key(|(label, _, _)| *label);
 
-        for (label, lang, file_indices) in &lang_files {
+        for (label, (lang, file_indices)) in &by_label {
             let has_symbols = file_indices.iter().any(|&fi| !top_by_file[fi].is_empty());
             if !has_symbols {
                 continue;
@@ -836,21 +802,86 @@ mod tests {
     #[test]
     fn format_signature_rust_strips_visibility_and_keywords() {
         assert_eq!(
-            format_signature_rust("pub fn foo() -> Result<()>"),
+            format_signature("pub fn foo() -> Result<()>", Language::Rust),
             "foo() -> Result<()>"
         );
-        assert_eq!(format_signature_rust("fn bar(x: i32)"), "bar(x: i32)");
-        assert_eq!(format_signature_rust("struct Point {"), "Point");
-        assert_eq!(format_signature_rust("enum Color {"), "Color");
-        assert_eq!(format_signature_rust("mod utils;"), "utils");
-        assert_eq!(format_signature_rust("pub(crate) fn hidden()"), "hidden()");
         assert_eq!(
-            format_signature_rust("const MAX: usize = 10;"),
+            format_signature("fn bar(x: i32)", Language::Rust),
+            "bar(x: i32)"
+        );
+        assert_eq!(
+            format_signature("struct Point {", Language::Rust),
+            "Point"
+        );
+        assert_eq!(format_signature("enum Color {", Language::Rust), "Color");
+        assert_eq!(format_signature("mod utils;", Language::Rust), "utils");
+        assert_eq!(
+            format_signature("pub(crate) fn hidden()", Language::Rust),
+            "hidden()"
+        );
+        assert_eq!(
+            format_signature("const MAX: usize = 10;", Language::Rust),
             "MAX: usize = 10"
         );
         assert_eq!(
-            format_signature_rust("pub unsafe async fn combo()"),
+            format_signature("pub unsafe async fn combo()", Language::Rust),
             "combo()"
+        );
+    }
+
+    #[test]
+    fn format_signature_ts_strips_chained_keywords() {
+        assert_eq!(
+            format_signature("public async function foo()", Language::Ts),
+            "foo()"
+        );
+        assert_eq!(
+            format_signature("export async function foo()", Language::Ts),
+            "foo()"
+        );
+        assert_eq!(
+            format_signature("public static doStuff()", Language::Ts),
+            "doStuff()"
+        );
+        assert_eq!(
+            format_signature("export default class Widget {", Language::Tsx),
+            "Widget"
+        );
+    }
+
+    #[test]
+    fn format_signature_dart_keeps_return_types() {
+        assert_eq!(
+            format_signature("Future<List<X>> fetchItems()", Language::Dart),
+            "Future<List<X>> fetchItems()"
+        );
+        assert_eq!(
+            format_signature("void main()", Language::Dart),
+            "void main()"
+        );
+        assert_eq!(
+            format_signature("static final apiUrl = '...'", Language::Dart),
+            "apiUrl = '...'"
+        );
+        assert_eq!(
+            format_signature("abstract class Repo {", Language::Dart),
+            "Repo"
+        );
+    }
+
+    #[test]
+    fn format_signature_solidity_strips_chained_modifiers() {
+        assert_eq!(
+            format_signature("public pure function balanceOf()", Language::Solidity),
+            "balanceOf()"
+        );
+        assert_eq!(
+            format_signature("external payable function deposit()", Language::Solidity),
+            "deposit()"
+        );
+        assert_eq!(
+            format_signature("uint256 totalSupply = 0", Language::Solidity),
+            "uint256 totalSupply = 0"
         );
     }
 

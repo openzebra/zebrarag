@@ -1,9 +1,18 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use tree_sitter::{Node, Tree, TreeCursor};
 
 use crate::config::LangConfig;
 use crate::types::{Edge, EdgeKind, Kind, ParseResult, Symbol, Target};
+
+fn squash_newlines(s: &str) -> Cow<'_, str> {
+    if s.contains('\n') {
+        Cow::Owned(s.replace('\n', " "))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
 
 pub fn parse_file(
     tree: &Tree,
@@ -194,8 +203,8 @@ fn walk_node(
 
         let name = match trait_name {
             Some(t) => {
-                let ty_clean = ty.replace('\n', " ");
-                let t_clean = t.replace('\n', " ");
+                let ty_clean = squash_newlines(ty);
+                let t_clean = squash_newlines(t);
                 let mut n = String::with_capacity(5 + t_clean.len() + 5 + ty_clean.len());
                 n.push_str("impl ");
                 n.push_str(&t_clean);
@@ -204,9 +213,10 @@ fn walk_node(
                 n
             }
             None => {
-                let mut n = String::with_capacity(5 + ty.len());
+                let ty_clean = squash_newlines(ty);
+                let mut n = String::with_capacity(5 + ty_clean.len());
                 n.push_str("impl ");
-                n.push_str(ty);
+                n.push_str(&ty_clean);
                 n
             }
         };
@@ -283,7 +293,13 @@ fn walk_node(
             return;
         };
 
-        if state.config.symbol_name_skip.contains(&name.as_str()) {
+        if state.config.symbol_name_skip.contains(&name.as_str())
+            || state
+                .config
+                .symbol_name_skip_prefix
+                .iter()
+                .any(|p| name.starts_with(p))
+        {
             return;
         }
 

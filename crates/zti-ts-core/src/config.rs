@@ -32,6 +32,7 @@ pub struct LangConfig {
     pub no_retag_kinds: &'static [&'static str],
     pub impl_node: Option<&'static str>,
     pub symbol_name_skip: &'static [&'static str],
+    pub symbol_name_skip_prefix: &'static [&'static str],
 }
 
 impl LangConfig {
@@ -268,6 +269,7 @@ pub static RUST_CONFIG: LangConfig = LangConfig {
     no_retag_kinds: &[],
     impl_node: Some("impl_item"),
     symbol_name_skip: &[],
+    symbol_name_skip_prefix: &[],
 };
 
 pub static TYPESCRIPT_CONFIG: LangConfig = LangConfig {
@@ -347,6 +349,7 @@ pub static TYPESCRIPT_CONFIG: LangConfig = LangConfig {
     no_retag_kinds: &[],
     impl_node: None,
     symbol_name_skip: &[],
+    symbol_name_skip_prefix: &[],
 };
 
 pub static DART_CONFIG: LangConfig = LangConfig {
@@ -457,7 +460,11 @@ pub static DART_CONFIG: LangConfig = LangConfig {
     instance_field_kinds: &["initialized_identifier"],
     no_retag_kinds: &[],
     impl_node: None,
-    symbol_name_skip: &["AppLocalizations"],
+    // Flutter's `flutter gen-l10n` emits AppLocalizations (the base abstract
+    // class) plus one AppLocalizationsXx per locale. The base name handles the
+    // root file; the prefix sweep below handles every per-locale subclass.
+    symbol_name_skip: &[],
+    symbol_name_skip_prefix: &["AppLocalizations"],
 };
 
 pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
@@ -567,4 +574,5 @@ pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
     no_retag_kinds: &["modifier_definition"],
     impl_node: None,
     symbol_name_skip: &[],
+    symbol_name_skip_prefix: &[],
 };

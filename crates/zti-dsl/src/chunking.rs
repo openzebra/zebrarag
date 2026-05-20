@@ -7,10 +7,9 @@ use zti_common::line_byte_range;
 use zti_ts_core::types::Kind;
 
 use crate::model::ProjectIndex;
-use crate::render::{LEGEND_LINE, build_children_by_parent, render_symbol_rich};
+use crate::render::{LEGEND_LINE, MANIFEST_CAP, build_children_by_parent, render_symbol_rich};
 
 const RICH_MAX_TARGETS: usize = 24;
-const MANIFEST_CAP: usize = 2048;
 
 pub fn find_manifest(root: &Path) -> Option<String> {
     crate::index::MANIFEST_NAMES.iter().find_map(|name| {

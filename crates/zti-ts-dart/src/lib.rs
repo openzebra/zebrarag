@@ -395,4 +395,36 @@ mod tests {
         );
         assert!(symbols.iter().any(|s| s.name == "Other"));
     }
+
+    #[test]
+    fn dart_app_localizations_per_locale_subclasses_are_skipped() {
+        let source = indoc::indoc! {"
+            class AppLocalizationsEn extends AppLocalizations {
+              String hello() => 'hi';
+            }
+            class AppLocalizationsRu extends AppLocalizations {
+              String hello() => 'privet';
+            }
+            class Other {
+              void real() {}
+            }
+        "};
+        let (symbols, _, _) = parse_dart(source);
+        assert!(
+            symbols.iter().all(|s| s.name != "AppLocalizationsEn"),
+            "AppLocalizationsEn should be skipped via prefix, got: {:?}",
+            symbols
+        );
+        assert!(
+            symbols.iter().all(|s| s.name != "AppLocalizationsRu"),
+            "AppLocalizationsRu should be skipped via prefix, got: {:?}",
+            symbols
+        );
+        assert!(
+            symbols.iter().all(|s| s.name != "hello"),
+            "methods of skipped subclasses should also not appear, got: {:?}",
+            symbols
+        );
+        assert!(symbols.iter().any(|s| s.name == "Other"));
+    }
 }
