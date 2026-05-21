@@ -11,14 +11,9 @@ use zti_tree_sitter::{Language, detect_from_path};
 /// content as a text chunk.
 const MANIFEST_NAMES: &[&str] = &["Cargo.toml", "pubspec.yaml", "package.json", "foundry.toml"];
 
-/// Lock files: large, mostly noise, never useful as embedding chunks.
-const LOCK_FILE_NAMES: &[&str] = &[
-    "Cargo.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "pubspec.lock",
-];
+fn is_lock_file(name: &str) -> bool {
+    name.ends_with(".lock") || name.contains("-lock.")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
@@ -59,7 +54,7 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
     let mut map = HashMap::new();
 
     let walker = WalkBuilder::new(root)
-        .hidden(false)
+        .hidden(true)
         .git_ignore(true)
         .build();
 
@@ -76,7 +71,7 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
         // Skip manifest + lock files by filename — manifests are already
         // emitted as `@ <path>` PKG blocks, lockfiles are pure noise.
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if MANIFEST_NAMES.contains(&file_name) || LOCK_FILE_NAMES.contains(&file_name) {
+        if MANIFEST_NAMES.contains(&file_name) || is_lock_file(file_name) {
             continue;
         }
 
