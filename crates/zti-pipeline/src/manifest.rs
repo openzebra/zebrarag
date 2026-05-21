@@ -6,6 +6,38 @@ use ignore::WalkBuilder;
 use zti_store::FileRow;
 use zti_tree_sitter::{Language, detect_from_path};
 
+/// Project manifests we already render as `@ <path>` blocks in the chunk
+/// preamble — skip them in the file walker so we don't re-embed the same
+/// content as a text chunk.
+const MANIFEST_NAMES: &[&str] = &["Cargo.toml", "pubspec.yaml", "package.json", "foundry.toml"];
+
+/// Lock files: large, mostly noise, never useful as embedding chunks.
+const LOCK_FILE_NAMES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "pubspec.lock",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Code(Language),
+    /// Any file we don't parse with tree-sitter but can read as UTF-8 text
+    /// (READMEs, design docs, plain text, YAML, JSON, etc.). One chunk per
+    /// file.
+    Text,
+}
+
+impl SourceKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SourceKind::Code(lang) => lang.as_str(),
+            SourceKind::Text => "text",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileSnapshot {
     pub rel_path: String,
@@ -13,7 +45,7 @@ pub struct FileSnapshot {
     pub blake3: [u8; 32],
     pub size_bytes: u64,
     pub contents: String,
-    pub language: Language,
+    pub kind: SourceKind,
 }
 
 pub struct Changes {
@@ -41,9 +73,19 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
             continue;
         }
 
-        let lang = match detect_from_path(path) {
-            Some(l) => l,
-            None => continue,
+        // Skip manifest + lock files by filename — manifests are already
+        // emitted as `@ <path>` PKG blocks, lockfiles are pure noise.
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if MANIFEST_NAMES.contains(&file_name) || LOCK_FILE_NAMES.contains(&file_name) {
+            continue;
+        }
+
+        // Tree-sitter language if recognised, otherwise text. Binary files
+        // are filtered naturally by `read_to_string` returning Err on
+        // invalid UTF-8.
+        let kind = match detect_from_path(path) {
+            Some(l) => SourceKind::Code(l),
+            None => SourceKind::Text,
         };
 
         let rel = path
@@ -79,7 +121,7 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
                 blake3,
                 size_bytes: metadata.len(),
                 contents,
-                language: lang,
+                kind,
             },
         );
     }

@@ -52,6 +52,7 @@ fn rust_short(kind: Kind) -> &'static str {
         Kind::Class | Kind::Impl => "c",
         Kind::Event => "E",
         Kind::Error => "X",
+        Kind::Document => "@",
     }
 }
 
@@ -62,7 +63,7 @@ fn short_for(kind: Kind, lang: Language) -> &'static str {
     }
 }
 
-fn lang_label(lang: Language) -> &'static str {
+pub(crate) fn lang_label(lang: Language) -> &'static str {
     match lang {
         Language::Rust => "Rust",
         Language::Ts => "TypeScript",
@@ -75,7 +76,7 @@ fn lang_label(lang: Language) -> &'static str {
 const GENERIC_LEGEND: &str = "\
 Types: @=File, C#=class, I#=interface, s#=struct, e#=enum, f#=fn, m#=method, v#=var/field/variant, c#=const, d#=mod, t#=typealias, E#=event, X#=error\n";
 
-fn lang_legend(lang: Language) -> &'static str {
+pub(crate) fn lang_legend(lang: Language) -> &'static str {
     match lang {
         Language::Rust => RUST_LEGEND,
         _ => GENERIC_LEGEND,
@@ -104,7 +105,7 @@ fn symbol_or_descendant_matches(
     false
 }
 
-fn load_manifest_content(root: &str, rel_path: &str) -> Option<String> {
+pub(crate) fn load_manifest_content(root: &str, rel_path: &str) -> Option<String> {
     let full = if rel_path.starts_with('/') {
         let mut s = String::with_capacity(rel_path.len());
         s.push_str(rel_path);

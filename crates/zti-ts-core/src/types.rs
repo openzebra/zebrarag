@@ -38,6 +38,7 @@ pub enum Kind {
     Impl,
     Event,
     Error,
+    Document,
 }
 
 impl Kind {
@@ -58,6 +59,7 @@ impl Kind {
             Kind::Impl => "c",
             Kind::Event => "E",
             Kind::Error => "X",
+            Kind::Document => "@",
         }
     }
 
@@ -78,6 +80,7 @@ impl Kind {
             Kind::Impl => "impl",
             Kind::Event => "event",
             Kind::Error => "error",
+            Kind::Document => "document",
         }
     }
 
@@ -98,6 +101,7 @@ impl Kind {
             "typealias" | "type" => Some(Kind::TypeAlias),
             "event" => Some(Kind::Event),
             "error" => Some(Kind::Error),
+            "document" => Some(Kind::Document),
             _ => None,
         }
     }

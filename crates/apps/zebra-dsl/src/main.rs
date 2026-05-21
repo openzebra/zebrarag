@@ -177,28 +177,31 @@ fn main() -> Result<()> {
             embed,
             template,
         } => {
-            let manifest = zti_dsl::chunking::find_manifest(&cli.root);
-            let chunker = DslChunker::new(&index, manifest.as_deref());
+            let mut preamble = String::with_capacity(8192);
+            zti_dsl::chunking::write_preamble(&index, &mut preamble);
 
             if template {
-                print!("{}", chunker.manifest_header());
+                print!("{}", preamble);
                 return Ok(());
             }
+
+            let chunker = DslChunker::new(&index);
+            print!("{}", preamble);
 
             let files: Vec<(String, String)> = match &file {
                 Some(path) => {
                     let full = cli.root.join(path);
                     vec![(full.display().to_string(), std::fs::read_to_string(&full)?)]
                 }
-                None => index
-                    .files
-                    .iter()
-                    .filter_map(|f| {
-                        std::fs::read_to_string(&f.path)
-                            .ok()
-                            .map(|c| (f.path.clone(), c))
-                    })
-                    .collect(),
+                None => {
+                    let mut v = Vec::with_capacity(index.files.len());
+                    for f in &index.files {
+                        if let Ok(c) = std::fs::read_to_string(&f.path) {
+                            v.push((f.path.clone(), c));
+                        }
+                    }
+                    v
+                }
             };
 
             for (label, content) in &files {
@@ -208,7 +211,7 @@ fn main() -> Result<()> {
                     } else {
                         println!("{}", chunk.display_text());
                     }
-                    println!("---SEPARATOR---");
+                    println!("---");
                 }
             }
         }

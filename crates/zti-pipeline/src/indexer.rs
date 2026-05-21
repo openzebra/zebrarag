@@ -19,7 +19,7 @@ use zti_tree_sitter::Language;
 const APPENDIX_DEPTH: usize = 2;
 const APPENDIX_CAP_PER_CHUNK: usize = 32;
 
-use crate::manifest::{FileSnapshot, detect_changes, walk_source_files};
+use crate::manifest::{FileSnapshot, SourceKind, detect_changes, walk_source_files};
 use crate::progress::ProgressReporter;
 
 pub struct IndexStats {
@@ -93,11 +93,16 @@ pub async fn index_project(
 
     // Single FS walk: reuse the snapshots we already loaded to drive the DSL
     // parser. Avoids walking the tree (and re-reading every file) a second
-    // time inside `zti_dsl::build_index`.
-    let dsl_sources = snapshots.iter().map(|(rel, snap)| SourceFile {
-        full_path: root.join(rel).display().to_string(),
-        content: snap.contents.as_str(),
-        language: snap.language,
+    // time inside `zti_dsl::build_index`. Text-kind snapshots have no
+    // tree-sitter frontend, so they're filtered out here and chunked
+    // separately below.
+    let dsl_sources = snapshots.iter().filter_map(|(rel, snap)| match snap.kind {
+        SourceKind::Code(lang) => Some(SourceFile {
+            full_path: root.join(rel).display().to_string(),
+            content: snap.contents.as_str(),
+            language: lang,
+        }),
+        SourceKind::Text => None,
     });
     let dsl_index = build_index_from_sources(root_str.to_string(), dsl_sources);
     info!(
@@ -107,24 +112,33 @@ pub async fn index_project(
         dsl_index.files.len(),
     );
 
-    let manifest = zti_dsl::chunking::find_manifest(root);
-    if manifest.is_some() {
-        info!("found project manifest");
-    }
+    let chunker = DslChunker::new(&dsl_index);
 
-    let chunker = DslChunker::new(&dsl_index, manifest.as_deref());
-
-    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, Language)> = Vec::with_capacity(need_reindex.len());
+    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, &'static str)> =
+        Vec::with_capacity(need_reindex.len());
     for rel in &need_reindex {
         let snap = match snapshots.get(rel) {
             Some(s) => s,
             None => continue,
         };
-        let full_path = root.join(rel);
-        let label = full_path.display().to_string();
-        let chunks = chunker.chunks_for_file(&label, &snap.contents);
-        for c in chunks {
-            all_pending.push((c, snap.language));
+        match snap.kind {
+            SourceKind::Code(lang) => {
+                let full_path = root.join(rel);
+                let label = full_path.display().to_string();
+                let chunks = chunker.chunks_for_file(&label, &snap.contents);
+                for c in chunks {
+                    all_pending.push((c, lang.as_str()));
+                }
+            }
+            SourceKind::Text => {
+                let full_path = root.join(rel).display().to_string();
+                let chunk = zti_dsl::chunking::chunk_text_file(
+                    rel.clone(),
+                    full_path,
+                    snap.contents.clone(),
+                );
+                all_pending.push((chunk, "text"));
+            }
         }
     }
 
@@ -134,7 +148,11 @@ pub async fn index_project(
         need_reindex.len()
     );
 
-    let chunk_sym_set: HashSet<u32> = all_pending.iter().map(|(c, _)| c.sym_id).collect();
+    let chunk_sym_set: HashSet<u32> = all_pending
+        .iter()
+        .filter(|(c, _)| !c.is_document())
+        .map(|(c, _)| c.sym_id)
+        .collect();
 
     let appendix_for = |sym_id: u32| -> Vec<u32> {
         let mut visited: HashSet<u32> = HashSet::with_capacity(16);
@@ -191,7 +209,7 @@ pub async fn index_project(
     // only ever sees the encoded ids/mask, not the source text.
     let encs: Vec<zti_embed::Tokenized> = {
         let mut bodies: Vec<String> = Vec::with_capacity(all_pending.len());
-        bodies.extend(all_pending.iter().map(|(c, _)| c.embed_text()));
+        bodies.extend(all_pending.iter().map(|(c, _)| c.embed_text().into_owned()));
         let mut refs: Vec<&str> = Vec::with_capacity(bodies.len());
         refs.extend(bodies.iter().map(String::as_str));
         engine.tokenize(&refs)?
@@ -303,15 +321,23 @@ pub async fn index_project(
                         }
                     };
 
-                    let parent_sym_id = dsl_index
-                        .symbols
-                        .get(chunk.sym_id as usize)
-                        .and_then(|s| s.parent);
-                    let appendix_ids = appendix_for(chunk.sym_id);
+                    let parent_sym_id = if chunk.is_document() {
+                        None
+                    } else {
+                        dsl_index
+                            .symbols
+                            .get(chunk.sym_id as usize)
+                            .and_then(|s| s.parent)
+                    };
+                    let appendix_ids: Vec<u32> = if chunk.is_document() {
+                        Vec::new()
+                    } else {
+                        appendix_for(chunk.sym_id)
+                    };
 
                     chunk_id_builder.append_value(chunk_id)?;
                     file_path_builder.append_value(&chunk.file);
-                    language_builder.append_value(lang.as_str());
+                    language_builder.append_value(lang);
                     symbol_qualified_builder.append_value(&chunk.qualified);
                     symbol_kind_builder.append_value(chunk.kind.as_str());
                     sym_id_builder.append_value(chunk.sym_id);
@@ -408,7 +434,13 @@ pub async fn index_project(
 
     upsert_files(&files_table, &snapshots, &need_reindex).await?;
 
-    let languages: HashSet<Language> = snapshots.values().map(|s| s.language).collect();
+    let languages: HashSet<Language> = snapshots
+        .values()
+        .filter_map(|s| match s.kind {
+            SourceKind::Code(l) => Some(l),
+            SourceKind::Text => None,
+        })
+        .collect();
     let languages: Vec<&Language> = languages.iter().collect();
     upsert_project(
         db,
@@ -462,7 +494,7 @@ async fn upsert_files(
                 std::sync::Arc::new(blake3_builder.finish()),
                 std::sync::Arc::new(UInt64Array::from(vec![snap.mtime_ns as u64])),
                 std::sync::Arc::new(UInt64Array::from(vec![snap.size_bytes])),
-                std::sync::Arc::new(StringArray::from(vec![snap.language.as_str()])),
+                std::sync::Arc::new(StringArray::from(vec![snap.kind.label()])),
                 std::sync::Arc::new(arrow::array::ListArray::new_null(
                     std::sync::Arc::new(arrow::datatypes::Field::new(
                         "item",
