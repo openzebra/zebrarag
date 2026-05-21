@@ -1,6 +1,6 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -8,26 +8,17 @@ use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServiceExt, tool};
+use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
-
-use zti_embed::OnnxVariant;
-use zti_ipc_client::Client;
-use zti_protocol::format_search_results;
-use zti_protocol::request::*;
-use zti_protocol::response::*;
+use zti_dsl::{
+    AsciiTreeRenderer, ProjectIndex, build_index, render::dsl::render_files_only,
+    render::dsl::DslRenderer,
+};
+use zti_tree_sitter::{parse_kinds, parse_language};
 
 #[derive(Parser)]
-#[command(name = "zebra-mcp", about = "Zebra MCP server (stdio)")]
-struct Cli {
-    #[arg(short, long)]
-    model: Option<String>,
-
-    #[arg(long, value_enum)]
-    variant: Option<OnnxVariant>,
-
-    #[arg(long)]
-    query_prefix: Option<String>,
-}
+#[command(name = "zebra-mcp", about = "Zebra MCP server (DSL-only, stdio)")]
+struct Cli;
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct FileTreeParams {
@@ -58,83 +49,51 @@ pub struct SymbolBodyParams {
     pub symbol_id: u32,
 }
 
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-pub struct SearchParams {
-    pub project_root: String,
-    pub query: String,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-pub struct IndexParams {
-    pub project_root: String,
-    pub refresh: Option<bool>,
-}
-
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-pub struct ProjectRootParam {
-    pub project_root: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 struct ZebraMcpServer {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    model: Option<String>,
-    variant: Option<OnnxVariant>,
-    query_prefix: Option<String>,
+    indexes: Arc<RwLock<HashMap<String, Arc<ProjectIndex>>>>,
 }
 
 impl ZebraMcpServer {
-    fn new(
-        model: Option<String>,
-        variant: Option<OnnxVariant>,
-        query_prefix: Option<String>,
-    ) -> Self {
+    fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
-            model,
-            variant,
-            query_prefix,
+            indexes: Arc::new(RwLock::new(HashMap::with_capacity(4))),
         }
     }
 
-    async fn client(&self) -> Result<Client, ErrorData> {
-        let variant: Option<&'static str> = self.variant.and_then(|v| match v {
-            OnnxVariant::Auto => None,
-            other => Some(other.as_str()),
-        });
-        let mut client = Client::connect(
-            Duration::from_secs(10),
-            self.model.as_deref(),
-            variant,
-            self.query_prefix.as_deref(),
-        )
-        .await
-        .map_err(daemon_err)?;
-        client.handshake().await.map_err(daemon_err)?;
-        Ok(client)
+    async fn get_index(&self, project_root: &str) -> Result<Arc<ProjectIndex>, ErrorData> {
+        let root = std::path::Path::new(project_root)
+            .canonicalize()
+            .map_err(|e| internal_err(format!("invalid project_root: {e}")))?;
+        let root_key = root.to_string_lossy().to_string();
+
+        let mut guard = self.indexes.write().await;
+        match guard.entry(root_key) {
+            Entry::Occupied(e) => Ok(Arc::clone(e.get())),
+            Entry::Vacant(e) => {
+                let key = e.key().clone();
+                let idx = Arc::new(
+                    tokio::task::spawn_blocking(move || build_index(&key))
+                        .await
+                        .map_err(|e| internal_err(format!("indexing task failed: {e}")))?
+                        .map_err(|e| internal_err(format!("indexing failed: {e}")))?,
+                );
+                e.insert(Arc::clone(&idx));
+                Ok(idx)
+            }
+        }
     }
 }
 
-/// Wrap a successful tool body text into a `CallToolResult`.
 fn ok_text(text: String) -> CallToolResult {
     CallToolResult::success(vec![Content::text(text)])
 }
 
-/// Daemon I/O failure (couldn't connect, framing error, etc.).
-fn daemon_err(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(format!("daemon I/O: {}", e), None)
-}
-
-/// Daemon returned a structured `ErrorBody` — propagate as MCP error.
-fn body_err(e: &ErrorBody) -> ErrorData {
-    ErrorData::invalid_params(e.message.clone(), None)
-}
-
-/// Wrong `Response` variant returned — protocol bug.
-fn unexpected_response() -> ErrorData {
-    ErrorData::internal_error("daemon returned unexpected response variant", None)
+fn internal_err(msg: String) -> ErrorData {
+    ErrorData::internal_error(msg, None)
 }
 
 #[rmcp::tool_router]
@@ -144,19 +103,16 @@ impl ZebraMcpServer {
         &self,
         Parameters(params): Parameters<FileTreeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DslFileTree(FileTreeReq {
-                project_root: params.project_root,
-                path_glob: params.path_glob,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DslFileTree(Ok(body)) => Ok(ok_text(body.text)),
-            Response::DslFileTree(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
+        let index = self.get_index(&params.project_root).await?;
+
+        let file_indices: Vec<u16> = if let Some(glob) = &params.path_glob {
+            zti_dsl::glob_match_files(&index.files, &index.root, glob)
+                .map_err(|e| internal_err(format!("bad glob: {e}")))?
+        } else {
+            (0..index.files.len() as u16).collect()
+        };
+
+        Ok(ok_text(render_files_only(&index, &file_indices)))
     }
 
     #[tool(description = "Returns the DSL symbol map for a language")]
@@ -164,241 +120,77 @@ impl ZebraMcpServer {
         &self,
         Parameters(params): Parameters<ProjectMapParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DslProjectMap(ProjectMapReq {
-                project_root: params.project_root,
-                language: params.language,
-                path_glob: params.path_glob,
-                kinds: params.kinds,
-                max_tokens: params.max_tokens,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DslProjectMap(Ok(body)) => Ok(ok_text(body.text)),
-            Response::DslProjectMap(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
+        let index = self.get_index(&params.project_root).await?;
+        let max_tokens = params.max_tokens.unwrap_or(8000);
+
+        let file_filter: Option<Vec<u16>> = params.language.as_ref().and_then(|l| {
+            let lang = parse_language(l)?;
+            Some(
+                zti_dsl::files_by_language(&index.files, lang),
+            )
+        });
+
+        let kind_filter = params.kinds.as_ref().map(|k| parse_kinds(k));
+
+        let renderer = DslRenderer::new(&index, max_tokens);
+        let text = renderer.render(file_filter.as_deref(), kind_filter.as_deref());
+
+        Ok(ok_text(text))
     }
 
-    #[tool(description = "Trace dependency chains for a symbol")]
+    #[tool(description = "Trace dependency chains for a symbol by its #ID")]
     async fn dep_tree(
         &self,
         Parameters(params): Parameters<DepTreeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DslDepTree(DepTreeReq {
-                project_root: params.project_root,
-                symbol_id: params.symbol_id,
-                direction: params.direction,
-                depth: params.depth,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DslDepTree(Ok(body)) => Ok(ok_text(body.text)),
-            Response::DslDepTree(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
+        let index = self.get_index(&params.project_root).await?;
+        let depth = params.depth.unwrap_or(2);
+
+        let renderer = AsciiTreeRenderer::new(&index);
+        let text = match params.direction.as_str() {
+            "callers" => renderer.render_callers(params.symbol_id, depth),
+            "callees" => renderer.render_callees(params.symbol_id, depth, false),
+            other => {
+                return Err(internal_err(format!(
+                    "direction must be 'callers' or 'callees', got '{other}'"
+                )));
+            }
+        };
+
+        Ok(ok_text(text))
     }
 
-    #[tool(description = "Read source code of a symbol")]
+    #[tool(description = "Read the exact source code of a symbol by its #ID")]
     async fn symbol_body(
         &self,
         Parameters(params): Parameters<SymbolBodyParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DslSymbolBody(SymbolBodyReq {
-                project_root: params.project_root,
-                symbol_id: params.symbol_id,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DslSymbolBody(Ok(body)) => Ok(ok_text(body.text)),
-            Response::DslSymbolBody(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
+        let index = self.get_index(&params.project_root).await?;
 
-    #[tool(description = "Search for code semantically")]
-    async fn search(
-        &self,
-        Parameters(params): Parameters<SearchParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::Search(SearchReq {
-                project_root: params.project_root,
-                query: params.query,
-                limit: params.limit.unwrap_or(5),
-                offset: None,
-                languages: None,
-                path_glob: None,
-                refresh_index: false,
-                exhaustive: false,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::Search(Ok(results)) => Ok(ok_text(format_search_results(&results))),
-            Response::Search(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
+        let sym = index
+            .symbols
+            .get(params.symbol_id as usize)
+            .ok_or_else(|| {
+                internal_err(format!("Symbol {} not found", params.symbol_id))
+            })?;
+        let file = index
+            .files
+            .get(sym.file_idx as usize)
+            .ok_or_else(|| {
+                internal_err(format!("File for symbol {} not found", params.symbol_id))
+            })?;
 
-    #[tool(description = "Index a project")]
-    async fn index(
-        &self,
-        Parameters(params): Parameters<IndexParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        // Progress frames are drained into a counter; we report the totals
-        // alongside the terminal stats. Future work (N11 follow-up): forward
-        // these to the MCP client via `Peer::notify_progress` when the caller
-        // supplied a `progressToken` in the request meta.
-        let progress_count = Arc::new(AtomicU64::new(0));
-        let counter = Arc::clone(&progress_count);
-        let resp = client
-            .request_streaming(
-                Request::Index(IndexReq {
-                    project_root: params.project_root,
-                    refresh: params.refresh.unwrap_or(false),
-                }),
-                move |frame| {
-                    if let Response::IndexProgress(_) = frame {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
-            )
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::Index(Ok(stats)) => Ok(ok_text(format!(
-                "Indexed {} chunks in {} files ({:.1}s, {} progress frames)",
-                stats.total_chunks,
-                stats.total_files,
-                stats.duration_ms as f64 / 1000.0,
-                progress_count.load(Ordering::Relaxed),
-            ))),
-            Response::Index(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
+        let content = std::fs::read_to_string(&file.path)
+            .map_err(|e| internal_err(format!("Failed to read {}: {e}", file.path)))?;
 
-    #[tool(description = "Show project status")]
-    async fn project_status(
-        &self,
-        Parameters(params): Parameters<ProjectRootParam>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::ProjectStatus(ProjectStatusReq {
-                project_root: params.project_root,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::ProjectStatus(Ok(s)) => Ok(ok_text(format!(
-                "Root: {}\nModel: {} (dim={})\nChunks: {}\nFiles: {}",
-                s.project_root, s.model_id, s.model_dim, s.total_chunks, s.total_files
-            ))),
-            Response::ProjectStatus(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
+        let range = zti_common::line_byte_range(&content, sym.line, sym.end_line);
+        let body = &content[range];
+        let text = format!(
+            "// File: {} | Lines: {}-{}\n{}",
+            file.path, sym.line, sym.end_line, body
+        );
 
-    #[tool(description = "Show daemon status")]
-    async fn daemon_status(&self) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DaemonStatus)
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DaemonStatus(s) => Ok(ok_text(format!(
-                "Uptime: {}s\nProjects: {}\nModel: {}\nDevice: {}",
-                s.uptime_secs, s.projects_loaded, s.model_id, s.device
-            ))),
-            _ => Err(unexpected_response()),
-        }
-    }
-
-    #[tool(description = "Remove a project")]
-    async fn remove_project(
-        &self,
-        Parameters(params): Parameters<IndexParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::RemoveProject(RemoveProjectReq {
-                project_root: params.project_root,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::RemoveProject(Ok(())) => Ok(ok_text("Project removed.".to_string())),
-            Response::RemoveProject(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
-
-    #[tool(description = "Stop the daemon")]
-    async fn stop(&self) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let _ = client.request(Request::Stop).await.map_err(daemon_err)?;
-        Ok(ok_text("Daemon stopped.".to_string()))
-    }
-
-    #[tool(description = "Run diagnostics")]
-    async fn doctor(
-        &self,
-        Parameters(params): Parameters<ProjectRootParam>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::Doctor(DoctorReq {
-                project_root: params.project_root,
-            }))
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::Doctor(Ok(r)) => {
-                use std::fmt::Write as _;
-                let mut out = String::new();
-                let _ = writeln!(out, "Device: {}", r.device);
-                for check in &r.checks {
-                    let marker = match check.status {
-                        CheckStatus::Ok => "OK",
-                        CheckStatus::Warn => "WARN",
-                        CheckStatus::Err => "ERR",
-                    };
-                    let _ = writeln!(out, "[{}] {}: {}", marker, check.name, check.message);
-                }
-                Ok(ok_text(out))
-            }
-            Response::Doctor(Err(e)) => Err(body_err(&e)),
-            _ => Err(unexpected_response()),
-        }
-    }
-
-    #[tool(description = "Show daemon environment")]
-    async fn daemon_env(&self) -> Result<CallToolResult, ErrorData> {
-        let mut client = self.client().await?;
-        let resp = client
-            .request(Request::DaemonEnv)
-            .await
-            .map_err(daemon_err)?;
-        match resp {
-            Response::DaemonEnv(env) => Ok(ok_text(format!(
-                "Data: {}\nSocket: {}\nModel: {}\nDevice: {}\nCPUs: {}\nRAM: {}MB",
-                env.data_dir, env.socket_path, env.model_id, env.device, env.cpus, env.mem_total_mb
-            ))),
-            _ => Err(unexpected_response()),
-        }
+        Ok(ok_text(text))
     }
 }
 
@@ -407,10 +199,8 @@ impl rmcp::ServerHandler for ZebraMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(
-            "Zebra Tree Indexer MCP server. Use file_tree, project_map, dep_tree, \
-             symbol_body for DSL graph. Use search, index, project_status, \
-             daemon_status, remove_project, stop, doctor, daemon_env for daemon \
-             operations."
+            "Zebra Tree Indexer MCP server (DSL-only). Use file_tree, project_map, dep_tree, \
+              symbol_body for AST graph queries."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -428,12 +218,8 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let Cli {
-        model,
-        variant,
-        query_prefix,
-    } = Cli::parse();
-    let server = ZebraMcpServer::new(model, variant, query_prefix);
+    let _cli = Cli::parse();
+    let server = ZebraMcpServer::new();
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
 

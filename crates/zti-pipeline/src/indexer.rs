@@ -114,7 +114,7 @@ pub async fn index_project(
 
     let chunker = DslChunker::new(&dsl_index, manifest.as_deref());
 
-    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, Language)> = Vec::new();
+    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, Language)> = Vec::with_capacity(need_reindex.len());
     for rel in &need_reindex {
         let snap = match snapshots.get(rel) {
             Some(s) => s,
@@ -184,28 +184,70 @@ pub async fn index_project(
     let reranker = TurboReranker::new(engine.dim())?;
     let mut chunks_table = db.chunks_table(engine.dim()).await?;
 
-    let mut iter = all_pending.into_iter();
-    loop {
-        let mut batch_items: Vec<(zti_dsl::chunking::Chunk, Language)> =
-            Vec::with_capacity(batch_size);
-        for _ in 0..batch_size {
-            match iter.next() {
-                Some(item) => batch_items.push(item),
-                None => break,
+    // Tokenize all chunks once, then sort by token length so each batch's
+    // dynamic padding in `prepare_from_encs` stays tight (no long chunk
+    // forcing short batch-mates to pad up to its length). The formatted
+    // `embed_text` strings are dropped right after tokenization — the model
+    // only ever sees the encoded ids/mask, not the source text.
+    let encs: Vec<zti_embed::Tokenized> = {
+        let mut bodies: Vec<String> = Vec::with_capacity(all_pending.len());
+        bodies.extend(all_pending.iter().map(|(c, _)| c.embed_text()));
+        let mut refs: Vec<&str> = Vec::with_capacity(bodies.len());
+        refs.extend(bodies.iter().map(String::as_str));
+        engine.tokenize(&refs)?
+    };
+
+    // All length math below must use the same cap that `prepare_from_encs`
+    // applies before running the model — otherwise a chunk that tokenizes to
+    // (say) 6000 ids but will be truncated to 2048 at inference inflates the
+    // bucketing pad estimate and forces a batch-of-one, defeating batching.
+    let model_max_len = engine.profile().max_length;
+    let effective_len = |idx: usize| encs[idx].ids.len().min(model_max_len).max(1);
+
+    // Sort ASCENDING. The first batches pack many short chunks (cheap, ~50 ms
+    // each) so progress visibly moves; the last few batches process the long
+    // chunks at seq=max_length (the expensive ones). Descending order is
+    // slightly better for ORT's BFCArena reuse but front-loads every slow
+    // batch and makes the run look frozen for the first 15–30 s — that
+    // perception cost dominated the real arena-extension cost in practice.
+    let mut order: Vec<usize> = (0..encs.len()).collect();
+    order.sort_by_key(|&i| effective_len(i));
+
+    // Token budget per batch matches the per-sample shape `batch_size` was
+    // sized for (≈512 tokens × batch_size items). Item count is capped at
+    // 4× batch_size so very short chunks don't inflate the working set just
+    // because the token budget allows it.
+    let budget_tokens = batch_size.saturating_mul(zti_embed::batch::TYPICAL_SEQ_LEN);
+    let max_items = batch_size.saturating_mul(4);
+
+    // Reusable per-batch view into `encs` (no per-batch allocation: cleared
+    // and refilled with references each iteration).
+    let mut batch_encs: Vec<&zti_embed::Tokenized> = Vec::with_capacity(max_items);
+
+    let mut cursor = 0usize;
+    while cursor < order.len() {
+        let mut end = cursor;
+        let mut pad_len = 0usize;
+        while end < order.len() {
+            let l = effective_len(order[end]);
+            let new_pad = pad_len.max(l);
+            let count = end - cursor + 1;
+            if count > 1
+                && (count.saturating_mul(new_pad) > budget_tokens || count > max_items)
+            {
+                break;
             }
+            pad_len = new_pad;
+            end += 1;
         }
-        if batch_items.is_empty() {
-            break;
-        }
+        let idxs = &order[cursor..end];
+        let n_batch = idxs.len();
 
-        let n_batch = batch_items.len();
+        batch_encs.clear();
+        batch_encs.extend(idxs.iter().map(|&i| &encs[i]));
 
-        let mut bodies: Vec<String> = Vec::with_capacity(batch_items.len());
-        bodies.extend(batch_items.iter().map(|(c, _)| c.embed_text()));
-        let mut bodies_ref: Vec<&str> = Vec::with_capacity(bodies.len());
-        bodies_ref.extend(bodies.iter().map(|s| s.as_str()));
-
-        match engine.embed_batch_async(&bodies_ref).await {
+        let batch_started = std::time::Instant::now();
+        match engine.embed_batch_tokenized_async(&batch_encs).await {
             Ok(embs) => {
                 let dim = engine.dim();
                 let now_ns = std::time::SystemTime::now()
@@ -213,25 +255,25 @@ pub async fn index_project(
                     .unwrap_or_default()
                     .as_nanos() as u64;
 
-                let n = batch_items.len();
+                let n = idxs.len();
                 let mut chunk_id_builder = FixedSizeBinaryBuilder::new(16);
-                let mut file_path_builder = StringBuilder::new();
-                let mut language_builder = StringBuilder::new();
-                let mut symbol_qualified_builder = StringBuilder::new();
-                let mut symbol_kind_builder = StringBuilder::new();
+                let mut file_path_builder = StringBuilder::with_capacity(n, n * 64);
+                let mut language_builder = StringBuilder::with_capacity(n, n * 8);
+                let mut symbol_qualified_builder = StringBuilder::with_capacity(n, n * 64);
+                let mut symbol_kind_builder = StringBuilder::with_capacity(n, n * 16);
                 let mut sym_id_builder = UInt32Array::builder(n);
                 let mut parent_sym_id_builder = UInt32Array::builder(n);
                 let mut appendix_sym_ids_builder = ListBuilder::new(UInt32Builder::new());
                 let mut start_line_builder = UInt32Array::builder(n);
                 let mut end_line_builder = UInt32Array::builder(n);
-                let mut content_builder = StringBuilder::new();
+                let mut content_builder = StringBuilder::with_capacity(n, n * 64);
                 let mut turbo_code_builder = BinaryBuilder::new();
                 let mut indexed_at_builder = UInt64Array::builder(n);
                 let mut embeddings: Vec<f32> = Vec::with_capacity(n * dim);
 
-                let zipped: Vec<_> = batch_items.into_iter().zip(embs).collect();
+                for (&idx, emb) in idxs.iter().zip(embs) {
+                    let (chunk, lang) = &all_pending[idx];
 
-                for ((chunk, lang), emb) in zipped {
                     if emb.iter().any(|v| v.is_nan()) {
                         tracing::warn!(
                             "NaN in embedding for {}:{}-{}, skipping",
@@ -336,7 +378,14 @@ pub async fn index_project(
                 tracing::warn!("embed_batch failed: {}", e);
             }
         }
+        tracing::debug!(
+            items = n_batch,
+            seq = pad_len,
+            ms = batch_started.elapsed().as_millis() as u64,
+            "embedded batch",
+        );
         reporter.inc(n_batch as u64);
+        cursor = end;
     }
 
     let hw = engine.hardware();
@@ -345,8 +394,7 @@ pub async fn index_project(
         .as_ref()
         .and_then(|r| r.search_params.as_deref())
         .and_then(|s| serde_json::from_str(s).ok());
-    let params =
-        zti_ann::choose_method(total_embedded, engine.dim(), hw, previous_params.as_ref());
+    let params = zti_ann::choose_method(total_embedded, engine.dim(), hw, previous_params.as_ref());
     info!(
         "search method: {:?} (n={}, dim={}, ram_avail={} MB)",
         params.method,

@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
-use usearch::ffi::MetricKind;
-use usearch::ffi::ScalarKind;
 use usearch::Index;
 use usearch::IndexOptions;
+use usearch::ffi::MetricKind;
+use usearch::ffi::ScalarKind;
 
 use crate::method::SearchParams;
 
@@ -82,7 +82,12 @@ impl AnnIndexBuilder {
 }
 
 impl AnnIndex {
-    pub fn build(dim: usize, flat: &[f32], chunk_ids: Vec<ChunkId>, p: &SearchParams) -> Result<Self> {
+    pub fn build(
+        dim: usize,
+        flat: &[f32],
+        chunk_ids: Vec<ChunkId>,
+        p: &SearchParams,
+    ) -> Result<Self> {
         let n = chunk_ids.len();
         let inner = new_index(dim, p)?;
         inner

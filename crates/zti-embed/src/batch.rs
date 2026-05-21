@@ -4,20 +4,28 @@ use zti_hw::{Device, Hardware};
 
 use crate::model_registry::ModelProfile;
 
-const F32: u64 = 4;
-
-const ATTN_TENSORS: u64 = 4;
-const FFN_TENSORS: u64 = 2;
-const PIPELINE_LIVE: u64 = 2;
+const F32: usize = 4;
+const ATTN_TENSORS: usize = 4;
+const FFN_TENSORS: usize = 2;
+const PIPELINE_LIVE: usize = 2;
 
 const BATCH_CEILING: usize = 64;
 
+pub const TYPICAL_SEQ_LEN: usize = 512;
+
+const DEFAULT_METAL_MEM_FRAC: (usize, usize) = (4, 10);
+const DEFAULT_CUDA_MEM_FRAC: (usize, usize) = (6, 10);
+const DEFAULT_VULKAN_MEM_FRAC: (usize, usize) = (5, 10);
+const DEFAULT_NPU_MEM_FRAC: (usize, usize) = (5, 10);
+const DEFAULT_CPU_MEM_FRAC: (usize, usize) = (5, 10);
+
 pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
-    let per_sample: u64 = (profile.max_length as u64)
-        .saturating_mul(profile.num_hidden_layers as u64)
+    let effective_seq = (profile.max_length).min(TYPICAL_SEQ_LEN);
+    let per_sample = effective_seq
+        .saturating_mul(profile.num_hidden_layers)
         .saturating_mul(
-            ATTN_TENSORS.saturating_mul(profile.hidden_size as u64)
-                + FFN_TENSORS.saturating_mul(profile.intermediate_size as u64),
+            ATTN_TENSORS.saturating_mul(profile.hidden_size)
+                + FFN_TENSORS.saturating_mul(profile.intermediate_size),
         )
         .saturating_mul(F32)
         .saturating_mul(PIPELINE_LIVE)
@@ -25,37 +33,39 @@ pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
 
     let (usable_num, usable_den) = usable_fraction(hw.device);
 
-    let budget = hw.mem_avail.saturating_mul(usable_num) / usable_den;
+    let budget = hw.mem_avail as usize * usable_num / usable_den;
 
     let weight_bytes = std::fs::metadata(&profile.onnx_path)
-        .map(|m| m.len())
+        .map(|m| m.len() as usize)
         .unwrap_or(0);
     let weight_overhead = weight_bytes.saturating_mul(2);
 
     let inference_budget = budget.saturating_sub(weight_overhead);
 
-    let raw = (inference_budget / per_sample).max(1) as usize;
+    let raw = (inference_budget / per_sample).max(1);
     let pow2 = prev_power_of_two(raw);
     pow2.min(BATCH_CEILING)
 }
 
-static FRAC_OVERRIDE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+static FRAC_OVERRIDE: OnceLock<Option<(usize, usize)>> = OnceLock::new();
 
-fn usable_fraction(device: Device) -> (u64, u64) {
+fn usable_fraction(device: Device) -> (usize, usize) {
     let cached = FRAC_OVERRIDE.get_or_init(|| {
         let s = std::env::var("ZTI_BATCH_MEM_FRAC").ok()?;
         let f = s.parse::<f64>().ok()?;
-        (0.05..=0.95).contains(&f).then_some(((f * 100.0) as u64, 100))
+        (0.05..=0.95)
+            .contains(&f)
+            .then_some(((f * 100.0) as usize, 100))
     });
     if let Some(v) = cached {
         return *v;
     }
     match device {
-        Device::Metal => (4, 10),
-        Device::Cuda => (6, 10),
-        Device::Vulkan => (5, 10),
-        Device::Npu => (5, 10),
-        Device::Cpu => (5, 10),
+        Device::Metal => DEFAULT_METAL_MEM_FRAC,
+        Device::Cuda => DEFAULT_CUDA_MEM_FRAC,
+        Device::Vulkan => DEFAULT_VULKAN_MEM_FRAC,
+        Device::Npu => DEFAULT_NPU_MEM_FRAC,
+        Device::Cpu => DEFAULT_CPU_MEM_FRAC,
     }
 }
 

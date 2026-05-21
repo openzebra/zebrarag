@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::model_registry::{ModelProfile, OnnxVariant, resolve_profile};
 use crate::normalize::normalize_l2;
 use crate::pooling::{PoolingStrategy, pool_row};
-use crate::tokenizer::Tokenizer;
+use crate::tokenizer::{Tokenized, Tokenizer};
 use zti_hw::{Hardware, probe, register};
 
 #[derive(Debug, Clone, Copy)]
@@ -190,6 +190,30 @@ impl EmbedEngine {
     pub fn recommended_batch_size(&self) -> usize {
         crate::batch::recommended_batch_size(&self.profile, &self.hardware)
     }
+
+    /// Tokenize a batch once. Callers sort the result by `ids.len()` to feed
+    /// length-homogeneous batches into `embed_batch_tokenized_async`, which
+    /// keeps `prepare_from_encs`'s dynamic padding tight without re-running
+    /// the tokenizer.
+    pub fn tokenize(&self, texts: &[&str]) -> Result<Vec<Tokenized>> {
+        self.tokenizer.encode_batch(texts)
+    }
+
+    /// Embed a pre-tokenized batch. The slice carries borrowed `Tokenized`
+    /// values so the caller can compose a batch out of any (possibly
+    /// non-contiguous) subset of an already-tokenized set without cloning
+    /// or rearranging the backing storage.
+    pub async fn embed_batch_tokenized_async(
+        &self,
+        encs: &[&Tokenized],
+    ) -> Result<Vec<Vec<f32>>> {
+        let prep = match prepare_from_encs(&self.profile, self.needs_token_type_ids, encs) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let mut guard = self.session.lock().await;
+        run_and_pool_async(&mut guard, prep).await
+    }
 }
 
 fn prepare(
@@ -201,15 +225,27 @@ fn prepare(
     if texts.is_empty() {
         return Ok(None);
     }
+    let encs = tokenizer.encode_batch(texts)?;
+    let mut refs: Vec<&Tokenized> = Vec::with_capacity(encs.len());
+    refs.extend(encs.iter());
+    Ok(prepare_from_encs(profile, needs_token_type_ids, &refs))
+}
+
+fn prepare_from_encs(
+    profile: &ModelProfile,
+    needs_token_type_ids: bool,
+    encs: &[&Tokenized],
+) -> Option<Prepared> {
+    if encs.is_empty() {
+        return None;
+    }
 
     let max_len = profile.max_length;
-    let batch = texts.len();
+    let batch = encs.len();
     let dim = profile.dim;
 
-    let encs = tokenizer.encode_batch(texts)?;
-
     let mut max_seq = 0usize;
-    for enc in &encs {
+    for enc in encs {
         let len = enc.ids.len().min(max_len);
         if len > max_seq {
             max_seq = len;
@@ -242,7 +278,7 @@ fn prepare(
         }
     }
 
-    Ok(Some(Prepared {
+    Some(Prepared {
         input_ids,
         attention_mask,
         token_type_ids_i64,
@@ -251,7 +287,7 @@ fn prepare(
         seq,
         dim,
         strategy: PoolingStrategy::from(profile.pooling),
-    }))
+    })
 }
 
 fn run_and_pool_sync(session: &mut Session, prep: Prepared) -> Result<Vec<Vec<f32>>> {

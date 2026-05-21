@@ -809,10 +809,7 @@ mod tests {
             format_signature("fn bar(x: i32)", Language::Rust),
             "bar(x: i32)"
         );
-        assert_eq!(
-            format_signature("struct Point {", Language::Rust),
-            "Point"
-        );
+        assert_eq!(format_signature("struct Point {", Language::Rust), "Point");
         assert_eq!(format_signature("enum Color {", Language::Rust), "Color");
         assert_eq!(format_signature("mod utils;", Language::Rust), "utils");
         assert_eq!(
