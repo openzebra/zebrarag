@@ -74,9 +74,9 @@ pub struct SearchParams {
     pub project_root: String,
     pub query: String,
     pub limit: Option<usize>,
-    pub lang: Option<String>,
-    pub path_glob: Option<String>,
+    #[schemars(description = "When true, brute-force scan ALL embeddings instead of the fast approximate index. More accurate but significantly slower. Use only when approximate search misses relevant results.")]
     pub exhaustive: Option<bool>,
+    #[schemars(description = "How the embedding model encodes the query: \"query\" (default, best for short keyword searches like 'find the auth handler') or \"passage\" (for longer descriptive input).")]
     pub mode: Option<String>,
 }
 
@@ -266,7 +266,7 @@ impl ZebraMcpServer {
         Ok(ok_text(out))
     }
 
-    #[tool(name = "search", description = "Semantic search across indexed code")]
+    #[tool(name = "search", description = "Semantic search across indexed code. Returns ranked results with file paths, symbol names, and matching code snippets.")]
     async fn search(
         &self,
         Parameters(params): Parameters<SearchParams>,
@@ -282,10 +282,8 @@ impl ZebraMcpServer {
             query: params.query,
             limit: params.limit.unwrap_or(5),
             offset: None,
-            languages: params
-                .lang
-                .map(|l| l.split(',').map(String::from).collect()),
-            path_glob: params.path_glob,
+            languages: None,
+            path_glob: None,
             refresh_index: false,
             exhaustive: params.exhaustive.unwrap_or(false),
             mode,
