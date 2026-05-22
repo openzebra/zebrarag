@@ -10,6 +10,22 @@ use zti_store::chunks_table::ChunkHit;
 
 const KNN_OVERFETCH_MULT: usize = 4;
 const DIVERSITY_PENALTY: f32 = 0.04;
+const KEYWORD_NAME_BOOST: f32 = 0.5;
+const KEYWORD_CONTENT_BOOST: f32 = 0.3;
+
+#[inline]
+fn apply_keyword_boost(query: &str, candidates: &mut [ChunkHit]) {
+    if query.is_empty() {
+        return;
+    }
+    for c in candidates {
+        if c.symbol_qualified.contains(query) {
+            c.score += KEYWORD_NAME_BOOST;
+        } else if c.content.contains(query) {
+            c.score += KEYWORD_CONTENT_BOOST;
+        }
+    }
+}
 
 pub struct SearchOpts<'a> {
     pub limit: usize,
@@ -90,6 +106,8 @@ pub async fn search(
         }
     };
 
+    apply_keyword_boost(query, &mut candidates);
+
     let rerank_input: Vec<(&[u8], f32)> = candidates
         .iter()
         .map(|c| (c.turbo_code.as_slice(), c.score))
@@ -139,11 +157,13 @@ pub async fn search_exhaustive(
     let query_emb = engine.embed_query_async(query).await?;
     let raw_k = opts.limit.saturating_mul(KNN_OVERFETCH_MULT);
 
-    let candidates = db
+    let mut candidates = db
         .chunks_table(engine.dim())
         .await?
         .knn_exhaustive(&query_emb, raw_k, opts.languages, opts.path_glob)
         .await?;
+
+    apply_keyword_boost(query, &mut candidates);
 
     let mut hits: Vec<Hit> = Vec::with_capacity(candidates.len());
     for c in candidates {
