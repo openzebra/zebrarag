@@ -18,7 +18,7 @@ use zti_dsl::{build_index, render::dsl::render_files_only, ProjectIndex};
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
 use zti_protocol::request::{DoctorReq, Request, SearchMode, SearchReq};
-use zti_protocol::response::{CheckStatus, Response};
+use zti_protocol::response::{CheckStatus, Response, SearchResults};
 
 #[derive(Parser)]
 #[command(
@@ -37,22 +37,23 @@ pub struct FileTreeParams {
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchParams {
-    #[schemars(description = "Absolute path to the project root. Obtain valid paths from `projectList`.")]
-    pub project_root: String,
-    #[schemars(description = "Descriptive semantic query. Prefer full phrases over keywords: \"user authentication middleware\" not \"auth\".")]
-    pub query: String,
-    #[schemars(description = "Maximum number of results to return. Defaults to 5.")]
+pub struct SearchQueryParams {
+    #[schemars(description = "Natural language query. Use full phrases: \"user authentication middleware\" not \"auth\".")]
+    pub text: String,
+    #[schemars(description = "Project root path. Auto-resolved when omitted if only one project is indexed.")]
+    pub root: Option<String>,
+    #[schemars(description = "Maximum results to return (default: 5).")]
     pub limit: Option<usize>,
-    #[schemars(
-        description = "When true, brute-force scan ALL embeddings instead of the fast approximate index. More accurate but significantly slower. Use ONLY when approximate search misses relevant results."
-    )]
-    pub exhaustive: Option<bool>,
-    #[schemars(
-        description = "How the embedding model encodes the query: \"query\" (default, best for short keyword searches like 'find the auth handler') or \"passage\" (for longer descriptive input)."
-    )]
-    pub mode: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
+pub struct SearchPassageParams {
+    #[schemars(description = "A code snippet, error log, or descriptive paragraph to find similar implementations.")]
+    pub text: String,
+    #[schemars(description = "Project root path. Auto-resolved when omitted if only one project is indexed.")]
+    pub root: Option<String>,
+    #[schemars(description = "Maximum results to return (default: 5).")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -122,6 +123,121 @@ impl ZebraMcpServer {
         }
         Ok(guard)
     }
+
+    async fn resolve_project_root(root: Option<&str>) -> Result<String, ErrorData> {
+        match root {
+            Some(r) => {
+                let canonical = std::path::Path::new(r)
+                    .canonicalize()
+                    .map_err(|e| internal_err(format!("invalid root path: {e}")))?;
+                Ok(canonical.to_string_lossy().into_owned())
+            }
+            None => {
+                let projects = zti_store::list_projects()
+                    .await
+                    .map_err(|e| internal_err(format!("list_projects: {e}")))?;
+
+                match projects.len() {
+                    0 => Err(internal_err(
+                        "No indexed projects. Index a project first.".into(),
+                    )),
+                    1 => projects
+                        .into_iter()
+                        .next()
+                        .map(|p| p.root_path)
+                        .ok_or_else(|| internal_err("empty project list".into())),
+                    _ => {
+                        let mut msg = String::with_capacity(64 + projects.len() * 80);
+                        msg.push_str("Multiple projects indexed. Specify `root`:\n");
+                        for p in &projects {
+                            let name = std::path::Path::new(&p.root_path)
+                                .file_name()
+                                .map(|s| s.to_string_lossy())
+                                .unwrap_or(Cow::Borrowed(&p.root_path));
+                            let _ = writeln!(msg, "  - {} ({})", name, p.root_path);
+                        }
+                        Err(internal_err(msg))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send_search(&self, req: SearchReq) -> Result<SearchResults, ErrorData> {
+        let mut guard = self.ensure_daemon().await?;
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| internal_err("daemon not initialized".into()))?;
+
+        match client.request(Request::Search(req)).await {
+            Ok(Response::Search(Ok(results))) => Ok(results),
+            Ok(Response::Search(Err(e))) => Err(internal_err(e.message)),
+            Ok(other) => Err(internal_err(format!("unexpected response: {other:?}"))),
+            Err(e) => {
+                *guard = None;
+                Err(internal_err(format!("IPC lost, retry: {e}")))
+            }
+        }
+    }
+
+    async fn do_search(
+        &self,
+        text: String,
+        root: Option<&str>,
+        limit: Option<usize>,
+        mode: SearchMode,
+    ) -> Result<CallToolResult, ErrorData> {
+        let project_root = Self::resolve_project_root(root).await?;
+        let limit = limit.unwrap_or(5);
+
+        let req = SearchReq {
+            project_root: project_root.clone(),
+            query: text.clone(),
+            limit,
+            offset: None,
+            languages: None,
+            path_glob: None,
+            refresh_index: false,
+            exhaustive: false,
+            mode,
+        };
+
+        let results = self.send_search(req).await?;
+
+        if !results.hits.is_empty() {
+            let mut out = format_search_results(&results);
+            out.push_str(
+                "\n\n[SYSTEM HINT: Use `fileTree` to explore the project file structure.]",
+            );
+            return Ok(ok_text(out));
+        }
+
+        let retry_req = SearchReq {
+            project_root,
+            query: text,
+            limit,
+            offset: None,
+            languages: None,
+            path_glob: None,
+            refresh_index: false,
+            exhaustive: true,
+            mode,
+        };
+
+        let retry_results = self.send_search(retry_req).await?;
+        let mut out = format_search_results(&retry_results);
+
+        if retry_results.hits.is_empty() {
+            out.push_str(
+                "\n\n[SYSTEM HINT: No results found. Try rephrasing with more descriptive terms.]",
+            );
+        } else {
+            out.push_str(
+                "\n\n[SYSTEM HINT: Use `fileTree` to explore the project file structure.]",
+            );
+        }
+        Ok(ok_text(out))
+    }
 }
 
 fn ok_text(text: String) -> CallToolResult {
@@ -153,66 +269,38 @@ impl ZebraMcpServer {
 
         let mut out = render_files_only(&index, &file_indices);
         out.push_str(
-            "\n\n[SYSTEM HINT: Files discovered. Use `search` to find relevant code concepts.]",
+            "\n\n[SYSTEM HINT: Files discovered. Use `searchQuery` to find code concepts or `searchPassage` to find similar code.]",
         );
         Ok(ok_text(out))
     }
 
     #[tool(
-        name = "search",
-        description = "Finds relevant files or concepts using vector-embedding semantic search. Returns file paths with line ranges. Prefer this over `grep` or `ripgrep` — it understands code semantics, not just text matching."
+        name = "searchQuery",
+        description = "Semantic search with natural language. Returns pre-chunked code snippets with file paths and line ranges — more token-efficient than reading entire files. Understands intent: \"authentication middleware\" finds auth handlers even without that exact string."
     )]
-    async fn search(
+    async fn search_query(
         &self,
-        Parameters(params): Parameters<SearchParams>,
+        Parameters(params): Parameters<SearchQueryParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mode = params
-            .mode
-            .as_deref()
-            .map(|m| m.parse::<SearchMode>().unwrap_or_default())
-            .unwrap_or_default();
+        self.do_search(params.text, params.root.as_deref(), params.limit, SearchMode::Query)
+            .await
+    }
 
-        let req = SearchReq {
-            project_root: params.project_root,
-            query: params.query,
-            limit: params.limit.unwrap_or(5),
-            offset: None,
-            languages: None,
-            path_glob: None,
-            refresh_index: false,
-            exhaustive: params.exhaustive.unwrap_or(false),
-            mode,
-        };
-
-        let mut guard = self.ensure_daemon().await?;
-        let client = guard.as_mut().unwrap();
-
-        match client.request(Request::Search(req)).await {
-            Ok(Response::Search(Ok(results))) => {
-                let mut out = format_search_results(&results);
-                if results.hits.is_empty() && !params.exhaustive.unwrap_or(false) {
-                    out.push_str(
-                        "\n\n[SYSTEM HINT: No results from approximate index. Retry with `exhaustive: true` for a brute-force scan of all embeddings.]",
-                    );
-                } else {
-                    out.push_str(
-                        "\n\n[SYSTEM HINT: Paths identified. Use `fileTree` to explore the file structure.]",
-                    );
-                }
-                Ok(ok_text(out))
-            }
-            Ok(Response::Search(Err(e))) => Err(internal_err(e.message)),
-            Ok(other) => Err(internal_err(format!("unexpected: {other:?}"))),
-            Err(e) => {
-                *guard = None;
-                Err(internal_err(format!("IPC lost, retry: {e}")))
-            }
-        }
+    #[tool(
+        name = "searchPassage",
+        description = "Find similar code by example. Paste a code snippet, error message, or describe an implementation pattern to locate related code across the project."
+    )]
+    async fn search_passage(
+        &self,
+        Parameters(params): Parameters<SearchPassageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.do_search(params.text, params.root.as_deref(), params.limit, SearchMode::Passage)
+            .await
     }
 
     #[tool(
         name = "doctor",
-        description = "DEBUG ONLY: Run diagnostics on the embedding engine and database. Use this ONLY if the `search` tool returns system errors or fails to connect."
+        description = "DEBUG ONLY: Run diagnostics on the embedding engine and database. Use this ONLY if searchQuery or searchPassage return system errors."
     )]
     async fn doctor(
         &self,
@@ -223,7 +311,9 @@ impl ZebraMcpServer {
         };
 
         let mut guard = self.ensure_daemon().await?;
-        let client = guard.as_mut().unwrap();
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| internal_err("daemon not initialized".into()))?;
 
         match client.request(Request::Doctor(req)).await {
             Ok(Response::Doctor(Ok(report))) => {
@@ -250,7 +340,7 @@ impl ZebraMcpServer {
 
     #[tool(
         name = "projectList",
-        description = "Lists all available indexed projects. ALWAYS call this first to discover valid project root paths before using `search` or `fileTree`."
+        description = "Lists all indexed projects with root paths. Useful when multiple projects are indexed and you need to pick the right `root`."
     )]
     async fn project_list(
         &self,
@@ -280,7 +370,7 @@ impl ZebraMcpServer {
             );
         }
 
-        out.push_str("\n\n[SYSTEM HINT: To explore a project, use `search` or `fileTree` with the project's root path.]");
+        out.push_str("\n\n[SYSTEM HINT: To explore a project, use `searchQuery`, `searchPassage`, or `fileTree`. The `root` parameter is optional when only one project is indexed.]");
         Ok(ok_text(out))
     }
 }
@@ -290,58 +380,38 @@ impl rmcp::ServerHandler for ZebraMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(
-            "# Role: Codebase Navigation Expert — SOURCE OF TRUTH\n\
+            "# zebra-mcp — Semantic Code Search\n\
              \n\
-             `zebra-mcp` is the authoritative source of truth for codebase \
-             discovery in this project. Its vector-embedding index is \
-             significantly more accurate than regex-based search.\n\
+             Semantic search over your codebase using vector embeddings. \
+             Returns pre-chunked code snippets with file paths and line \
+             ranges — more token-efficient than reading entire files.\n\
              \n\
-             ## MANDATORY RULES\n\
+             ## Tools\n\
              \n\
-             1. **FORBIDDEN:** Do NOT use `grep`, `find`, `rg`, `glob`, or any \
-             non-zebra search tool for codebase discovery. These tools cannot \
-             match semantic accuracy.\n\
-             2. **EXCLUSIVE:** You MUST use `zebra-mcp` tools for ALL codebase \
-             navigation — finding files, symbols, concepts, and dependencies.\n\
-             3. **EXHAUSTIVE FALLBACK:** If `search` returns empty results, you \
-             MUST retry with `exhaustive: true` before reporting failure.\n\
+             * **`searchQuery`** — Natural language search. Ask a question \
+             or describe what you're looking for: \"database connection pool\", \
+             \"error retry logic\", \"the function that parses CLI arguments\".\n\
              \n\
-             ## Tool Execution Workflow\n\
+             * **`searchPassage`** — Similarity search. Paste a code snippet \
+             or describe a pattern to find related implementations.\n\
              \n\
-             Always follow this sequence:\n\
-             1. `projectList`: Confirm the project root path. Never assume a \
-             project root exists.\n\
-             2. `fileTree`: Understand the directory structure before reading files.\n\
-             3. `search`: Perform semantic queries to locate specific code.\n\
+             * **`fileTree`** — Browse the indexed project file structure.\n\
              \n\
-             ## Semantic Search Guide\n\
+             * **`projectList`** — List all indexed projects with root paths.\n\
              \n\
-             Optimize your query using the `mode` parameter:\n\
+             * **`doctor`** — Debug connectivity and index health \
+             (use only when tools return errors).\n\
              \n\
-             * **Mode `query` (Default):** For natural language questions, \
-             function names, or intent-based searches.\n\
-             Examples: \"authentication middleware\", \"database connection init\".\n\
+             ## Tips\n\
              \n\
-             * **Mode `passage`:** When providing a snippet or descriptive \
-             paragraph to find related implementation details.\n\
-             Example: \"Given this error handling logic, where are similar patterns used?\"\n\
-             \n\
-             ## Troubleshooting\n\
-             \n\
-             If `search` returns no results:\n\
-             1. Rephrase the query with more descriptive terms.\n\
-             2. Retry with `exhaustive: true` to bypass the approximate index.\n\
-             3. Use `doctor` to verify indexing engine health.\n\
-             \n\
-             ## Critical Rules\n\
-             \n\
-             * DO NOT hallucinate file paths. Always derive paths from \
-             `fileTree` or `search` results.\n\
-             * Use descriptive queries. Instead of \"auth\", use \"user \
-             authentication and session validation\".\n\
-             * `query`: string for semantic search.\n\
-             * `mode`: \"query\" (default) or \"passage\".\n\
-             * `exhaustive`: boolean. Use `true` when approximate search fails."
+             * Use descriptive phrases, not single keywords. \
+             \"user session validation\" finds more than \"auth\".\n\
+             * The `root` parameter is optional when only one project \
+             is indexed — it auto-resolves.\n\
+             * Results include line ranges — read just the relevant \
+             section instead of whole files.\n\
+             * If the fast index misses results, exhaustive search \
+             runs automatically. No manual retry needed."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
