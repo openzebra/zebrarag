@@ -14,18 +14,17 @@ use rmcp::{ErrorData, ServiceExt, tool};
 use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::EnvFilter;
 use zti_common::format::format_elapsed;
-use zti_dsl::{
-    AsciiTreeRenderer, ProjectIndex, build_index, render::dsl::DslRenderer,
-    render::dsl::render_files_only,
-};
+use zti_dsl::{ProjectIndex, build_index, render::dsl::render_files_only};
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
-use zti_protocol::request::{DoctorReq, Request, SearchReq, SearchMode};
+use zti_protocol::request::{DoctorReq, Request, SearchMode, SearchReq};
 use zti_protocol::response::{CheckStatus, Response};
-use zti_tree_sitter::{parse_kinds, parse_language};
 
 #[derive(Parser)]
-#[command(name = "zebra-mcp", about = "Zebra MCP server (DSL + daemon IPC, stdio)")]
+#[command(
+    name = "zebra-mcp",
+    about = "Zebra MCP server (DSL + daemon IPC, stdio)"
+)]
 struct Cli;
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -37,39 +36,17 @@ pub struct FileTreeParams {
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectMapParams {
-    pub project_root: String,
-    pub language: Option<String>,
-    pub path_glob: Option<String>,
-    pub kinds: Option<Vec<String>>,
-    pub max_tokens: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct DepTreeParams {
-    pub project_root: String,
-    pub symbol_id: u32,
-    pub direction: String,
-    pub depth: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadCodeParams {
-    pub project_root: String,
-    pub symbol_ids: Vec<u32>,
-}
-
-#[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct SearchParams {
     pub project_root: String,
     pub query: String,
     pub limit: Option<usize>,
-    #[schemars(description = "When true, brute-force scan ALL embeddings instead of the fast approximate index. More accurate but significantly slower. Use only when approximate search misses relevant results.")]
+    #[schemars(
+        description = "When true, brute-force scan ALL embeddings instead of the fast approximate index. More accurate but significantly slower. Use only when approximate search misses relevant results."
+    )]
     pub exhaustive: Option<bool>,
-    #[schemars(description = "How the embedding model encodes the query: \"query\" (default, best for short keyword searches like 'find the auth handler') or \"passage\" (for longer descriptive input).")]
+    #[schemars(
+        description = "How the embedding model encodes the query: \"query\" (default, best for short keyword searches like 'find the auth handler') or \"passage\" (for longer descriptive input)."
+    )]
     pub mode: Option<String>,
 }
 
@@ -123,7 +100,9 @@ impl ZebraMcpServer {
         }
     }
 
-    async fn ensure_daemon(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, ErrorData> {
+    async fn ensure_daemon(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, ErrorData> {
         let mut guard = self.daemon.lock().await;
         if guard.is_none() {
             let mut client = Client::connect(Duration::from_secs(10), None, None, None, None)
@@ -149,7 +128,10 @@ fn internal_err(msg: String) -> ErrorData {
 
 #[rmcp::tool_router]
 impl ZebraMcpServer {
-    #[tool(name = "fileTree", description = "Maps the file structure. Use this to discover available source files and project roots in any project.")]
+    #[tool(
+        name = "fileTree",
+        description = "Maps the file structure. Use this to discover available source files and project roots in any project."
+    )]
     async fn file_tree(
         &self,
         Parameters(params): Parameters<FileTreeParams>,
@@ -164,74 +146,16 @@ impl ZebraMcpServer {
         };
 
         let mut out = render_files_only(&index, &file_indices);
-        out.push_str("\n\n[SYSTEM HINT: Files discovered. Use `search` to find concepts, or `projectMap` with `pathGlob` to get symbol #IDs for a specific file.]");
+        out.push_str(
+            "\n\n[SYSTEM HINT: Files discovered. Use `search` to find relevant code concepts.]",
+        );
         Ok(ok_text(out))
     }
 
-    #[tool(name = "projectMap", description = "Generates a symbol map for a specific file. REQUIRED: Use `pathGlob` to target one file. Returns the #IDs needed for `readCode`.")]
-    async fn project_map(
-        &self,
-        Parameters(params): Parameters<ProjectMapParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let index = self.get_index(&params.project_root).await?;
-        let max_tokens = params.max_tokens.unwrap_or(8000);
-
-        let lang = params.language.as_deref().and_then(parse_language);
-        let file_filter = zti_dsl::filter_files(
-            &index.files,
-            &index.root,
-            params.path_glob.as_deref(),
-            lang,
-        )
-        .map_err(internal_err)?;
-
-        let kind_filter = params.kinds.as_ref().map(|k| parse_kinds(k));
-
-        let renderer = DslRenderer::new(&index, max_tokens);
-        let mut out = renderer.render(Some(&file_filter), kind_filter.as_deref());
-        out.push_str("\n\n[SYSTEM HINT: Symbols mapped. Call `readCode` with the required #IDs (wrapped in an array) to fetch source code.]");
-        Ok(ok_text(out))
-    }
-
-    #[tool(name = "depTree", description = "Trace dependency chains. RULE: Requires an #ID resolved via `projectMap`. Do not guess identifiers.")]
-    async fn dep_tree(
-        &self,
-        Parameters(params): Parameters<DepTreeParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let index = self.get_index(&params.project_root).await?;
-        let depth = params.depth.unwrap_or(2);
-
-        let renderer = AsciiTreeRenderer::new(&index);
-        let text = match params.direction.as_str() {
-            "callers" => renderer.render_callers(params.symbol_id, depth),
-            "callees" => renderer.render_callees(params.symbol_id, depth, false),
-            other => {
-                return Err(internal_err(format!(
-                    "direction must be 'callers' or 'callees', got '{other}'"
-                )));
-            }
-        };
-
-        Ok(ok_text(text))
-    }
-
-    #[tool(name = "readCode", description = "READ CODE: Fetches source code by #IDs. RULE: You MUST resolve IDs using `projectMap` first. Do not guess IDs.")]
-    async fn read_code(
-        &self,
-        Parameters(params): Parameters<ReadCodeParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let index = self.get_index(&params.project_root).await?;
-        let entries = zti_dsl::resolve_symbol_bodies(&index, &params.symbol_ids);
-
-        let mut out = String::with_capacity(entries.len() * 256);
-        for entry in &entries {
-            let _ = writeln!(out, "{}\n---", entry);
-        }
-
-        Ok(ok_text(out))
-    }
-
-    #[tool(name = "search", description = "Finds relevant files or concepts. Returns paths only. NOTE: Does NOT return #IDs. Use returned paths as input for `projectMap`.")]
+    #[tool(
+        name = "search",
+        description = "Finds relevant files or concepts. Returns paths."
+    )]
     async fn search(
         &self,
         Parameters(params): Parameters<SearchParams>,
@@ -260,7 +184,7 @@ impl ZebraMcpServer {
         match client.request(Request::Search(req)).await {
             Ok(Response::Search(Ok(results))) => {
                 let mut out = format_search_results(&results);
-                out.push_str("\n\n[SYSTEM HINT: Paths identified. Call `projectMap` with `pathGlob` set to a path above to get symbol #IDs.]");
+                out.push_str("\n\n[SYSTEM HINT: Paths identified. Use `fileTree` to explore the file structure.]");
                 Ok(ok_text(out))
             }
             Ok(Response::Search(Err(e))) => Err(internal_err(e.message)),
@@ -272,7 +196,10 @@ impl ZebraMcpServer {
         }
     }
 
-    #[tool(name = "doctor", description = "DEBUG ONLY: Run diagnostics on the embedding engine and database. Use this ONLY if the `search` tool returns system errors or fails to connect.")]
+    #[tool(
+        name = "doctor",
+        description = "DEBUG ONLY: Run diagnostics on the embedding engine and database. Use this ONLY if the `search` tool returns system errors or fails to connect."
+    )]
     async fn doctor(
         &self,
         Parameters(params): Parameters<DoctorParams>,
@@ -307,7 +234,10 @@ impl ZebraMcpServer {
         }
     }
 
-    #[tool(name = "projectList", description = "Lists all available indexed projects. Use this to discover project root paths before using other tools.")]
+    #[tool(
+        name = "projectList",
+        description = "Lists all available indexed projects. Use this to discover project root paths before using other tools."
+    )]
     async fn project_list(
         &self,
         Parameters(_): Parameters<ProjectListParams>,
@@ -348,16 +278,13 @@ impl rmcp::ServerHandler for ZebraMcpServer {
         info.instructions = Some(
             "CRITICAL: You are connected to the Zebra Tree Indexer. \
              DO NOT GUESS OR HALLUCINATE code paths or symbol identifiers. \
-             You must extract information using this strict workflow:\n\n\
-             1. DISCOVER (Locate): Use `fileTree` to map the workspace and \
-             `search` to find relevant files or concepts.\n\
-             2. RESOLVE (Map): Use `projectMap` with a `pathGlob` targeting \
-             the specific file discovered in Step 1. This is the ONLY tool \
-             that provides the valid `#IDs` required for deep analysis.\n\
-             3. DEEP DIVE (Read): Use `readCode` with the specific `#IDs` \
-             obtained from the `projectMap`.\n\n\
-             Rule: Never attempt to read code or trace dependencies using \
-             identifiers you have not explicitly resolved via `projectMap`."
+             Follow this strict workflow:\n\n\
+             1. VERIFY: Use `projectList` to confirm the project is indexed.\n\
+             2. EXPLORE: Use `fileTree` to map the workspace structure.\n\
+             3. DISCOVER: Use `search` (semantic search) to find relevant \
+             code by concept, function, or feature. This is the PRIMARY \
+             discovery tool.\n\n\
+             Rule: Never guess identifiers or code paths."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
