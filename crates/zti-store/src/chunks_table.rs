@@ -171,7 +171,7 @@ impl ChunksTable {
             .iter()
             .map(|id| {
                 let hex: String = id.iter().map(|b| format!("{:02x}", b)).collect();
-                format!("'\\x{}'", hex)
+                format!("X'{}'", hex)
             })
             .collect();
 
