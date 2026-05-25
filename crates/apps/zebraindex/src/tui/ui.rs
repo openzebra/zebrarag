@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use super::app::{ActivePanel, App, DaemonStatus, DetailButton, Modal};
+use super::app::{ActivePanel, AddConfirmButton, App, DaemonStatus, DetailButton, Modal};
 
 const PREVIEW_LINES: usize = 6;
 
@@ -127,7 +127,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
         Style::default()
     };
 
-    let mut items: Vec<ListItem> = Vec::with_capacity(app.projects.len());
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.projects.len() + 1);
     for (i, p) in app.projects.iter().enumerate() {
         let name = std::path::Path::new(&p.root_path)
             .file_name()
@@ -152,20 +152,27 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(line));
     }
 
+    let is_add_row = app.selected_project == app.projects.len();
+    let add_style = if is_add_row {
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let add_prefix = if is_add_row { "> " } else { "  " };
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(add_prefix, add_style),
+        Span::styled("[+] New", add_style),
+    ])));
+
     let block = Block::default()
         .title(" Projects ")
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    if app.projects.is_empty() {
-        let placeholder = Paragraph::new("  (no projects)")
-            .block(block)
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(placeholder, area);
-    } else {
-        let list = List::new(items).block(block);
-        f.render_widget(list, area);
-    }
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
 }
 
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
@@ -267,7 +274,11 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
         match &app.modal {
             Some(Modal::ConfirmRemove) => "  y: confirm remove   n/Esc: cancel ",
             Some(Modal::Error { .. }) => "  Esc/Enter: dismiss ",
-            Some(Modal::Reindexing { .. }) => "  reindexing in progress... ",
+            Some(Modal::Indexing { .. }) => "  indexing in progress... ",
+            Some(Modal::AddProject { .. }) => "  Enter: submit   Esc: cancel ",
+            Some(Modal::AddProjectConfirm { .. }) => {
+                "  Tab/←→: select   Enter: confirm   Esc: cancel "
+            }
             _ => "  Tab/←→: select   Enter: confirm   Esc: back ",
         }
     } else {
@@ -299,12 +310,23 @@ fn draw_modal(f: &mut Frame, app: &App, tick: u16) {
         Some(Modal::Error { message }) => {
             draw_modal_error(f, message);
         }
-        Some(Modal::Reindexing {
+        Some(Modal::Indexing {
             current,
             total,
             message,
+            is_reindex,
         }) => {
-            draw_modal_reindexing(f, tick, *current, *total, message);
+            draw_modal_indexing(f, tick, *current, *total, message, *is_reindex);
+        }
+        Some(Modal::AddProject { path_input, error }) => {
+            draw_add_project(f, path_input, error.as_deref());
+        }
+        Some(Modal::AddProjectConfirm {
+            canonical_path,
+            already_indexed,
+            selected_button,
+        }) => {
+            draw_add_project_confirm(f, canonical_path, *already_indexed, *selected_button);
         }
         None => {}
     }
@@ -392,33 +414,34 @@ fn draw_project_detail(f: &mut Frame, project: &zti_store::ProjectRow, selected:
     f.render_widget(para, area);
 }
 
-fn draw_buttons(selected: DetailButton) -> Line<'static> {
-    const BUTTONS: &[(&str, DetailButton)] = &[
-        ("Remove", DetailButton::Remove),
-        ("Reindex", DetailButton::Reindex),
-        ("Back", DetailButton::Back),
-    ];
-
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(BUTTONS.len() * 3);
-    for (i, (label, btn)) in BUTTONS.iter().enumerate() {
+fn render_button_row(buttons: &[(&str, bool)]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(buttons.len() * 3);
+    for (i, (label, is_sel)) in buttons.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("    "));
         }
-        let is_sel = *btn == selected;
-        let style = if is_sel {
+        let style = if *is_sel {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let prefix = if is_sel { "> [" } else { "  [" };
+        let prefix = if *is_sel { "> [" } else { "  [" };
         spans.push(Span::styled(
-            format!("{}{}{}", prefix, label, if is_sel { "] <" } else { "]" }),
+            format!("{}{}{}", prefix, label, if *is_sel { "] <" } else { "]" }),
             style,
         ));
     }
     Line::from(spans)
+}
+
+fn draw_buttons(selected: DetailButton) -> Line<'static> {
+    render_button_row(&[
+        ("Remove", selected == DetailButton::Remove),
+        ("Reindex", selected == DetailButton::Reindex),
+        ("Back", selected == DetailButton::Back),
+    ])
 }
 
 fn draw_confirm_remove(f: &mut Frame, root_path: &str) {
@@ -488,12 +511,26 @@ fn draw_modal_error(f: &mut Frame, message: &str) {
     f.render_widget(para, area);
 }
 
-fn draw_modal_reindexing(f: &mut Frame, tick: u16, current: u64, total: u64, message: &str) {
+fn draw_modal_indexing(
+    f: &mut Frame,
+    tick: u16,
+    current: u64,
+    total: u64,
+    message: &str,
+    is_reindex: bool,
+) {
     let area = centered_rect(55, 30, f.area());
     f.render_widget(Clear, area);
 
+    let title = if is_reindex { " Reindexing " } else { " Indexing " };
+    let label = if is_reindex {
+        "Reindexing project..."
+    } else {
+        "Indexing project..."
+    };
+
     let block = Block::default()
-        .title(" Reindexing ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -518,7 +555,7 @@ fn draw_modal_reindexing(f: &mut Frame, tick: u16, current: u64, total: u64, mes
                 format!("  {} ", spinner_ch(tick)),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::raw("Reindexing project..."),
+            Span::raw(label),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -536,5 +573,102 @@ fn draw_modal_reindexing(f: &mut Frame, tick: u16, current: u64, total: u64, mes
     let para = Paragraph::new(text)
         .block(block)
         .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn draw_add_project(f: &mut Frame, path_input: &str, error: Option<&str>) {
+    let area = centered_rect(55, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Add Project ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let mut lines = Vec::with_capacity(8);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::raw(
+        "  Enter the path to the project directory:",
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(path_input, Style::default().fg(Color::White)),
+        Span::styled("\u{258f}", Style::default().fg(Color::Gray)),
+    ]));
+    lines.push(Line::from(""));
+
+    if let Some(err) = error {
+        lines.push(Line::from(Span::styled(
+            format!("  \u{2717} {}", err),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  Enter: submit   Esc: cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn draw_add_project_confirm(
+    f: &mut Frame,
+    canonical_path: &str,
+    already_indexed: bool,
+    selected: AddConfirmButton,
+) {
+    let area = centered_rect(55, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let name = std::path::Path::new(canonical_path)
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or(std::borrow::Cow::Borrowed("?"));
+
+    let status = if already_indexed {
+        "Already indexed (will re-index)"
+    } else {
+        "Not indexed"
+    };
+
+    let block = Block::default()
+        .title(" Confirm Index ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Project:   "),
+            Span::styled(name, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Path:      "),
+            Span::styled(canonical_path, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Status:    "),
+            Span::styled(status, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        render_button_row(&[
+            ("Confirm", selected == AddConfirmButton::Confirm),
+            ("Cancel", selected == AddConfirmButton::Cancel),
+        ]),
+    ];
+
+    let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 }

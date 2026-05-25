@@ -29,6 +29,7 @@ pub enum Action {
     DetailBack,
     ConfirmRemoveYes,
     ConfirmRemoveNo,
+    SubmitPath,
 }
 
 pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
@@ -104,7 +105,21 @@ fn map_modal_key(key: &event::KeyEvent, app: &App) -> Action {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::DetailBack,
             _ => Action::None,
         },
-        Some(Modal::Reindexing { .. }) => Action::None,
+        Some(Modal::Indexing { .. }) => Action::None,
+        Some(Modal::AddProject { .. }) => match key.code {
+            KeyCode::Enter => Action::SubmitPath,
+            KeyCode::Esc => Action::DetailBack,
+            KeyCode::Char(c) => Action::Input(c),
+            KeyCode::Backspace => Action::Backspace,
+            _ => Action::None,
+        },
+        Some(Modal::AddProjectConfirm { .. }) => match key.code {
+            KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => Action::DetailButtonNext,
+            KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => Action::DetailButtonPrev,
+            KeyCode::Enter => Action::DetailConfirm,
+            KeyCode::Esc | KeyCode::Char('q') => Action::DetailBack,
+            _ => Action::None,
+        },
         _ => match key.code {
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => Action::DetailButtonNext,
             KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => Action::DetailButtonPrev,

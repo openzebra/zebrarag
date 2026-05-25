@@ -249,35 +249,42 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                     app.selected_project = app.projects.len() - 1;
                 }
             }
-            let tx_c = tx.clone();
-            tokio::spawn(async move {
-                if let Ok(projects) = zti_store::list_projects().await {
-                    let _ = tx_c.send(AppMessage::ProjectsLoaded(projects)).await;
-                }
-            });
+            spawn_refresh_projects(tx);
         }
         AppMessage::ProjectRemoveError(e) => {
             app.modal = Some(app::Modal::Error { message: e });
         }
-        AppMessage::ReindexStarted => {
+        AppMessage::IndexComplete => {
             app.modal = None;
+            spawn_refresh_projects(tx);
         }
-        AppMessage::ReindexProgress {
+        AppMessage::IndexProgress {
             current,
             total,
             message,
+            is_reindex,
         } => {
-            app.modal = Some(app::Modal::Reindexing {
+            app.modal = Some(app::Modal::Indexing {
                 current,
                 total,
                 message,
+                is_reindex,
             });
         }
-        AppMessage::ReindexError(e) => {
+        AppMessage::IndexError(e) => {
             app.modal = Some(app::Modal::Error { message: e });
         }
         other => app.apply_message(other),
     }
+}
+
+fn spawn_refresh_projects(tx: &mpsc::Sender<AppMessage>) {
+    let tx_c = tx.clone();
+    tokio::spawn(async move {
+        if let Ok(projects) = zti_store::list_projects().await {
+            let _ = tx_c.send(AppMessage::ProjectsLoaded(projects)).await;
+        }
+    });
 }
 
 fn spawn_daemon_monitor(app: &App, tx: &mpsc::Sender<AppMessage>) {
@@ -412,7 +419,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
             }
         }
         event::Action::SelectNextProject => {
-            if app.selected_project + 1 < app.projects.len() {
+            if app.selected_project < app.projects.len() {
                 app.selected_project += 1;
             }
         }
@@ -425,10 +432,27 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
             app.results_scroll = app.results_scroll.saturating_add(1);
         }
         event::Action::Input(c) => {
-            app.search_input.push(c);
+            if let Some(app::Modal::AddProject {
+                ref mut path_input,
+                ref mut error,
+                ..
+            }) = app.modal
+            {
+                path_input.push(c);
+                *error = None;
+            } else {
+                app.search_input.push(c);
+            }
         }
         event::Action::Backspace => {
-            app.search_input.pop();
+            if let Some(app::Modal::AddProject {
+                ref mut path_input, ..
+            }) = app.modal
+            {
+                path_input.pop();
+            } else {
+                app.search_input.pop();
+            }
         }
         event::Action::SubmitSearch => {
             if !app.search_input.is_empty() && !app.searching {
@@ -469,46 +493,99 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
         }
 
         event::Action::OpenProjectDetail => {
-            if !app.projects.is_empty() {
+            if app.selected_project == app.projects.len() {
+                app.modal = Some(app::Modal::AddProject {
+                    path_input: String::with_capacity(256),
+                    error: None,
+                });
+            } else if !app.projects.is_empty() {
                 app.modal = Some(app::Modal::ProjectDetail {
                     selected_button: app::DetailButton::default(),
                 });
             }
         }
         event::Action::DetailButtonNext => {
-            if let Some(app::Modal::ProjectDetail { selected_button }) = &mut app.modal {
-                *selected_button = match selected_button {
-                    app::DetailButton::Remove => app::DetailButton::Reindex,
-                    app::DetailButton::Reindex => app::DetailButton::Back,
-                    app::DetailButton::Back => app::DetailButton::Remove,
-                };
+            match &mut app.modal {
+                Some(app::Modal::ProjectDetail { selected_button }) => {
+                    *selected_button = match selected_button {
+                        app::DetailButton::Remove => app::DetailButton::Reindex,
+                        app::DetailButton::Reindex => app::DetailButton::Back,
+                        app::DetailButton::Back => app::DetailButton::Remove,
+                    };
+                }
+                Some(app::Modal::AddProjectConfirm { selected_button, .. }) => {
+                    *selected_button = match selected_button {
+                        app::AddConfirmButton::Confirm => app::AddConfirmButton::Cancel,
+                        app::AddConfirmButton::Cancel => app::AddConfirmButton::Confirm,
+                    };
+                }
+                _ => {}
             }
         }
         event::Action::DetailButtonPrev => {
-            if let Some(app::Modal::ProjectDetail { selected_button }) = &mut app.modal {
-                *selected_button = match selected_button {
-                    app::DetailButton::Remove => app::DetailButton::Back,
-                    app::DetailButton::Reindex => app::DetailButton::Remove,
-                    app::DetailButton::Back => app::DetailButton::Reindex,
-                };
+            match &mut app.modal {
+                Some(app::Modal::ProjectDetail { selected_button }) => {
+                    *selected_button = match selected_button {
+                        app::DetailButton::Remove => app::DetailButton::Back,
+                        app::DetailButton::Reindex => app::DetailButton::Remove,
+                        app::DetailButton::Back => app::DetailButton::Reindex,
+                    };
+                }
+                Some(app::Modal::AddProjectConfirm { selected_button, .. }) => {
+                    *selected_button = match selected_button {
+                        app::AddConfirmButton::Confirm => app::AddConfirmButton::Cancel,
+                        app::AddConfirmButton::Cancel => app::AddConfirmButton::Confirm,
+                    };
+                }
+                _ => {}
             }
         }
         event::Action::DetailConfirm => {
-            if let Some(app::Modal::ProjectDetail { selected_button }) = app.modal.take() {
-                match selected_button {
-                    app::DetailButton::Remove => {
-                        app.modal = Some(app::Modal::ConfirmRemove);
-                    }
-                    app::DetailButton::Reindex => {
-                        if let Some(root) = app.selected_project_root_owned() {
-                            let ctx = ClientCtx::from_app(app);
-                            let tx_c = tx.clone();
-                            tokio::spawn(async move {
-                                do_reindex(root, ctx, tx_c).await;
-                            });
+            match app.modal.take() {
+                Some(app::Modal::ProjectDetail { selected_button }) => {
+                    match selected_button {
+                        app::DetailButton::Remove => {
+                            app.modal = Some(app::Modal::ConfirmRemove);
                         }
+                        app::DetailButton::Reindex => {
+                            if let Some(root) = app.selected_project_root_owned() {
+                                let ctx = ClientCtx::from_app(app);
+                                let tx_c = tx.clone();
+                                tokio::spawn(async move {
+                                    do_index(root, true, ctx, tx_c).await;
+                                });
+                            }
+                        }
+                        app::DetailButton::Back => {}
                     }
-                    app::DetailButton::Back => {}
+                }
+                Some(app::Modal::AddProjectConfirm {
+                    canonical_path,
+                    selected_button,
+                    ..
+                }) => match selected_button {
+                    app::AddConfirmButton::Confirm => {
+                        app.modal = Some(app::Modal::Indexing {
+                            current: 0,
+                            total: 0,
+                            message: String::with_capacity(64),
+                            is_reindex: false,
+                        });
+                        let ctx = ClientCtx::from_app(app);
+                        let tx_c = tx.clone();
+                        tokio::spawn(async move {
+                            do_index(canonical_path, false, ctx, tx_c).await;
+                        });
+                    }
+                    app::AddConfirmButton::Cancel => {
+                        app.modal = Some(app::Modal::AddProject {
+                            path_input: canonical_path,
+                            error: None,
+                        });
+                    }
+                },
+                other => {
+                    app.modal = other;
                 }
             }
         }
@@ -535,6 +612,48 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 });
             } else {
                 app.modal = None;
+            }
+        }
+        event::Action::SubmitPath => {
+            if let Some(app::Modal::AddProject {
+                ref path_input, ..
+            }) = app.modal
+            {
+                let trimmed = path_input.trim();
+                if trimmed.is_empty() {
+                    if let Some(app::Modal::AddProject {
+                        ref mut error, ..
+                    }) = app.modal
+                    {
+                        *error = Some(String::from("Path cannot be empty"));
+                    }
+                } else {
+                    let path = std::path::Path::new(trimmed);
+                    if !path.is_dir() {
+                        if let Some(app::Modal::AddProject {
+                            ref mut error, ..
+                        }) = app.modal
+                        {
+                            *error = Some(String::from("Directory does not exist"));
+                        }
+                    } else if let Ok(canonical) = path.canonicalize() {
+                        let canonical_str = canonical.to_string_lossy().into_owned();
+                        let already_indexed = app
+                            .projects
+                            .iter()
+                            .any(|p| p.root_path == canonical_str);
+                        app.modal = Some(app::Modal::AddProjectConfirm {
+                            canonical_path: canonical_str,
+                            already_indexed,
+                            selected_button: app::AddConfirmButton::default(),
+                        });
+                    } else if let Some(app::Modal::AddProject {
+                        ref mut error, ..
+                    }) = app.modal
+                    {
+                        *error = Some(String::from("Cannot resolve path"));
+                    }
+                }
             }
         }
         event::Action::None => {}
@@ -796,8 +915,9 @@ async fn do_remove_project(
     let _ = tx.send(AppMessage::ProjectRemoved).await;
 }
 
-async fn do_reindex(
+async fn do_index(
     project_root: String,
+    refresh: bool,
     ctx: ClientCtx,
     tx: mpsc::Sender<AppMessage>,
 ) {
@@ -815,14 +935,15 @@ async fn do_reindex(
             .request_streaming(
                 Request::Index(zti_protocol::request::IndexReq {
                     project_root,
-                    refresh: true,
+                    refresh,
                 }),
                 |frame| {
                     if let Response::IndexProgress(p) = frame {
-                        let _ = tx_p.try_send(AppMessage::ReindexProgress {
+                        let _ = tx_p.try_send(AppMessage::IndexProgress {
                             current: p.current,
                             total: p.total,
                             message: p.message,
+                            is_reindex: refresh,
                         });
                     }
                 },
@@ -839,10 +960,10 @@ async fn do_reindex(
 
     match result {
         Ok(()) => {
-            let _ = tx.send(AppMessage::ReindexStarted).await;
+            let _ = tx.send(AppMessage::IndexComplete).await;
         }
         Err(e) => {
-            let _ = tx.send(AppMessage::ReindexError(e.to_string())).await;
+            let _ = tx.send(AppMessage::IndexError(e.to_string())).await;
         }
     }
 }

@@ -75,6 +75,13 @@ pub enum DetailButton {
     Back,
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum AddConfirmButton {
+    #[default]
+    Confirm,
+    Cancel,
+}
+
 pub enum Modal {
     ProjectDetail {
         selected_button: DetailButton,
@@ -83,10 +90,20 @@ pub enum Modal {
     Error {
         message: String,
     },
-    Reindexing {
+    Indexing {
         current: u64,
         total: u64,
         message: String,
+        is_reindex: bool,
+    },
+    AddProject {
+        path_input: String,
+        error: Option<String>,
+    },
+    AddProjectConfirm {
+        canonical_path: String,
+        already_indexed: bool,
+        selected_button: AddConfirmButton,
     },
 }
 
@@ -109,13 +126,14 @@ pub enum AppMessage {
     },
     ProjectRemoved,
     ProjectRemoveError(String),
-    ReindexStarted,
-    ReindexProgress {
+    IndexComplete,
+    IndexProgress {
         current: u64,
         total: u64,
         message: String,
+        is_reindex: bool,
     },
-    ReindexError(String),
+    IndexError(String),
 }
 
 pub struct App {
@@ -184,8 +202,9 @@ impl App {
             AppMessage::DaemonStatusUpdate(status) => self.daemon_status = status,
             AppMessage::ProjectsLoaded(projects) => {
                 self.projects = projects;
-                if self.selected_project >= self.projects.len() && !self.projects.is_empty() {
-                    self.selected_project = 0;
+                let max = self.projects.len();
+                if self.selected_project > max {
+                    self.selected_project = max;
                 }
             }
             AppMessage::SearchDone(results) => {
