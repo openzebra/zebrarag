@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "zti-daemon"
-path = "src/main.rs"
+[lib]
+name = "zti_daemon"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -16,7 +16,7 @@ tracing-subscriber.workspace = true
 zti-protocol.workspace = true
 zti-pipeline.workspace = true
 zti-store.workspace = true
-zti-embed = { workspace = true, features = ["clap"] }
+zti-embed.workspace = true
 zti-dsl.workspace = true
 zti-ts-core.workspace = true
 zti-tree-sitter.workspace = true
@@ -25,7 +25,6 @@ zti-hw-core.workspace = true
 zti-common.workspace = true
 zti-rerank.workspace = true
 zti-ann.workspace = true
-clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

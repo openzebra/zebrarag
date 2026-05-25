@@ -39,15 +39,42 @@ fn spawn_daemon(
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("no parent dir for current exe"))?;
-    let daemon_path = dir.join("zti-daemon");
+
+    let exe_stem = exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let (daemon_bin, needs_subcommand) = if exe_stem == "zebraindex" {
+        (exe, true)
+    } else {
+        let zebraindex = dir.join("zebraindex");
+        if zebraindex.exists() {
+            (zebraindex, true)
+        } else {
+            let fallback = dir.join("zti-daemon");
+            if fallback.exists() {
+                (fallback, false)
+            } else {
+                anyhow::bail!(
+                    "neither zebraindex nor zti-daemon found in {} — install one",
+                    dir.display()
+                );
+            }
+        }
+    };
 
     let log_path = paths::daemon_log()?;
     let log_file = std::fs::File::create(&log_path)?;
 
-    let mut cmd = std::process::Command::new(&daemon_path);
+    let mut cmd = std::process::Command::new(&daemon_bin);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log_file);
+
+    if needs_subcommand {
+        cmd.arg("daemon");
+    }
     if let Some(m) = model {
         cmd.args(["--model", m]);
     }

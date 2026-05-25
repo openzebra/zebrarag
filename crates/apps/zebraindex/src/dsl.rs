@@ -1,25 +1,14 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
+use clap::Subcommand;
 
 use zti_dsl::render::dsl::{DslRenderer, render_files_only};
 use zti_dsl::render::tree::AsciiTreeRenderer;
 use zti_tree_sitter::{parse_kinds, parse_language};
 
-#[derive(Parser)]
-#[command(name = "zebra-dsl", version, about = "DSL graph dump for debugging")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-
-    #[arg(short, long, help = "Project root path")]
-    root: PathBuf,
-}
-
 #[derive(Subcommand)]
-enum Commands {
+pub enum DslCommands {
     #[command(about = "Show the file tree with numeric IDs")]
     FileTree {
         #[arg(short, long, help = "Glob pattern to filter files")]
@@ -70,19 +59,11 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
+    let canonical = root.canonicalize()?;
+    let root_cow = canonical.to_string_lossy();
 
-    let cli = Cli::parse();
-    let root_str = cli.root.canonicalize()?.to_string_lossy().to_string();
-
-    let index = zti_dsl::build_index(&root_str)?;
+    let index = zti_dsl::build_index(&root_cow)?;
     tracing::info!(
         "{} symbols, {} edges, {} files",
         index.symbols.len(),
@@ -90,12 +71,12 @@ fn main() -> Result<()> {
         index.files.len()
     );
 
-    match cli.command {
-        Commands::FileTree { path_glob: _ } => {
+    match command {
+        DslCommands::FileTree { path_glob: _ } => {
             let file_indices: Vec<u16> = (0..index.files.len() as u16).collect();
             print!("{}", render_files_only(&index, &file_indices));
         }
-        Commands::ProjectMap {
+        DslCommands::ProjectMap {
             language,
             path_glob: _,
             kinds,
@@ -121,7 +102,7 @@ fn main() -> Result<()> {
                 renderer.render(file_filter.as_deref(), kind_filter.as_deref())
             );
         }
-        Commands::DepTree {
+        DslCommands::DepTree {
             id,
             direction,
             depth,
@@ -133,7 +114,7 @@ fn main() -> Result<()> {
                 _ => return Err(anyhow::anyhow!("direction must be 'callers' or 'callees'")),
             }
         }
-        Commands::SymbolBody { id } => {
+        DslCommands::SymbolBody { id } => {
             let entries = zti_dsl::resolve_symbol_bodies(&index, &[id]);
             match entries.first() {
                 Some(zti_common::dsl::SymbolBodyEntry::Ok {
@@ -153,7 +134,7 @@ fn main() -> Result<()> {
                 None => return Err(anyhow::anyhow!("Symbol {} not found", id)),
             }
         }
-        Commands::SymbolBodies { ids } => {
+        DslCommands::SymbolBodies { ids } => {
             let entries = zti_dsl::resolve_symbol_bodies(&index, &ids);
             for entry in &entries {
                 println!("{}\n---", entry);

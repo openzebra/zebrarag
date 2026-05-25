@@ -3,42 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use indicatif::{ProgressBar, ProgressStyle};
-use tracing_subscriber::EnvFilter;
 
 use zti_common::format::format_elapsed;
-use zti_embed::OnnxVariant;
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
 use zti_protocol::request::*;
 use zti_protocol::response::*;
 
-#[derive(Parser)]
-#[command(
-    name = "zebra-embed",
-    version,
-    about = "Index / search / chat via daemon"
-)]
-struct Cli {
-    #[arg(short, long, global = true)]
-    model: Option<String>,
-
-    #[arg(long, global = true)]
-    variant: Option<OnnxVariant>,
-
-    #[arg(long, global = true)]
-    query_prefix: Option<String>,
-
-    #[arg(long, global = true)]
-    passage_prefix: Option<String>,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
 #[derive(Subcommand)]
-enum Commands {
+pub enum CliCommand {
     #[command(about = "Index a project")]
     Index {
         #[arg(short, long)]
@@ -92,9 +67,6 @@ enum Commands {
     Projects,
 }
 
-/// Connect to the daemon (auto-spawning if needed) and complete the mandatory
-/// handshake. Every subcommand uses this — including `Stop`. Replaces what was
-/// previously ~10 lines of duplicated boilerplate per command.
 async fn open_client(
     model: Option<&str>,
     variant: Option<&str>,
@@ -121,28 +93,17 @@ fn canon_opt(p: Option<PathBuf>) -> Result<Option<String>> {
     p.map(|r| canon(&r)).transpose()
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+pub async fn run(
+    cmd: CliCommand,
+    model: Option<&str>,
+    variant: Option<&str>,
+    query_prefix: Option<&str>,
+    passage_prefix: Option<&str>,
+) -> Result<()> {
+    let open = || open_client(model, variant, query_prefix, passage_prefix);
 
-    let cli = Cli::parse();
-
-    let model = cli.model.as_deref();
-    let variant: Option<String> = cli.variant.and_then(|v| match v {
-        OnnxVariant::Auto => None,
-        other => Some(other.to_string()),
-    });
-    let query_prefix = cli.query_prefix.as_deref();
-    let passage_prefix = cli.passage_prefix.as_deref();
-    let open = || open_client(model, variant.as_deref(), query_prefix, passage_prefix);
-    match cli.command {
-        Commands::Index { root, refresh } => {
+    match cmd {
+        CliCommand::Index { root, refresh } => {
             let mut client = open().await?;
             let project_root = canon(&root)?;
             let bar = RefCell::new(None::<ProgressBar>);
@@ -197,7 +158,7 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Search {
+        CliCommand::Search {
             root,
             query,
             limit,
@@ -230,11 +191,11 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Chat { root, limit } => {
+        CliCommand::Chat { root, limit } => {
             let mut client = open().await?;
             let project_root = canon(&root)?;
             let mut rl = rustyline::DefaultEditor::new()?;
-            println!("zebra-embed chat — type a query, :q or Ctrl-D to exit.");
+            println!("zebraindex chat — type a query, :q or Ctrl-D to exit.");
 
             while let Ok(line) = rl.readline("> ") {
                 let trimmed = line.trim();
@@ -268,7 +229,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Status { root } => {
+        CliCommand::Status { root } => {
             let mut client = open().await?;
             let project_root = canon_opt(root)?;
             let resp = client
@@ -285,7 +246,7 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Doctor { root } => {
+        CliCommand::Doctor { root } => {
             let mut client = open().await?;
             let project_root = canon_opt(root)?;
             let resp = client
@@ -307,7 +268,7 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Env => {
+        CliCommand::Env => {
             let mut client = open().await?;
             let resp = client.request(Request::DaemonEnv).await?;
             match resp {
@@ -332,14 +293,14 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Stop => {
+        CliCommand::Stop => {
             let mut client = open().await?;
             let resp = client.request(Request::Stop).await?;
             if matches!(resp, Response::Stop(())) {
                 println!("Daemon stopped.");
             }
         }
-        Commands::Remove { root } => {
+        CliCommand::Remove { root } => {
             let mut client = open().await?;
             let project_root = canon(&root)?;
             let resp = client
@@ -351,7 +312,7 @@ async fn main() -> Result<()> {
                 other => eprintln!("Unexpected response: {:?}", other),
             }
         }
-        Commands::Projects => {
+        CliCommand::Projects => {
             let projects = zti_store::list_projects().await?;
             if projects.is_empty() {
                 println!("No indexed projects found.");

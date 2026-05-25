@@ -1,0 +1,39 @@
+[package]
+name    = "zebraindex"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zebraindex"
+path = "src/main.rs"
+
+[dependencies]
+zti-daemon.workspace      = true
+zti-ipc-client.workspace   = true
+zti-protocol.workspace     = true
+zti-store.workspace        = true
+zti-common.workspace       = true
+zti-embed.workspace        = true
+zti-dsl.workspace          = true
+zti-tree-sitter.workspace  = true
+zti-ts-core.workspace      = true
+
+tokio.workspace            = true
+anyhow.workspace           = true
+clap.workspace             = true
+tracing.workspace          = true
+tracing-subscriber.workspace = true
+serde.workspace            = true
+serde_json.workspace       = true
+
+rmcp.workspace             = true
+schemars.workspace         = true
+globset.workspace          = true
+indicatif.workspace        = true
+rustyline.workspace        = true
+indoc.workspace            = true
+
+ratatui.workspace          = true
+crossterm.workspace        = true

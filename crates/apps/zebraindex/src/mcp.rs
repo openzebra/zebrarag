@@ -4,25 +4,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::Parser;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{tool, ErrorData, ServiceExt};
 use tokio::sync::Mutex;
-use tracing_subscriber::EnvFilter;
 use zti_common::format::format_elapsed;
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
 use zti_protocol::request::{DoctorReq, Request, SearchMode, SearchReq};
 use zti_protocol::response::{CheckStatus, Response, SearchResults};
-
-#[derive(Parser)]
-#[command(
-    name = "zebra-mcp",
-    about = "Zebra MCP server (DSL + daemon IPC, stdio)"
-)]
-struct Cli;
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -45,7 +36,7 @@ pub struct SearchQueryParams {
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SearchPassageParams {
-    #[schemars(description = "A code snippet, error log, or descriptive paragraph to find similar implementations.")]
+    #[schemars(description = "A code snippet, error message, or descriptive paragraph to find similar implementations.")]
     pub text: String,
     #[schemars(description = "Project root path. Auto-resolved when omitted if only one project is indexed.")]
     pub root: Option<String>,
@@ -378,7 +369,9 @@ impl ZebraMcpServer {
             .map_err(|e| internal_err(format!("list_projects: {e}")))?;
 
         if projects.is_empty() {
-            return Ok(ok_text(String::from("No indexed projects found.")));
+            return Ok(ok_text(String::from(
+                "No indexed projects found.",
+            )));
         }
 
         let mut out = String::with_capacity(projects.len() * 128);
@@ -408,7 +401,7 @@ impl rmcp::ServerHandler for ZebraMcpServer {
         let mut info = ServerInfo::default();
         let mut instructions = String::with_capacity(1024 + self.indexed_projects_roots.len());
         instructions.push_str(
-            "# zebra-mcp — Semantic Code Search\n\
+            "# zebraindex — Semantic Code Search\n\
              \n\
              ## When to use these tools\n\
              \n\
@@ -446,33 +439,25 @@ impl rmcp::ServerHandler for ZebraMcpServer {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
-
-    let _cli = Cli::parse();
-
-    let indexed_projects_roots = match zti_store::list_projects().await {
-        Ok(projects) if projects.len() > 1 => {
-            let mut s = String::with_capacity(32 + projects.len() * 64);
-            s.push_str("\n\n## Indexed Projects\n");
-            for p in &projects {
-                let _ = writeln!(s, "- {}", p.root_path);
+pub fn run_mcp() -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let indexed_projects_roots = match zti_store::list_projects().await {
+            Ok(projects) if projects.len() > 1 => {
+                let mut s = String::with_capacity(32 + projects.len() * 64);
+                s.push_str("\n\n## Indexed Projects\n");
+                for p in &projects {
+                    let _ = writeln!(s, "- {}", p.root_path);
+                }
+                s
             }
-            s
-        }
-        _ => String::new(),
-    };
+            _ => String::new(),
+        };
 
-    let server = ZebraMcpServer::new(indexed_projects_roots);
-    let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+        let server = ZebraMcpServer::new(indexed_projects_roots);
+        let service = server.serve(stdio()).await?;
+        service.waiting().await?;
 
-    Ok(())
+        Ok(())
+    })
 }

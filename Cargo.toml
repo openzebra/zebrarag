@@ -23,9 +23,7 @@ members = [
   "crates/zti-ann",
   "crates/zti-ipc-client",
   "crates/zti-daemon",
-  "crates/apps/zebra-dsl",
-  "crates/apps/zebra-embed",
-  "crates/apps/zebra-mcp",
+  "crates/apps/zebraindex",
 ]
 
 [workspace.package]
@@ -82,6 +80,9 @@ globset = "0.4"
 
 indoc = "2"
 
+ratatui   = "0.30"
+crossterm = "0.29"
+
 zti-common       = { path = "crates/zti-common" }
 zti-hw-core      = { path = "crates/zti-hw-core" }
 zti-hw-cpu       = { path = "crates/zti-hw-cpu" }
@@ -103,3 +104,4 @@ zti-pipeline     = { path = "crates/zti-pipeline" }
 zti-protocol     = { path = "crates/zti-protocol" }
 zti-ann           = { path = "crates/zti-ann" }
 zti-ipc-client   = { path = "crates/zti-ipc-client" }
+zti-daemon       = { path = "crates/zti-daemon" }
