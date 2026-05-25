@@ -59,7 +59,7 @@ pub fn run_tui(
         loop {
             terminal.draw(|f| match &app.screen {
                 app::Screen::Setup(phase) => setup::draw(f, phase, tick),
-                app::Screen::Main => ui::draw(f, &app),
+                app::Screen::Main => ui::draw(f, &app, tick),
             })?;
 
             while let Ok(msg) = rx.try_recv() {
@@ -249,6 +249,17 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
         }
         AppMessage::ReindexStarted => {
             app.modal = None;
+        }
+        AppMessage::ReindexProgress {
+            current,
+            total,
+            message,
+        } => {
+            app.modal = Some(app::Modal::Reindexing {
+                current,
+                total,
+                message,
+            });
         }
         AppMessage::ReindexError(e) => {
             app.modal = Some(app::Modal::Error { message: e });
@@ -808,13 +819,22 @@ async fn do_reindex(
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
 
+        let tx_p = tx.clone();
         let resp = c
             .request_streaming(
                 Request::Index(zti_protocol::request::IndexReq {
                     project_root,
                     refresh: true,
                 }),
-                |_progress| {},
+                |frame| {
+                    if let Response::IndexProgress(p) = frame {
+                        let _ = tx_p.try_send(AppMessage::ReindexProgress {
+                            current: p.current,
+                            total: p.total,
+                            message: p.message,
+                        });
+                    }
+                },
             )
             .await?;
 

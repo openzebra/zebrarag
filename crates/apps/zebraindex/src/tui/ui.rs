@@ -8,6 +8,15 @@ use super::app::{ActivePanel, App, DaemonStatus, DetailButton, Modal};
 
 const PREVIEW_LINES: usize = 6;
 
+const SPINNER: &[&str] = &[
+    "\u{2807}", "\u{280b}", "\u{2819}", "\u{2838}",
+    "\u{2830}", "\u{2826}", "\u{280e}", "\u{2803}",
+];
+
+pub fn spinner_ch(tick: u16) -> &'static str {
+    SPINNER[tick as usize % SPINNER.len()]
+}
+
 pub fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let vert = Layout::default()
         .direction(Direction::Vertical)
@@ -27,7 +36,7 @@ pub fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
         .split(vert[1])[1]
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &App, tick: u16) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -42,7 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_help_bar(f, app, chunks[2]);
 
     if app.modal.is_some() {
-        draw_modal(f, app);
+        draw_modal(f, app, tick);
     }
 }
 
@@ -258,6 +267,7 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
         match &app.modal {
             Some(Modal::ConfirmRemove) => "  y: confirm remove   n/Esc: cancel ",
             Some(Modal::Error { .. }) => "  Esc/Enter: dismiss ",
+            Some(Modal::Reindexing { .. }) => "  reindexing in progress... ",
             _ => "  Tab/←→: select   Enter: confirm   Esc: back ",
         }
     } else {
@@ -274,7 +284,7 @@ fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
-fn draw_modal(f: &mut Frame, app: &App) {
+fn draw_modal(f: &mut Frame, app: &App, tick: u16) {
     match &app.modal {
         Some(Modal::ProjectDetail { selected_button }) => {
             if let Some(p) = app.projects.get(app.selected_project) {
@@ -288,6 +298,13 @@ fn draw_modal(f: &mut Frame, app: &App) {
         }
         Some(Modal::Error { message }) => {
             draw_modal_error(f, message);
+        }
+        Some(Modal::Reindexing {
+            current,
+            total,
+            message,
+        }) => {
+            draw_modal_reindexing(f, tick, *current, *total, message);
         }
         None => {}
     }
@@ -462,6 +479,57 @@ fn draw_modal_error(f: &mut Frame, message: &str) {
             "  Esc/Enter: dismiss",
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(""),
+    ];
+
+    let para = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn draw_modal_reindexing(f: &mut Frame, tick: u16, current: u64, total: u64, message: &str) {
+    let area = centered_rect(55, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Reindexing ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let bar_width: usize = 30;
+    let filled = if total > 0 {
+        ((current as f64 / total as f64) * bar_width as f64) as usize
+    } else {
+        0
+    };
+    let bar: String = format!(
+        "[{}{}] {}/{}",
+        "=".repeat(filled),
+        " ".repeat(bar_width - filled),
+        current,
+        total,
+    );
+
+    let text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("  {} ", spinner_ch(tick)),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw("Reindexing project..."),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(bar, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
+        ]),
         Line::from(""),
     ];
 

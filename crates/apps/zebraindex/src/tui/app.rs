@@ -83,6 +83,11 @@ pub enum Modal {
     Error {
         message: String,
     },
+    Reindexing {
+        current: u64,
+        total: u64,
+        message: String,
+    },
 }
 
 pub enum AppMessage {
@@ -105,6 +110,11 @@ pub enum AppMessage {
     ProjectRemoved,
     ProjectRemoveError(String),
     ReindexStarted,
+    ReindexProgress {
+        current: u64,
+        total: u64,
+        message: String,
+    },
     ReindexError(String),
 }
 

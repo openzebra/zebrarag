@@ -104,6 +104,7 @@ fn map_modal_key(key: &event::KeyEvent, app: &App) -> Action {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::DetailBack,
             _ => Action::None,
         },
+        Some(Modal::Reindexing { .. }) => Action::None,
         _ => match key.code {
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => Action::DetailButtonNext,
             KeyCode::BackTab | KeyCode::Char('h') | KeyCode::Left => Action::DetailButtonPrev,

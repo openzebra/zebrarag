@@ -6,19 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use super::ui::centered_rect;
+use super::ui::{centered_rect, spinner_ch};
 
 use super::app::SetupPhase;
 use super::registry::ModelEntry;
-
-const SPINNER: &[&str] = &[
-    "\u{2807}", "\u{280b}", "\u{2819}", "\u{2838}",
-    "\u{2830}", "\u{2826}", "\u{280e}", "\u{2803}",
-];
-
-fn spinner_ch(tick: u16) -> &'static str {
-    SPINNER[tick as usize % SPINNER.len()]
-}
 
 pub fn draw(f: &mut Frame, phase: &SetupPhase, tick: u16) {
     f.render_widget(
