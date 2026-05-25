@@ -173,6 +173,12 @@ impl App {
             .map(|p| p.root_path.as_str())
     }
 
+    pub fn selected_project_root_owned(&self) -> Option<String> {
+        self.projects
+            .get(self.selected_project)
+            .map(|p| p.root_path.clone())
+    }
+
     pub fn apply_message(&mut self, msg: AppMessage) {
         match msg {
             AppMessage::DaemonStatusUpdate(status) => self.daemon_status = status,

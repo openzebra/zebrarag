@@ -385,7 +385,7 @@ fn draw_project_detail(f: &mut Frame, project: &zti_store::ProjectRow, selected:
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
-        Line::from(draw_buttons(selected)),
+        draw_buttons(selected),
     ];
 
     let para = Paragraph::new(lines).block(block);
@@ -528,7 +528,7 @@ fn draw_modal_reindexing(f: &mut Frame, tick: u16, current: u64, total: u64, mes
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::raw(message),
         ]),
         Line::from(""),
     ];

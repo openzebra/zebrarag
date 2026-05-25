@@ -269,15 +269,11 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
 }
 
 fn spawn_daemon_monitor(app: &App, tx: &mpsc::Sender<AppMessage>) {
-    let client = app.client.clone();
+    let ctx = ClientCtx::from_app(app);
     let tx_m = tx.clone();
-    let m = app.model.clone();
-    let v = app.variant.clone();
-    let qp = app.query_prefix.clone();
-    let pp = app.passage_prefix.clone();
     let should_run = app.should_run.clone();
     tokio::spawn(async move {
-        daemon_monitor(tx_m, client, m, v, qp, pp, should_run).await;
+        daemon_monitor(tx_m, ctx, should_run).await;
     });
 }
 
@@ -428,14 +424,10 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 app.search_error = None;
                 let query = app.search_input.clone();
                 let root = app.selected_project_root().map(|s| s.to_string());
+                let ctx = ClientCtx::from_app(app);
                 let tx_clone = tx.clone();
-                let client = app.client.clone();
-                let model = app.model.clone();
-                let variant = app.variant.clone();
-                let qp = app.query_prefix.clone();
-                let pp = app.passage_prefix.clone();
                 tokio::spawn(async move {
-                    do_search(query, root, client, tx_clone, model, variant, qp, pp).await;
+                    do_search(query, root, ctx, tx_clone).await;
                 });
             }
         }
@@ -496,18 +488,11 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                         app.modal = Some(app::Modal::ConfirmRemove);
                     }
                     app::DetailButton::Reindex => {
-                        if let Some(root) = app.selected_project_root().map(|s| s.to_string()) {
-                            let client = app.client.clone();
+                        if let Some(root) = app.selected_project_root_owned() {
+                            let ctx = ClientCtx::from_app(app);
                             let tx_c = tx.clone();
-                            let model = app.model.clone();
-                            let variant = app.variant.clone();
-                            let qp = app.query_prefix.clone();
-                            let pp = app.passage_prefix.clone();
                             tokio::spawn(async move {
-                                do_reindex(
-                                    root, client, tx_c, model, variant, qp, pp,
-                                )
-                                .await;
+                                do_reindex(root, ctx, tx_c).await;
                             });
                         }
                     }
@@ -520,15 +505,11 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
         }
         event::Action::ConfirmRemoveYes => {
             app.modal = None;
-            if let Some(root) = app.selected_project_root().map(|s| s.to_string()) {
-                let client = app.client.clone();
+            if let Some(root) = app.selected_project_root_owned() {
+                let ctx = ClientCtx::from_app(app);
                 let tx_c = tx.clone();
-                let model = app.model.clone();
-                let variant = app.variant.clone();
-                let qp = app.query_prefix.clone();
-                let pp = app.passage_prefix.clone();
                 tokio::spawn(async move {
-                    do_remove_project(root, client, tx_c, model, variant, qp, pp).await;
+                    do_remove_project(root, ctx, tx_c).await;
                 });
             }
         }
@@ -542,6 +523,35 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
             }
         }
         event::Action::None => {}
+    }
+}
+
+struct ClientCtx {
+    client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
+    model: Option<Arc<str>>,
+    variant: Option<Arc<str>>,
+    query_prefix: Option<Arc<str>>,
+    passage_prefix: Option<Arc<str>>,
+}
+
+impl ClientCtx {
+    fn from_app(app: &App) -> Self {
+        Self {
+            client: app.client.clone(),
+            model: app.model.clone(),
+            variant: app.variant.clone(),
+            query_prefix: app.query_prefix.clone(),
+            passage_prefix: app.passage_prefix.clone(),
+        }
+    }
+
+    fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+        (
+            self.model.as_deref(),
+            self.variant.as_deref(),
+            self.query_prefix.as_deref(),
+            self.passage_prefix.as_deref(),
+        )
     }
 }
 
@@ -572,15 +582,9 @@ fn read_daemon_log_tail(msg: &mut String) {
     if let Ok(log_path) = zti_common::paths::daemon_log()
         && let Ok(log) = std::fs::read_to_string(&log_path)
     {
-        let tail: String = log
-            .lines()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut lines: Vec<&str> = log.lines().rev().take(5).collect();
+        lines.reverse();
+        let tail: String = lines.join("\n");
         if !tail.is_empty() {
             msg.push_str("\n\ndaemon.log:\n");
             msg.push_str(&tail);
@@ -588,13 +592,25 @@ fn read_daemon_log_tail(msg: &mut String) {
     }
 }
 
+async fn try_connect(
+    ctx: &ClientCtx,
+    tx: &mpsc::Sender<AppMessage>,
+) {
+    let (m, v, qp, pp) = ctx.deref_opts();
+    if let Err(e) = ensure_client(&ctx.client, m, v, qp, pp).await {
+        let mut msg = e.to_string();
+        read_daemon_log_tail(&mut msg);
+        let _ = tx
+            .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Error(
+                msg,
+            )))
+            .await;
+    }
+}
+
 async fn daemon_monitor(
     tx: mpsc::Sender<AppMessage>,
-    client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
-    model: Option<Arc<str>>,
-    variant: Option<Arc<str>>,
-    query_prefix: Option<Arc<str>>,
-    passage_prefix: Option<Arc<str>>,
+    ctx: ClientCtx,
     should_run: Arc<AtomicBool>,
 ) {
     loop {
@@ -622,25 +638,13 @@ async fn daemon_monitor(
             let _ = tx
                 .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Starting))
                 .await;
-            let m = model.as_deref();
-            let v = variant.as_deref();
-            let qp = query_prefix.as_deref();
-            let pp = passage_prefix.as_deref();
-            if let Err(e) = ensure_client(&client, m, v, qp, pp).await {
-                let mut msg = e.to_string();
-                read_daemon_log_tail(&mut msg);
-                let _ = tx
-                    .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Error(
-                        msg,
-                    )))
-                    .await;
-            }
+            try_connect(&ctx, &tx).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
 
         let status = {
-            let mut guard = client.lock().await;
+            let mut guard = ctx.client.lock().await;
             match guard.as_mut() {
                 Some(c) => match c.request(Request::DaemonStatus).await {
                     Ok(Response::DaemonStatus(info)) => Some(app::DaemonStatus::Running {
@@ -664,19 +668,7 @@ async fn daemon_monitor(
             let _ = tx
                 .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Starting))
                 .await;
-            let m = model.as_deref();
-            let v = variant.as_deref();
-            let qp = query_prefix.as_deref();
-            let pp = passage_prefix.as_deref();
-            if let Err(e) = ensure_client(&client, m, v, qp, pp).await {
-                let mut msg = e.to_string();
-                read_daemon_log_tail(&mut msg);
-                let _ = tx
-                    .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Error(
-                        msg,
-                    )))
-                    .await;
-            }
+            try_connect(&ctx, &tx).await;
         }
 
         if let Ok(projects) = zti_store::list_projects().await {
@@ -687,23 +679,15 @@ async fn daemon_monitor(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn do_search(
     query: String,
     root: Option<String>,
-    client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
+    ctx: ClientCtx,
     tx: mpsc::Sender<AppMessage>,
-    model: Option<Arc<str>>,
-    variant: Option<Arc<str>>,
-    query_prefix: Option<Arc<str>>,
-    passage_prefix: Option<Arc<str>>,
 ) {
     let result = async {
-        let m = model.as_deref();
-        let v = variant.as_deref();
-        let qp = query_prefix.as_deref();
-        let pp = passage_prefix.as_deref();
-        ensure_client(&client, m, v, qp, pp).await?;
+        let (m, v, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, v, qp, pp).await?;
 
         let project_root = match root {
             Some(r) => r,
@@ -716,7 +700,7 @@ async fn do_search(
             }
         };
 
-        let mut guard = client.lock().await;
+        let mut guard = ctx.client.lock().await;
         let c = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
@@ -755,21 +739,14 @@ async fn do_search(
 
 async fn do_remove_project(
     project_root: String,
-    client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
+    ctx: ClientCtx,
     tx: mpsc::Sender<AppMessage>,
-    model: Option<Arc<str>>,
-    variant: Option<Arc<str>>,
-    query_prefix: Option<Arc<str>>,
-    passage_prefix: Option<Arc<str>>,
 ) {
     let result = async {
-        let m = model.as_deref();
-        let v = variant.as_deref();
-        let qp = query_prefix.as_deref();
-        let pp = passage_prefix.as_deref();
-        ensure_client(&client, m, v, qp, pp).await?;
+        let (m, v, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, v, qp, pp).await?;
 
-        let mut guard = client.lock().await;
+        let mut guard = ctx.client.lock().await;
         let c = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
@@ -800,21 +777,14 @@ async fn do_remove_project(
 
 async fn do_reindex(
     project_root: String,
-    client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
+    ctx: ClientCtx,
     tx: mpsc::Sender<AppMessage>,
-    model: Option<Arc<str>>,
-    variant: Option<Arc<str>>,
-    query_prefix: Option<Arc<str>>,
-    passage_prefix: Option<Arc<str>>,
 ) {
     let result = async {
-        let m = model.as_deref();
-        let v = variant.as_deref();
-        let qp = query_prefix.as_deref();
-        let pp = passage_prefix.as_deref();
-        ensure_client(&client, m, v, qp, pp).await?;
+        let (m, v, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, v, qp, pp).await?;
 
-        let mut guard = client.lock().await;
+        let mut guard = ctx.client.lock().await;
         let c = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
