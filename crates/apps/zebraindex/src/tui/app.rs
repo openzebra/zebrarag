@@ -5,6 +5,46 @@ use zti_ipc_client::Client;
 use zti_protocol::response::SearchResults;
 use zti_store::ProjectRow;
 
+use super::registry::ModelEntry;
+
+pub enum Screen {
+    Setup(SetupPhase),
+    Main,
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self::Setup(SetupPhase::default())
+    }
+}
+
+#[derive(Default)]
+pub enum SetupPhase {
+    #[default]
+    Resolving,
+    FetchingRegistry,
+    ModelSelection {
+        entries: Arc<[ModelEntry]>,
+        selected: usize,
+    },
+    DownloadingModel {
+        model_id: Arc<str>,
+    },
+    VariantSelection {
+        model_id: Arc<str>,
+        variants: Vec<(Arc<str>, Arc<str>)>,
+        selected: usize,
+    },
+    Launching {
+        model_id: Arc<str>,
+        variant: Arc<str>,
+    },
+    Error {
+        message: String,
+        can_retry: bool,
+    },
+}
+
 #[derive(Default)]
 pub enum DaemonStatus {
     #[default]
@@ -31,9 +71,23 @@ pub enum AppMessage {
     ProjectsLoaded(Vec<ProjectRow>),
     SearchDone(SearchResults),
     SearchError(String),
+    ConfigResolved {
+        model: Option<String>,
+        variant: Option<String>,
+    },
+    RegistryLoaded(Vec<ModelEntry>),
+    RegistryError(String),
+    ModelDownloaded(Arc<str>),
+    ModelDownloadError(String),
+    SetupComplete {
+        model: Arc<str>,
+        variant: Arc<str>,
+    },
 }
 
 pub struct App {
+    pub screen: Screen,
+    pub setup_registry: Option<Arc<[ModelEntry]>>,
     pub daemon_status: DaemonStatus,
     pub projects: Vec<ProjectRow>,
     pub selected_project: usize,
@@ -46,6 +100,7 @@ pub struct App {
     pub should_quit: bool,
     pub client: Arc<Mutex<Option<Client>>>,
     pub model: Option<Arc<str>>,
+    pub variant: Option<Arc<str>>,
     pub query_prefix: Option<Arc<str>>,
     pub passage_prefix: Option<Arc<str>>,
 }
@@ -53,6 +108,8 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            screen: Screen::default(),
+            setup_registry: None,
             daemon_status: DaemonStatus::default(),
             projects: Vec::with_capacity(8),
             selected_project: 0,
@@ -65,6 +122,7 @@ impl Default for App {
             should_quit: false,
             client: Arc::new(Mutex::new(None)),
             model: None,
+            variant: None,
             query_prefix: None,
             passage_prefix: None,
         }
@@ -97,6 +155,7 @@ impl App {
                 self.search_error = Some(e);
                 self.searching = false;
             }
+            _ => {}
         }
     }
 }

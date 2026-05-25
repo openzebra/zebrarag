@@ -1,6 +1,6 @@
 use crossterm::event::{self, KeyCode, KeyModifiers};
 
-use super::app::{ActivePanel, App, DaemonStatus};
+use super::app::{ActivePanel, App, DaemonStatus, Screen, SetupPhase};
 
 pub enum Action {
     Quit,
@@ -16,12 +16,46 @@ pub enum Action {
     Input(char),
     Backspace,
     None,
+    SetupNext,
+    SetupPrev,
+    SetupConfirm,
+    SetupBack,
+    SetupRetry,
+    ChangeModel,
 }
 
 pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Action::Quit;
     }
+    match &app.screen {
+        Screen::Setup(phase) => map_setup_key(key, phase),
+        Screen::Main => map_main_key(key, app),
+    }
+}
+
+fn map_setup_key(key: &event::KeyEvent, phase: &SetupPhase) -> Action {
+    match phase {
+        SetupPhase::ModelSelection { .. } | SetupPhase::VariantSelection { .. } => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Action::SetupNext,
+            KeyCode::Char('k') | KeyCode::Up => Action::SetupPrev,
+            KeyCode::Enter => Action::SetupConfirm,
+            KeyCode::Char('q') | KeyCode::Esc => Action::SetupBack,
+            _ => Action::None,
+        },
+        SetupPhase::Error { can_retry, .. } => match key.code {
+            KeyCode::Char('r') if *can_retry => Action::SetupRetry,
+            KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
+            _ => Action::None,
+        },
+        _ => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
+            _ => Action::None,
+        },
+    }
+}
+
+fn map_main_key(key: &event::KeyEvent, app: &App) -> Action {
     match key.code {
         KeyCode::Char('q') if !in_search(app) => Action::Quit,
         KeyCode::Tab => Action::SwitchPanel,
@@ -37,6 +71,7 @@ pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
         {
             Action::RestartDaemon
         }
+        KeyCode::Char('m') if !in_search(app) => Action::ChangeModel,
         KeyCode::Char(c) if in_search(app) => Action::Input(c),
         KeyCode::Backspace if in_search(app) => Action::Backspace,
         KeyCode::Esc if in_search(app) => Action::SwitchPanel,

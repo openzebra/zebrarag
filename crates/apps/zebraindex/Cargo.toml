@@ -16,6 +16,7 @@ zti-protocol.workspace     = true
 zti-store.workspace        = true
 zti-common.workspace       = true
 zti-embed.workspace        = true
+zti-hw.workspace           = true
 zti-dsl.workspace          = true
 zti-tree-sitter.workspace  = true
 zti-ts-core.workspace      = true
@@ -27,6 +28,8 @@ tracing.workspace          = true
 tracing-subscriber.workspace = true
 serde.workspace            = true
 serde_json.workspace       = true
+toml.workspace             = true
+reqwest                   = { version = "0.13", default-features = false, features = ["rustls"] }
 
 rmcp.workspace             = true
 schemars.workspace         = true

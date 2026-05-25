@@ -79,6 +79,7 @@ schemars = "1"
 globset = "0.4"
 
 indoc = "2"
+toml    = "1"
 
 ratatui   = "0.30"
 crossterm = "0.29"

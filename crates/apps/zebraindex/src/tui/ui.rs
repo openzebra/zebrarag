@@ -60,7 +60,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             )));
         }
         DaemonStatus::Stopped => spans.push(Span::raw("Stopped")),
-        DaemonStatus::Error(e) => spans.push(Span::raw(format!("Error: {}", e))),
+        DaemonStatus::Error(e) => {
+            let first_line = e.lines().next().unwrap_or(e.as_str());
+            spans.push(Span::styled(
+                format!("Error: {}", first_line),
+                Style::default().fg(Color::Red),
+            ));
+        }
     }
 
     let line = Line::from(spans);
@@ -227,7 +233,10 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 fn draw_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let keys = match &app.daemon_status {
         DaemonStatus::Stopped => "  Tab: switch panel  r: restart daemon  q: quit ",
-        _ => "  Tab: switch panel  /: search  Enter: submit  j/k: scroll  s: stop  q: quit ",
+        DaemonStatus::Error(_) => {
+            "  Tab: switch panel  r: restart daemon  m: change model  q: quit  (see daemon.log) "
+        }
+        _ => "  Tab: switch panel  /: search  Enter: submit  j/k: scroll  s: stop  m: change model  q: quit ",
     };
     let block = Block::default().borders(Borders::ALL);
     let para = Paragraph::new(keys).block(block);

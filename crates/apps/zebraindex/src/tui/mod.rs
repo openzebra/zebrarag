@@ -1,20 +1,26 @@
 mod app;
+mod config;
 mod event;
+mod registry;
+mod setup;
 mod ui;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
-use ratatui::backend::CrosstermBackend;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::{Mutex, mpsc};
 use zti_protocol::request::Request;
 use zti_protocol::response::Response;
 
 use app::{App, AppMessage};
+
+const REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/hicaru/zebra_tree_indexer/refs/heads/master/models.toml";
 
 pub fn run_tui(
     model: Option<&str>,
@@ -38,27 +44,24 @@ pub fn run_tui(
 
         let (tx, mut rx) = mpsc::channel::<AppMessage>(32);
 
-        let client = app.client.clone();
-        let tx_monitor = tx.clone();
-        let monitor_model = app.model.clone();
-        let monitor_query = app.query_prefix.clone();
-        let monitor_passage = app.passage_prefix.clone();
-        tokio::spawn(async move {
-            daemon_monitor(
-                tx_monitor,
-                client,
-                monitor_model,
-                monitor_query,
-                monitor_passage,
-            )
-            .await;
-        });
+        if model.is_some() {
+            app.screen = app::Screen::Main;
+            spawn_daemon_monitor(&app, &tx);
+        } else {
+            let tx_r = tx.clone();
+            tokio::spawn(async move { resolve_startup(tx_r).await });
+        }
+
+        let mut tick: u16 = 0;
 
         loop {
-            terminal.draw(|f| ui::draw(f, &app))?;
+            terminal.draw(|f| match &app.screen {
+                app::Screen::Setup(phase) => setup::draw(f, phase, tick),
+                app::Screen::Main => ui::draw(f, &app),
+            })?;
 
             while let Ok(msg) = rx.try_recv() {
-                app.apply_message(msg);
+                dispatch(&mut app, msg, &tx).await;
             }
 
             if crossterm::event::poll(Duration::from_millis(50))?
@@ -67,6 +70,8 @@ pub fn run_tui(
                 let action = event::map_key(&key, &app);
                 handle_action(&mut app, action, &tx).await;
             }
+
+            tick = tick.wrapping_add(1);
 
             if app.should_quit {
                 break;
@@ -79,9 +84,357 @@ pub fn run_tui(
     })
 }
 
+async fn resolve_startup(tx: mpsc::Sender<AppMessage>) {
+    if let Ok(Some(cfg)) = config::load()
+        && registry::is_model_downloaded(&cfg.default_model)
+    {
+        let _ = tx
+            .send(AppMessage::ConfigResolved {
+                model: Some(cfg.default_model),
+                variant: Some(cfg.default_variant),
+            })
+            .await;
+        return;
+    }
+
+    if let Ok(projects) = zti_store::list_projects().await
+        && let Some(p) = projects
+            .into_iter()
+            .filter(|p| !p.model_id.is_empty())
+            .max_by_key(|p| p.last_indexed_ns)
+        && registry::is_model_downloaded(&p.model_id)
+    {
+        let _ = config::save(&p.model_id, "auto");
+        let _ = tx
+            .send(AppMessage::ConfigResolved {
+                model: Some(p.model_id),
+                variant: Some("auto".into()),
+            })
+            .await;
+        return;
+    }
+
+    let _ = tx
+        .send(AppMessage::ConfigResolved {
+            model: None,
+            variant: None,
+        })
+        .await;
+}
+
+async fn fetch_registry(tx: mpsc::Sender<AppMessage>) {
+    if let Ok(Some(reg)) = registry::load() {
+        let _ = tx.send(AppMessage::RegistryLoaded(reg.entries)).await;
+        return;
+    }
+
+    let result: Result<Vec<registry::ModelEntry>> = async {
+        let resp = reqwest::get(REGISTRY_URL).await?;
+        let body = resp.text().await?;
+        let path = registry::registry_path()?;
+        tokio::fs::write(&path, body.as_bytes()).await?;
+        let reg = registry::parse(&body)?;
+        Ok(reg.entries)
+    }
+    .await;
+
+    match result {
+        Ok(entries) => {
+            let _ = tx.send(AppMessage::RegistryLoaded(entries)).await;
+        }
+        Err(e) => {
+            let _ = tx.send(AppMessage::RegistryError(e.to_string())).await;
+        }
+    }
+}
+
+async fn download_model(model_id: Arc<str>, tx: mpsc::Sender<AppMessage>) {
+    let id = Arc::clone(&model_id);
+    let result = tokio::task::spawn_blocking(move || {
+        let hw = zti_hw::probe();
+        let variant = zti_embed::OnnxVariant::Auto;
+        zti_embed::model_registry::resolve_model_files(&id, &variant, &hw)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            let _ = tx.send(AppMessage::ModelDownloaded(model_id)).await;
+        }
+        Ok(Err(e)) => {
+            let _ = tx
+                .send(AppMessage::ModelDownloadError(e.to_string()))
+                .await;
+        }
+        Err(e) => {
+            let _ = tx
+                .send(AppMessage::ModelDownloadError(e.to_string()))
+                .await;
+        }
+    }
+}
+
+async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>) {
+    match msg {
+        AppMessage::ConfigResolved { model: None, .. } => {
+            app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
+            let tx_c = tx.clone();
+            tokio::spawn(async move { fetch_registry(tx_c).await });
+        }
+        AppMessage::ConfigResolved {
+            model: Some(m),
+            variant,
+        } => {
+            app.model = Some(Arc::from(m.as_str()));
+            app.variant = variant.map(|v| Arc::from(v.as_str()));
+            app.screen = app::Screen::Main;
+            spawn_daemon_monitor(app, tx);
+        }
+        AppMessage::RegistryLoaded(mut entries) => {
+            let hw = zti_hw::probe();
+            registry::sort_by_hardware(&mut entries, &hw.device);
+            let shared: Arc<[registry::ModelEntry]> = entries.into();
+            app.setup_registry = Some(Arc::clone(&shared));
+            app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
+                entries: shared,
+                selected: 0,
+            });
+        }
+        AppMessage::RegistryError(msg) => {
+            app.screen = app::Screen::Setup(app::SetupPhase::Error {
+                message: msg,
+                can_retry: true,
+            });
+        }
+        AppMessage::ModelDownloaded(model_id) => {
+            if let Some(ref reg) = app.setup_registry
+                && let Some(entry) = reg.iter().find(|e| e.model_id.as_str() == model_id.as_ref())
+            {
+                let variants = entry.variant_list();
+                app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
+                    model_id,
+                    variants,
+                    selected: 0,
+                });
+                return;
+            }
+            let _ = tx
+                .send(AppMessage::SetupComplete {
+                    model: model_id,
+                    variant: Arc::from("auto"),
+                })
+                .await;
+        }
+        AppMessage::ModelDownloadError(msg) => {
+            app.screen = app::Screen::Setup(app::SetupPhase::Error {
+                message: msg,
+                can_retry: false,
+            });
+        }
+        AppMessage::SetupComplete { model, variant } => {
+            app.model = Some(Arc::clone(&model));
+            app.variant = Some(Arc::clone(&variant));
+            app.screen = app::Screen::Main;
+            spawn_daemon_monitor(app, tx);
+        }
+        other => app.apply_message(other),
+    }
+}
+
+fn spawn_daemon_monitor(app: &App, tx: &mpsc::Sender<AppMessage>) {
+    let client = app.client.clone();
+    let tx_m = tx.clone();
+    let m = app.model.clone();
+    let v = app.variant.clone();
+    let qp = app.query_prefix.clone();
+    let pp = app.passage_prefix.clone();
+    tokio::spawn(async move {
+        daemon_monitor(tx_m, client, m, v, qp, pp).await;
+    });
+}
+
+async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<AppMessage>) {
+    match action {
+        event::Action::Quit => app.should_quit = true,
+
+        event::Action::SetupNext => match &mut app.screen {
+            app::Screen::Setup(app::SetupPhase::ModelSelection { entries, selected })
+                if *selected + 1 < entries.len() =>
+            {
+                *selected += 1;
+            }
+            app::Screen::Setup(app::SetupPhase::VariantSelection {
+                variants, selected, ..
+            }) if *selected + 1 < variants.len() => {
+                *selected += 1;
+            }
+            _ => {}
+        },
+        event::Action::SetupPrev => {
+            if let app::Screen::Setup(
+                app::SetupPhase::ModelSelection { selected, .. }
+                | app::SetupPhase::VariantSelection { selected, .. },
+            ) = &mut app.screen
+                && *selected > 0
+            {
+                *selected -= 1;
+            }
+        }
+        event::Action::SetupConfirm => match &app.screen {
+            app::Screen::Setup(app::SetupPhase::ModelSelection { entries, selected }) => {
+                let entry = &entries[*selected];
+                let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
+                if entry.is_downloaded() {
+                    let variants = entry.variant_list();
+                    app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
+                        model_id,
+                        variants,
+                        selected: 0,
+                    });
+                } else {
+                    let id = Arc::clone(&model_id);
+                    app.screen = app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
+                    let tx_c = tx.clone();
+                    tokio::spawn(async move { download_model(id, tx_c).await });
+                }
+            }
+            app::Screen::Setup(app::SetupPhase::VariantSelection {
+                model_id,
+                variants,
+                selected,
+            }) => {
+                let variant_str: Arc<str> = if *selected == 0 {
+                    Arc::from("auto")
+                } else {
+                    Arc::clone(&variants[*selected].0)
+                };
+                let save_model = Arc::clone(model_id);
+                let save_variant = Arc::clone(&variant_str);
+                let launch_model = Arc::clone(model_id);
+                let launch_variant = Arc::clone(&variant_str);
+                let complete_model = Arc::clone(model_id);
+
+                if let Err(e) = config::save(&save_model, &save_variant) {
+                    app.screen = app::Screen::Setup(app::SetupPhase::Error {
+                        message: format!("Failed to save config: {e}"),
+                        can_retry: false,
+                    });
+                    return;
+                }
+
+                app.screen = app::Screen::Setup(app::SetupPhase::Launching {
+                    model_id: launch_model,
+                    variant: launch_variant,
+                });
+
+                let _ = tx
+                    .send(AppMessage::SetupComplete {
+                        model: complete_model,
+                        variant: variant_str,
+                    })
+                    .await;
+            }
+            _ => {}
+        },
+        event::Action::SetupBack => match &app.screen {
+            app::Screen::Setup(app::SetupPhase::ModelSelection { .. }) => {
+                app.should_quit = true;
+            }
+            app::Screen::Setup(app::SetupPhase::VariantSelection { .. }) => {
+                if let Some(ref entries) = app.setup_registry {
+                    app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
+                        entries: Arc::clone(entries),
+                        selected: 0,
+                    });
+                }
+            }
+            _ => {}
+        },
+        event::Action::SetupRetry => {
+            app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
+            let tx_c = tx.clone();
+            tokio::spawn(async move { fetch_registry(tx_c).await });
+        }
+
+        event::Action::SwitchPanel => {
+            app.active_panel = match app.active_panel {
+                app::ActivePanel::Projects => app::ActivePanel::Search,
+                app::ActivePanel::Search => app::ActivePanel::Projects,
+            };
+        }
+        event::Action::FocusSearch => {
+            app.active_panel = app::ActivePanel::Search;
+        }
+        event::Action::SelectPrevProject => {
+            if app.selected_project > 0 {
+                app.selected_project -= 1;
+            }
+        }
+        event::Action::SelectNextProject => {
+            if app.selected_project + 1 < app.projects.len() {
+                app.selected_project += 1;
+            }
+        }
+        event::Action::ScrollUp => {
+            if app.results_scroll > 0 {
+                app.results_scroll -= 1;
+            }
+        }
+        event::Action::ScrollDown => {
+            app.results_scroll = app.results_scroll.saturating_add(1);
+        }
+        event::Action::Input(c) => {
+            app.search_input.push(c);
+        }
+        event::Action::Backspace => {
+            app.search_input.pop();
+        }
+        event::Action::SubmitSearch => {
+            if !app.search_input.is_empty() && !app.searching {
+                app.searching = true;
+                app.search_error = None;
+                let query = app.search_input.clone();
+                let root = app.selected_project_root().map(|s| s.to_string());
+                let tx_clone = tx.clone();
+                let client = app.client.clone();
+                let model = app.model.clone();
+                let variant = app.variant.clone();
+                let qp = app.query_prefix.clone();
+                let pp = app.passage_prefix.clone();
+                tokio::spawn(async move {
+                    do_search(query, root, client, tx_clone, model, variant, qp, pp).await;
+                });
+            }
+        }
+        event::Action::StopDaemon => {
+            let client = app.client.clone();
+            tokio::spawn(async move {
+                let mut guard = client.lock().await;
+                if let Some(mut c) = guard.take() {
+                    let _ = c.request(Request::Stop).await;
+                }
+            });
+        }
+        event::Action::RestartDaemon => {
+            {
+                let mut guard = app.client.lock().await;
+                *guard = None;
+            }
+            app.daemon_status = app::DaemonStatus::Starting;
+        }
+        event::Action::ChangeModel => {
+            app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
+            let tx_c = tx.clone();
+            tokio::spawn(async move { fetch_registry(tx_c).await });
+        }
+        event::Action::None => {}
+    }
+}
+
 async fn ensure_client(
     client: &Arc<Mutex<Option<zti_ipc_client::Client>>>,
     model: Option<&str>,
+    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -90,7 +443,7 @@ async fn ensure_client(
         let mut c = zti_ipc_client::Client::connect(
             Duration::from_secs(10),
             model,
-            None,
+            variant,
             query_prefix,
             passage_prefix,
         )
@@ -105,6 +458,7 @@ async fn daemon_monitor(
     tx: mpsc::Sender<AppMessage>,
     client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
     model: Option<Arc<str>>,
+    variant: Option<Arc<str>>,
     query_prefix: Option<Arc<str>>,
     passage_prefix: Option<Arc<str>>,
 ) {
@@ -140,9 +494,9 @@ async fn daemon_monitor(
                         uptime_secs: info.uptime_secs,
                     }),
                     Ok(_) => None,
-                    Err(_) => {
+                    Err(e) => {
                         *guard = None;
-                        None
+                        Some(app::DaemonStatus::Error(e.to_string()))
                     }
                 },
                 None => None,
@@ -156,11 +510,32 @@ async fn daemon_monitor(
                 .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Starting))
                 .await;
             let m = model.as_deref();
+            let v = variant.as_deref();
             let qp = query_prefix.as_deref();
             let pp = passage_prefix.as_deref();
-            if ensure_client(&client, m, qp, pp).await.is_err() {
+            if let Err(e) = ensure_client(&client, m, v, qp, pp).await {
+                let mut msg = e.to_string();
+                if let Ok(log_path) = zti_common::paths::daemon_log()
+                    && let Ok(log) = std::fs::read_to_string(&log_path)
+                {
+                    let tail: String = log
+                        .lines()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !tail.is_empty() {
+                        msg.push_str("\n\ndaemon.log:\n");
+                        msg.push_str(&tail);
+                    }
+                }
                 let _ = tx
-                    .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Stopped))
+                    .send(AppMessage::DaemonStatusUpdate(app::DaemonStatus::Error(
+                        msg,
+                    )))
                     .await;
             }
         }
@@ -173,20 +548,23 @@ async fn daemon_monitor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_search(
     query: String,
     root: Option<String>,
     client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
     tx: mpsc::Sender<AppMessage>,
     model: Option<Arc<str>>,
+    variant: Option<Arc<str>>,
     query_prefix: Option<Arc<str>>,
     passage_prefix: Option<Arc<str>>,
 ) {
     let result = async {
         let m = model.as_deref();
+        let v = variant.as_deref();
         let qp = query_prefix.as_deref();
         let pp = passage_prefix.as_deref();
-        ensure_client(&client, m, qp, pp).await?;
+        ensure_client(&client, m, v, qp, pp).await?;
 
         let project_root = match root {
             Some(r) => r,
@@ -233,77 +611,5 @@ async fn do_search(
         Err(e) => {
             let _ = tx.send(AppMessage::SearchError(e.to_string())).await;
         }
-    }
-}
-
-async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<AppMessage>) {
-    match action {
-        event::Action::Quit => app.should_quit = true,
-        event::Action::SwitchPanel => {
-            app.active_panel = match app.active_panel {
-                app::ActivePanel::Projects => app::ActivePanel::Search,
-                app::ActivePanel::Search => app::ActivePanel::Projects,
-            };
-        }
-        event::Action::FocusSearch => {
-            app.active_panel = app::ActivePanel::Search;
-        }
-        event::Action::SelectPrevProject => {
-            if app.selected_project > 0 {
-                app.selected_project -= 1;
-            }
-        }
-        event::Action::SelectNextProject => {
-            if app.selected_project + 1 < app.projects.len() {
-                app.selected_project += 1;
-            }
-        }
-        event::Action::ScrollUp => {
-            if app.results_scroll > 0 {
-                app.results_scroll -= 1;
-            }
-        }
-        event::Action::ScrollDown => {
-            app.results_scroll = app.results_scroll.saturating_add(1);
-        }
-        event::Action::Input(c) => {
-            app.search_input.push(c);
-        }
-        event::Action::Backspace => {
-            app.search_input.pop();
-        }
-        event::Action::SubmitSearch => {
-            if !app.search_input.is_empty() && !app.searching {
-                app.searching = true;
-                app.search_error = None;
-                let query = app.search_input.clone();
-                let root = app.selected_project_root().map(|s| s.to_string());
-                let tx_clone = tx.clone();
-                let client = app.client.clone();
-                let model = app.model.clone();
-                let qp = app.query_prefix.clone();
-                let pp = app.passage_prefix.clone();
-                tokio::spawn(async move {
-                    do_search(query, root, client, tx_clone, model, qp, pp).await;
-                });
-            }
-        }
-        event::Action::StopDaemon => {
-            let client = app.client.clone();
-            tokio::spawn(async move {
-                let mut guard = client.lock().await;
-                if let Some(mut c) = guard.take() {
-                    let _ = c.request(Request::Stop).await;
-                }
-            });
-        }
-        event::Action::RestartDaemon => {
-            {
-                let mut guard = app.client.lock().await;
-                *guard = None;
-            }
-            app.daemon_status = app::DaemonStatus::Starting;
-        }
-        event::Action::None => {}
     }
 }
