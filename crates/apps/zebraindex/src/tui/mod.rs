@@ -243,6 +243,18 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
         }
         AppMessage::ProjectRemoved => {
             app.modal = None;
+            if app.selected_project < app.projects.len() {
+                app.projects.remove(app.selected_project);
+                if app.selected_project >= app.projects.len() && !app.projects.is_empty() {
+                    app.selected_project = app.projects.len() - 1;
+                }
+            }
+            let tx_c = tx.clone();
+            tokio::spawn(async move {
+                if let Ok(projects) = zti_store::list_projects().await {
+                    let _ = tx_c.send(AppMessage::ProjectsLoaded(projects)).await;
+                }
+            });
         }
         AppMessage::ProjectRemoveError(e) => {
             app.modal = Some(app::Modal::Error { message: e });
