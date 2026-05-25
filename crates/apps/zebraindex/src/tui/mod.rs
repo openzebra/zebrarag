@@ -809,10 +809,13 @@ async fn do_reindex(
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
 
         let resp = c
-            .request(Request::Index(zti_protocol::request::IndexReq {
-                project_root,
-                refresh: true,
-            }))
+            .request_streaming(
+                Request::Index(zti_protocol::request::IndexReq {
+                    project_root,
+                    refresh: true,
+                }),
+                |_progress| {},
+            )
             .await?;
 
         match resp {
