@@ -15,6 +15,25 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
         let pid =
             zti_common::ids::project_id(&std::path::Path::new(&req.project_root).canonicalize()?);
 
+        let model_id = project
+            .db
+            .projects_table()
+            .await?
+            .get(&pid)
+            .await?
+            .and_then(|p| {
+                if p.model_id.is_empty() {
+                    None
+                } else {
+                    Some(p.model_id)
+                }
+            });
+
+        let engine = match model_id.as_deref() {
+            Some(mid) => state.engine_for_model(mid).await?,
+            None => state.primary_engine(),
+        };
+
         let opts = zti_pipeline::search::SearchOpts {
             limit: req.limit,
             languages: req.languages.as_deref(),
@@ -22,26 +41,26 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
         };
 
         let query_emb = match req.mode {
-            SearchMode::Query => state.engine.embed_query_async(&req.query).await?,
-            SearchMode::Passage => state.engine.embed_passage_async(&req.query).await?,
+            SearchMode::Query => engine.embed_query_async(&req.query).await?,
+            SearchMode::Passage => engine.embed_passage_async(&req.query).await?,
         };
 
         let hits = if req.exhaustive {
             zti_pipeline::search::search_exhaustive(
                 &req.query,
                 &query_emb,
-                &state.engine,
+                &engine,
                 &project.db,
                 &pid,
                 &opts,
             )
             .await?
         } else {
-            let reranker = TurboReranker::new(state.engine.dim())?;
+            let reranker = TurboReranker::new(engine.dim())?;
             zti_pipeline::search::search(
                 &req.query,
                 &query_emb,
-                &state.engine,
+                &engine,
                 &project.db,
                 &reranker,
                 &state.ann,
@@ -51,7 +70,7 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             .await?
         };
 
-        let chunks_table = project.db.chunks_table(state.engine.dim()).await?;
+        let chunks_table = project.db.chunks_table(engine.dim()).await?;
 
         // Walk `hits` once to collect (a) sym_ids already in the top-N (so the
         // appendix dedupe HashSet is seeded) and (b) the appendix candidate

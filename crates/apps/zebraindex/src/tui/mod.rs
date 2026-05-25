@@ -48,7 +48,7 @@ pub fn run_tui(
 
         if model.is_some() {
             app.screen = app::Screen::Main;
-            spawn_daemon_monitor(&app, &tx);
+            spawn_daemon_monitor(&mut app, &tx);
         } else {
             let tx_r = tx.clone();
             tokio::spawn(async move { resolve_startup(tx_r).await });
@@ -287,13 +287,17 @@ fn spawn_refresh_projects(tx: &mpsc::Sender<AppMessage>) {
     });
 }
 
-fn spawn_daemon_monitor(app: &App, tx: &mpsc::Sender<AppMessage>) {
+fn spawn_daemon_monitor(app: &mut App, tx: &mpsc::Sender<AppMessage>) {
+    if let Some(handle) = app.monitor_handle.take() {
+        handle.abort();
+    }
     let ctx = ClientCtx::from_app(app);
     let tx_m = tx.clone();
     let should_run = app.should_run.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         daemon_monitor(tx_m, ctx, should_run).await;
     });
+    app.monitor_handle = Some(handle);
 }
 
 async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<AppMessage>) {
@@ -487,6 +491,13 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
         }
         event::Action::ChangeModel => {
             app.should_run.store(false, Ordering::Relaxed);
+            let client = app.client.clone();
+            tokio::spawn(async move {
+                let mut guard = client.lock().await;
+                if let Some(mut c) = guard.take() {
+                    let _ = c.request(Request::Stop).await;
+                }
+            });
             app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
             let tx_c = tx.clone();
             tokio::spawn(async move { fetch_registry(tx_c).await });

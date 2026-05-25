@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use fs2::available_space;
 
 use zti_protocol::request::DoctorReq;
@@ -10,18 +8,45 @@ use crate::state::DaemonState;
 pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
     let mut checks: Vec<DoctorCheck> = Vec::with_capacity(8);
 
-    // -- model_load: ONNX session present AND a real embed returns the
-    //    expected dim.
-    let onnx_path = state.engine.profile().onnx_path.clone();
+    let canonical_root = req
+        .project_root
+        .as_deref()
+        .and_then(|r| std::path::Path::new(r).canonicalize().ok());
+
+    let engine = if let Some(canon) = canonical_root.as_deref() {
+        let pid = zti_common::ids::project_id(canon);
+        let root_str = canon.to_string_lossy();
+        let model_id = match state.load_or_open(&root_str).await {
+            Ok(project) => match project.db.projects_table().await {
+                Ok(table) => match table.get(&pid).await {
+                    Ok(Some(row)) if !row.model_id.is_empty() => Some(row.model_id),
+                    _ => None,
+                },
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        match model_id {
+            Some(mid) => state
+                .engine_for_model(&mid)
+                .await
+                .unwrap_or_else(|_| state.primary_engine()),
+            None => state.primary_engine(),
+        }
+    } else {
+        state.primary_engine()
+    };
+
+    let onnx_path = engine.profile().onnx_path.clone();
     if !onnx_path.exists() {
         checks.push(error_check(
             "model_load",
             format!("ONNX file missing at {}", onnx_path.display()),
         ));
     } else {
-        match state.engine.embed_batch_async(&["hello"]).await {
+        match engine.embed_batch_async(&["hello"]).await {
             Ok(embs) => match embs.first() {
-                Some(emb) if emb.len() == state.engine.dim() => checks.push(ok_check(
+                Some(emb) if emb.len() == engine.dim() => checks.push(ok_check(
                     "model_load",
                     format!("dim={} via {}", emb.len(), onnx_path.display()),
                 )),
@@ -29,7 +54,7 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
                     "model_load",
                     format!(
                         "dim mismatch: profile={} probe={}",
-                        state.engine.dim(),
+                        engine.dim(),
                         emb.len()
                     ),
                 )),
@@ -80,8 +105,9 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
     }
 
     // -- per-project DB probes: db_open, chunks_count, files_count.
-    if let Some(root) = req.project_root.as_deref() {
-        let pid = zti_common::ids::project_id(Path::new(root));
+    if let Some(canon) = canonical_root.as_deref() {
+        let pid = zti_common::ids::project_id(canon);
+        let root_str = canon.to_string_lossy();
         let db_path = match zti_common::paths::project_dir(&pid) {
             Ok(p) => p.join("lance"),
             Err(e) => {
@@ -90,10 +116,10 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
             }
         };
 
-        match state.load_or_open(root).await {
+        match state.load_or_open(&root_str).await {
             Ok(project) => {
                 checks.push(ok_check("db_open", db_path.display().to_string()));
-                match project.db.chunks_table(state.engine.dim()).await {
+                match project.db.chunks_table(engine.dim()).await {
                     Ok(t) => match t.len().await {
                         Ok(n) => checks.push(ok_check("chunks_count", n.to_string())),
                         Err(e) => checks.push(error_check("chunks_count", e.to_string())),

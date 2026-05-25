@@ -72,7 +72,8 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let state = Arc::new(DaemonState::new(engine, hw, pid_file));
+        let model_id: Arc<str> = Arc::from(config.model.as_ref());
+        let state = Arc::new(DaemonState::new(engine, model_id, hw, pid_file));
         let listener = UnixListener::bind(&socket_path)?;
         tracing::info!("daemon listening on {}", socket_path.display());
         listener::run(listener, state).await?;

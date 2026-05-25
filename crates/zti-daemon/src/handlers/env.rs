@@ -3,6 +3,7 @@ use zti_protocol::response::{DaemonEnvInfo, Response};
 use crate::state::DaemonState;
 
 pub fn handle(state: &DaemonState) -> Response {
+    let engine = state.primary_engine();
     let data_dir = zti_common::paths::data_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -13,11 +14,11 @@ pub fn handle(state: &DaemonState) -> Response {
     Response::DaemonEnv(DaemonEnvInfo {
         data_dir,
         socket_path,
-        model_id: state.engine.profile().model_id.clone(),
+        model_id: state.primary_model.to_string(),
         device: state.hardware.device.as_str().to_string(),
         cpus: state.hardware.cpus as u32,
         mem_total_mb: state.hardware.mem_total / (1024 * 1024),
-        query_prefix: state.engine.profile().query_prefix.clone(),
-        passage_prefix: state.engine.profile().passage_prefix.clone(),
+        query_prefix: engine.profile().query_prefix.clone(),
+        passage_prefix: engine.profile().passage_prefix.clone(),
     })
 }

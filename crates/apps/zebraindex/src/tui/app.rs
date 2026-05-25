@@ -156,6 +156,7 @@ pub struct App {
     pub query_prefix: Option<Arc<str>>,
     pub passage_prefix: Option<Arc<str>>,
     pub should_run: Arc<AtomicBool>,
+    pub monitor_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for App {
@@ -180,6 +181,7 @@ impl Default for App {
             query_prefix: None,
             passage_prefix: None,
             should_run: Arc::new(AtomicBool::new(true)),
+            monitor_handle: None,
         }
     }
 }

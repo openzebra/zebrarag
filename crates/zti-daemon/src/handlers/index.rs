@@ -31,7 +31,7 @@ where
     let _lock = project.indexing_lock.lock().await;
 
     let root = std::path::Path::new(&req.project_root).to_path_buf();
-    let engine = state.engine.clone();
+    let engine = state.primary_engine();
     let db = project.db.clone();
 
     let (tx, mut rx) = mpsc::unbounded_channel();

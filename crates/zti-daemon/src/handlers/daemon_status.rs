@@ -10,7 +10,7 @@ pub fn handle(state: &DaemonState) -> Response {
         started_at_ns: state.started_at_ns,
         uptime_secs: state.started_at.elapsed().as_secs(),
         projects_loaded,
-        model_id: state.engine.profile().model_id.clone(),
+        model_id: state.primary_model.to_string(),
         device: state.hardware.device.as_str().to_string(),
     })
 }
