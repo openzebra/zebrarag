@@ -416,6 +416,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
         }
         event::Action::FocusSearch => {
             app.active_panel = app::ActivePanel::Search;
+            app.active_input = 0;
         }
         event::Action::SelectPrevProject => {
             if app.selected_project > 0 {
@@ -445,7 +446,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 path_input.push(c);
                 *error = None;
             } else {
-                app.search_input.push(c);
+                app.active_search_mut().text.push(c);
             }
         }
         event::Action::Backspace => {
@@ -455,21 +456,26 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
             {
                 path_input.pop();
             } else {
-                app.search_input.pop();
+                app.active_search_mut().text.pop();
             }
         }
         event::Action::SubmitSearch => {
-            if !app.search_input.is_empty() && !app.searching {
-                app.searching = true;
-                app.search_error = None;
-                let query = app.search_input.clone();
-                let root = app.selected_project_root().map(|s| s.to_string());
-                let ctx = ClientCtx::from_app(app);
-                let tx_clone = tx.clone();
-                tokio::spawn(async move {
-                    do_search(query, root, ctx, tx_clone).await;
-                });
+            if app.active_search().text.is_empty() || app.searching {
+                return;
             }
+            let mode = app.active_search().mode;
+            let query = std::mem::take(&mut app.search_inputs[app.active_input].text);
+            app.searching = true;
+            app.search_error = None;
+            let root = app.selected_project_root().map(|s| s.to_string());
+            let ctx = ClientCtx::from_app(app);
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                do_search(query, mode, root, ctx, tx_clone).await;
+            });
+        }
+        event::Action::ToggleSearchInput => {
+            app.active_input ^= 1;
         }
         event::Action::StopDaemon => {
             app.should_run.store(false, Ordering::Relaxed);
@@ -559,7 +565,8 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                             app.modal = Some(app::Modal::ConfirmRemove);
                         }
                         app::DetailButton::Reindex => {
-                            if let Some(root) = app.selected_project_root_owned() {
+                            if let Some(root) = app.selected_project_root() {
+                                let root = root.to_string();
                                 let ctx = ClientCtx::from_app(app);
                                 let tx_c = tx.clone();
                                 tokio::spawn(async move {
@@ -828,6 +835,7 @@ async fn daemon_monitor(
 
 async fn do_search(
     query: String,
+    mode: zti_protocol::request::SearchMode,
     root: Option<String>,
     ctx: ClientCtx,
     tx: mpsc::Sender<AppMessage>,
@@ -862,7 +870,7 @@ async fn do_search(
                 path_glob: None,
                 refresh_index: false,
                 exhaustive: false,
-                mode: zti_protocol::request::SearchMode::default(),
+                mode,
             }))
             .await?;
 

@@ -7,6 +7,7 @@ pub enum Action {
     SwitchPanel,
     FocusSearch,
     SubmitSearch,
+    ToggleSearchInput,
     ScrollUp,
     ScrollDown,
     SelectPrevProject,
@@ -72,6 +73,7 @@ fn map_setup_key(key: &event::KeyEvent, phase: &SetupPhase) -> Action {
 fn map_main_key(key: &event::KeyEvent, app: &App) -> Action {
     match key.code {
         KeyCode::Char('q') if !in_search(app) => Action::Quit,
+        KeyCode::Tab if in_search(app) => Action::ToggleSearchInput,
         KeyCode::Tab => Action::SwitchPanel,
         KeyCode::Char('/') if !in_search(app) => Action::FocusSearch,
         KeyCode::Enter if in_projects(app) => Action::OpenProjectDetail,

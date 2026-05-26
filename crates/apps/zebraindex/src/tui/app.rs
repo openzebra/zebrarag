@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::Mutex;
 use zti_ipc_client::Client;
+use zti_protocol::request::SearchMode;
 use zti_protocol::response::SearchResults;
 use zti_store::ProjectRow;
 
@@ -138,6 +139,11 @@ pub enum AppMessage {
     IndexError(String),
 }
 
+pub struct SearchInput {
+    pub text: String,
+    pub mode: SearchMode,
+}
+
 pub struct App {
     pub screen: Screen,
     pub setup_registry: Option<Arc<[ModelEntry]>>,
@@ -146,7 +152,8 @@ pub struct App {
     pub selected_project: usize,
     pub active_panel: ActivePanel,
     pub modal: Option<Modal>,
-    pub search_input: String,
+    pub search_inputs: [SearchInput; 2],
+    pub active_input: usize,
     pub search_results: Option<SearchResults>,
     pub search_error: Option<String>,
     pub searching: bool,
@@ -171,7 +178,17 @@ impl Default for App {
             selected_project: 0,
             active_panel: ActivePanel::default(),
             modal: None,
-            search_input: String::with_capacity(256),
+            search_inputs: [
+                SearchInput {
+                    text: String::with_capacity(256),
+                    mode: SearchMode::Query,
+                },
+                SearchInput {
+                    text: String::with_capacity(256),
+                    mode: SearchMode::Passage,
+                },
+            ],
+            active_input: 0,
             search_results: None,
             search_error: None,
             searching: false,
@@ -195,10 +212,12 @@ impl App {
             .map(|p| p.root_path.as_str())
     }
 
-    pub fn selected_project_root_owned(&self) -> Option<String> {
-        self.projects
-            .get(self.selected_project)
-            .map(|p| p.root_path.clone())
+    pub fn active_search(&self) -> &SearchInput {
+        &self.search_inputs[self.active_input]
+    }
+
+    pub fn active_search_mut(&mut self) -> &mut SearchInput {
+        &mut self.search_inputs[self.active_input]
     }
 
     pub fn apply_message(&mut self, msg: AppMessage) {

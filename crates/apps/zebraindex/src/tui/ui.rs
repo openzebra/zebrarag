@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use zti_protocol::request::SearchMode;
 
 use super::app::{ActivePanel, AddConfirmButton, App, DaemonStatus, DetailButton, Modal};
 
@@ -189,36 +190,56 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
+fn default_prefix(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Query => "query: ",
+        SearchMode::Passage => "passage: ",
+    }
+}
+
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     let highlight = matches!(app.active_panel, ActivePanel::Search);
-    let border_style = if highlight {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default()
-    };
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(5),
+        ])
         .split(area);
 
-    let input_block = Block::default()
-        .title(" Search ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
+    for (i, input) in app.search_inputs.iter().enumerate() {
+        let is_active = highlight && i == app.active_input;
+        let input_border = if is_active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
 
-    let input_para = if app.search_input.is_empty() && !highlight {
-        Paragraph::new("  press / to search")
+        let prefix = match input.mode {
+            SearchMode::Query => app.query_prefix.as_deref().unwrap_or(default_prefix(input.mode)),
+            SearchMode::Passage => app.passage_prefix.as_deref().unwrap_or(default_prefix(input.mode)),
+        };
+
+        let input_block = Block::default()
+            .title(prefix)
+            .borders(Borders::ALL)
+            .border_style(input_border);
+
+        let input_para = if input.text.is_empty() && !is_active {
+            Paragraph::new("  press Tab to switch")
+                .block(input_block)
+                .style(Style::default().fg(Color::DarkGray))
+        } else {
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(input.text.as_str()),
+            ]))
             .block(input_block)
-            .style(Style::default().fg(Color::DarkGray))
-    } else {
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(app.search_input.as_str()),
-        ]))
-        .block(input_block)
-    };
-    f.render_widget(input_para, inner[0]);
+        };
+        f.render_widget(input_para, inner[i]);
+    }
 
     let results_block = Block::default()
         .title(" Results ")
@@ -228,12 +249,12 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         let para = Paragraph::new("  searching...")
             .block(results_block)
             .style(Style::default().fg(Color::Yellow));
-        f.render_widget(para, inner[1]);
+        f.render_widget(para, inner[2]);
     } else if let Some(ref err) = app.search_error {
         let para = Paragraph::new(format!("  error: {}", err))
             .block(results_block)
             .style(Style::default().fg(Color::Red));
-        f.render_widget(para, inner[1]);
+        f.render_widget(para, inner[2]);
     } else if let Some(ref results) = app.search_results {
         let mut lines: Vec<Line> = Vec::with_capacity(1 + results.hits.len() * (2 + PREVIEW_LINES));
         let header = format!("── Results ({} hits) ──", results.hits.len());
@@ -274,12 +295,12 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
             .block(results_block)
             .wrap(Wrap { trim: false })
             .scroll((app.results_scroll, 0));
-        f.render_widget(para, inner[1]);
+        f.render_widget(para, inner[2]);
     } else {
         let para = Paragraph::new("  no results yet")
             .block(results_block)
             .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(para, inner[1]);
+        f.render_widget(para, inner[2]);
     }
 }
 
