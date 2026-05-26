@@ -619,8 +619,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 Some(app::Modal::ProjectDetail { selected_button }) => {
                     *selected_button = match selected_button {
                         app::DetailButton::Remove => app::DetailButton::Reindex,
-                        app::DetailButton::Reindex => app::DetailButton::IndexMethod,
-                        app::DetailButton::IndexMethod => app::DetailButton::Back,
+                        app::DetailButton::Reindex => app::DetailButton::Back,
                         app::DetailButton::Back => app::DetailButton::Remove,
                     };
                 }
@@ -643,8 +642,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                     *selected_button = match selected_button {
                         app::DetailButton::Remove => app::DetailButton::Back,
                         app::DetailButton::Reindex => app::DetailButton::Remove,
-                        app::DetailButton::IndexMethod => app::DetailButton::Reindex,
-                        app::DetailButton::Back => app::DetailButton::IndexMethod,
+                        app::DetailButton::Back => app::DetailButton::Reindex,
                     };
                 }
                 Some(app::Modal::ChangeIndexMethod {
@@ -676,17 +674,6 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                                     do_index(root, true, ctx, tx_c).await;
                                 });
                             }
-                        }
-                        app::DetailButton::IndexMethod => {
-                            let root = app.selected_project_root().map(str::to_string);
-                            app.modal = Some(build_change_method_modal(
-                                root,
-                                None,
-                                true,
-                                None,
-                                app.search_method,
-                                &app.projects,
-                            ));
                         }
                         app::DetailButton::Back => {}
                     }

@@ -492,7 +492,6 @@ fn draw_buttons(selected: DetailButton) -> Line<'static> {
     render_button_row(&[
         ("Remove", selected == DetailButton::Remove),
         ("Reindex", selected == DetailButton::Reindex),
-        ("Index Method", selected == DetailButton::IndexMethod),
         ("Back", selected == DetailButton::Back),
     ])
 }

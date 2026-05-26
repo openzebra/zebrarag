@@ -81,7 +81,6 @@ pub enum DetailButton {
     #[default]
     Remove,
     Reindex,
-    IndexMethod,
     Back,
 }
 
