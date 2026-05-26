@@ -69,7 +69,6 @@ mod tests {
             cpus: 8,
             mem_total: mem,
             mem_avail: mem,
-            ..Default::default()
         }
     }
 

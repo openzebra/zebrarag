@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
-use zti_embed::{EmbedEngine, LoadOverrides, OnnxVariant};
+use zti_embed::{EmbedEngine, LoadOverrides};
 
 pub mod handlers;
 pub mod listener;
@@ -17,7 +17,6 @@ use state::DaemonState;
 
 pub struct DaemonConfig<'a> {
     pub model: Cow<'a, str>,
-    pub variant: OnnxVariant,
     pub query_prefix: Option<&'a str>,
     pub passage_prefix: Option<&'a str>,
 }
@@ -60,15 +59,14 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
     }
 
     tracing::info!("loading model: {}", config.model);
-    let hw = zti_hw::probe();
+    let hw = Arc::new(zti_hw::probe());
     tracing::info!(device = ?hw.device, "hardware detected");
 
     let opts = LoadOverrides {
-        variant: &config.variant,
         query_prefix: config.query_prefix,
         passage_prefix: config.passage_prefix,
     };
-    let engine = EmbedEngine::load_with(&config.model, &hw, &opts)?;
+    let engine = EmbedEngine::load_with(&config.model, Arc::clone(&hw), &opts)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {

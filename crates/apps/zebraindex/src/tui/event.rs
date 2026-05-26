@@ -52,7 +52,7 @@ pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
 
 fn map_setup_key(key: &event::KeyEvent, phase: &SetupPhase) -> Action {
     match phase {
-        SetupPhase::ModelSelection { .. } | SetupPhase::VariantSelection { .. } => match key.code {
+        SetupPhase::ModelSelection { .. } => match key.code {
             KeyCode::Char('j') | KeyCode::Down => Action::SetupNext,
             KeyCode::Char('k') | KeyCode::Up => Action::SetupPrev,
             KeyCode::Enter => Action::SetupConfirm,

@@ -69,14 +69,12 @@ pub enum CliCommand {
 
 async fn open_client(
     model: Option<&str>,
-    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> Result<Client> {
     let mut client = Client::connect(
-        Duration::from_secs(10),
+        Duration::from_secs(60),
         model,
-        variant,
         query_prefix,
         passage_prefix,
     )
@@ -96,11 +94,10 @@ fn canon_opt(p: Option<PathBuf>) -> Result<Option<String>> {
 pub async fn run(
     cmd: CliCommand,
     model: Option<&str>,
-    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> Result<()> {
-    let open = || open_client(model, variant, query_prefix, passage_prefix);
+    let open = || open_client(model, query_prefix, passage_prefix);
 
     match cmd {
         CliCommand::Index { root, refresh } => {

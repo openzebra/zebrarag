@@ -11,8 +11,7 @@ pub fn handle(state: &DaemonState) -> Response {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
 
-    let ep = engine.hardware().ep_status.get();
-    let device = ep.device_label(&state.hardware.device).into_owned();
+    let device = engine.hardware().device.as_str().to_owned();
 
     Response::DaemonEnv(DaemonEnvInfo {
         data_dir,

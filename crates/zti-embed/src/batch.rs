@@ -13,8 +13,8 @@ pub const BATCH_CEILING: usize = 64;
 
 pub const TYPICAL_SEQ_LEN: usize = 512;
 
-/// Sequence-length buckets the engine pads to. CoreML caches a compiled
-/// MLProgram per `(batch, seq)` shape, so we want a small finite set; 4096
+/// Sequence-length buckets the engine pads to. Backends may cache compiled
+/// graphs per `(batch, seq)` shape, so we want a small finite set; 4096
 /// bridges the gap between 2048 and the 8192 maximum so a 2049-token chunk
 /// does not pad 6143 zeros through every layer.
 pub const SEQ_BUCKETS: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096, 8192];
@@ -39,8 +39,6 @@ pub fn next_bucket(buckets: &[usize], n: usize, cap: usize) -> usize {
 
 const DEFAULT_METAL_MEM_FRAC: (usize, usize) = (4, 10);
 const DEFAULT_CUDA_MEM_FRAC: (usize, usize) = (6, 10);
-const DEFAULT_VULKAN_MEM_FRAC: (usize, usize) = (5, 10);
-const DEFAULT_NPU_MEM_FRAC: (usize, usize) = (5, 10);
 const DEFAULT_CPU_MEM_FRAC: (usize, usize) = (5, 10);
 
 pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
@@ -55,11 +53,11 @@ pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
         .saturating_mul(PIPELINE_LIVE)
         .max(1);
 
-    let (usable_num, usable_den) = usable_fraction(hw.device);
+    let (usable_num, usable_den) = usable_fraction(&hw.device);
 
     let budget = hw.mem_avail as usize * usable_num / usable_den;
 
-    let weight_bytes = std::fs::metadata(&profile.onnx_path)
+    let weight_bytes = std::fs::metadata(&profile.weights_path)
         .map(|m| m.len() as usize)
         .unwrap_or(0);
     let weight_overhead = weight_bytes.saturating_mul(2);
@@ -73,7 +71,7 @@ pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
 
 static FRAC_OVERRIDE: OnceLock<Option<(usize, usize)>> = OnceLock::new();
 
-fn usable_fraction(device: Device) -> (usize, usize) {
+fn usable_fraction(device: &Device) -> (usize, usize) {
     let cached = FRAC_OVERRIDE.get_or_init(|| {
         let s = std::env::var("ZTI_BATCH_MEM_FRAC").ok()?;
         let f = s.parse::<f64>().ok()?;
@@ -87,8 +85,6 @@ fn usable_fraction(device: Device) -> (usize, usize) {
     match device {
         Device::Metal => DEFAULT_METAL_MEM_FRAC,
         Device::Cuda => DEFAULT_CUDA_MEM_FRAC,
-        Device::Vulkan => DEFAULT_VULKAN_MEM_FRAC,
-        Device::Npu => DEFAULT_NPU_MEM_FRAC,
         Device::Cpu => DEFAULT_CPU_MEM_FRAC,
     }
 }
@@ -110,7 +106,6 @@ mod tests {
             cpus: 8,
             mem_total: mem_avail_gib << 30,
             mem_avail: mem_avail_gib << 30,
-            ..Default::default()
         }
     }
 
@@ -120,11 +115,11 @@ mod tests {
         ffn: usize,
         heads: usize,
         seq: usize,
-        onnx: &str,
+        weights: &str,
     ) -> ModelProfile {
         ModelProfile {
             model_id: "test".into(),
-            onnx_path: std::path::PathBuf::from(onnx),
+            weights_path: std::path::PathBuf::from(weights),
             tokenizer_path: std::path::PathBuf::new(),
             dim: hidden,
             max_length: seq,

@@ -32,20 +32,13 @@ pub enum SetupPhase {
     DownloadingModel {
         model_id: Arc<str>,
     },
-    VariantSelection {
-        model_id: Arc<str>,
-        variants: Vec<(Arc<str>, Arc<str>)>,
-        selected: usize,
-    },
     IndexMethodSelection {
         model_id: Arc<str>,
-        variant: Arc<str>,
         methods: Arc<[(zti_ann::SearchMethod, bool)]>,
         selected: usize,
     },
     Launching {
         model_id: Arc<str>,
-        variant: Arc<str>,
     },
     Error {
         message: String,
@@ -127,7 +120,6 @@ pub enum AppMessage {
     SearchError(String),
     ConfigResolved {
         model: Option<String>,
-        variant: Option<String>,
         search_method: Option<String>,
     },
     RegistryLoaded(Vec<ModelEntry>),
@@ -136,7 +128,6 @@ pub enum AppMessage {
     ModelDownloadError(String),
     SetupComplete {
         model: Arc<str>,
-        variant: Arc<str>,
     },
     ProjectRemoved,
     ProjectRemoveError(String),
@@ -172,7 +163,6 @@ pub struct App {
     pub should_quit: bool,
     pub client: Arc<Mutex<Option<Client>>>,
     pub model: Option<Arc<str>>,
-    pub variant: Option<Arc<str>>,
     pub query_prefix: Option<Arc<str>>,
     pub passage_prefix: Option<Arc<str>>,
     pub search_method: Option<zti_ann::SearchMethod>,
@@ -208,7 +198,6 @@ impl Default for App {
             should_quit: false,
             client: Arc::new(Mutex::new(None)),
             model: None,
-            variant: None,
             query_prefix: None,
             passage_prefix: None,
             search_method: None,

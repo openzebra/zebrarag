@@ -18,12 +18,11 @@ impl Client {
     pub async fn connect(
         timeout: Duration,
         model: Option<&str>,
-        variant: Option<&str>,
         query_prefix: Option<&str>,
         passage_prefix: Option<&str>,
     ) -> Result<Self> {
         let stream =
-            connect_or_spawn(timeout, model, variant, query_prefix, passage_prefix).await?;
+            connect_or_spawn(timeout, model, query_prefix, passage_prefix).await?;
         let mut client = Self { stream };
         match client.handshake().await {
             Ok(_) => Ok(client),
@@ -31,7 +30,7 @@ impl Client {
                 tracing::warn!("daemon protocol mismatch, restarting...");
                 kill_daemon().await?;
                 let stream =
-                    connect_or_spawn(timeout, model, variant, query_prefix, passage_prefix).await?;
+                    connect_or_spawn(timeout, model, query_prefix, passage_prefix).await?;
                 let mut client = Self { stream };
                 client.handshake().await?;
                 Ok(client)

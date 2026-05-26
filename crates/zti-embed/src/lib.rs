@@ -9,5 +9,5 @@ pub use engine::EmbedEngine;
 pub use engine::LoadOverrides;
 pub use engine::Pooled;
 pub use engine::apply_prefix;
-pub use model_registry::{ModelProfile, OnnxVariant};
+pub use model_registry::ModelProfile;
 pub use tokenizer::Tokenized;

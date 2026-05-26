@@ -1,6 +1,5 @@
 use fs2::available_space;
 
-use zti_hw::EpStatus;
 use zti_protocol::request::DoctorReq;
 use zti_protocol::response::{CheckStatus, DoctorCheck, DoctorReport, Response};
 
@@ -38,18 +37,18 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
         state.primary_engine()
     };
 
-    let onnx_path = &engine.profile().onnx_path;
-    if !onnx_path.exists() {
+    let weights_path = &engine.profile().weights_path;
+    if !weights_path.exists() {
         checks.push(error_check(
             "model_load",
-            format!("ONNX file missing at {}", onnx_path.display()),
+            format!("model weights missing at {}", weights_path.display()),
         ));
     } else {
         match engine.embed_batch_async(&["hello"]).await {
             Ok(embs) => match embs.first() {
                 Some(emb) if emb.len() == engine.dim() => checks.push(ok_check(
                     "model_load",
-                    format!("dim={} via {}", emb.len(), onnx_path.display()),
+                    format!("dim={} via {}", emb.len(), weights_path.display()),
                 )),
                 Some(emb) => checks.push(error_check(
                     "model_load",
@@ -68,23 +67,6 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
         }
     }
 
-    match engine.hardware().ep_status.get() {
-        EpStatus::Active => checks.push(ok_check("ep_verify", "CoreML GPU/ANE active")),
-        EpStatus::Fallback => checks.push(DoctorCheck {
-            name: "ep_verify".to_string(),
-            status: CheckStatus::Warn,
-            message: "CoreML registered but ops running on CPU. Try --variant fp32.".to_string(),
-        }),
-        EpStatus::CpuOnly => checks.push(ok_check("ep_verify", "CPU execution provider")),
-        EpStatus::Unknown => checks.push(DoctorCheck {
-            name: "ep_verify".to_string(),
-            status: CheckStatus::Warn,
-            message: "EP status not verified".to_string(),
-        }),
-    }
-
-    // -- data_dir_writable: probe by writing a tiny file under data_dir and
-    //    deleting it. Catches read-only filesystems, broken permissions, etc.
     match zti_common::paths::data_dir() {
         Ok(dir) => {
             let probe = dir.join(".doctor-write-probe");
@@ -99,7 +81,6 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
                 )),
             }
 
-            // -- disk_free: rough warning threshold = 1 GiB.
             match available_space(&dir) {
                 Ok(bytes) => {
                     let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -120,7 +101,6 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
         Err(e) => checks.push(error_check("data_dir_writable", e.to_string())),
     }
 
-    // -- per-project DB probes: db_open, chunks_count, files_count.
     if let Some(canon) = canonical_root.as_deref() {
         let pid = zti_common::ids::project_id(canon);
         let root_str = canon.to_string_lossy();
@@ -161,8 +141,7 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
 }
 
 fn finalize(engine: &zti_embed::EmbedEngine, checks: Vec<DoctorCheck>) -> Response {
-    let ep = engine.hardware().ep_status.get();
-    let device = ep.device_label(&engine.hardware().device).into_owned();
+    let device = engine.hardware().device.as_str().to_owned();
     Response::Doctor(Ok(DoctorReport {
         device,
         checks,

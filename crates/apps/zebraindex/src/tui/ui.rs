@@ -93,9 +93,6 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             let hrs = mins / 60;
             let mut text = String::with_capacity(128);
             write!(text, "Running  Model: {}  Device: {}", model_id, device).ok();
-            if let Some(ref v) = app.variant {
-                write!(text, "  Variant: {}", v).ok();
-            }
             if let Some(loading) = loading_model {
                 write!(text, "  Loading: {}...", loading).ok();
             }

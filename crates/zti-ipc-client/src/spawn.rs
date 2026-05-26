@@ -27,7 +27,6 @@ pub async fn kill_daemon() -> Result<()> {
 pub async fn connect_or_spawn(
     timeout: Duration,
     model: Option<&str>,
-    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> Result<UnixStream> {
@@ -42,13 +41,12 @@ pub async fn connect_or_spawn(
         Some(m) => tracing::info!("daemon not running, spawning with model {m}..."),
         None => tracing::info!("daemon not running, spawning (no model specified)..."),
     }
-    spawn_daemon(model, variant, query_prefix, passage_prefix)?;
+    spawn_daemon(model, query_prefix, passage_prefix)?;
     wait_for_socket(&socket_path, timeout).await
 }
 
 fn spawn_daemon(
     model: Option<&str>,
-    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> Result<()> {
@@ -97,9 +95,6 @@ fn spawn_daemon(
         cmd.args(["--model", m]);
     } else if let Some(m) = model {
         cmd.args(["--model", m]);
-    }
-    if let Some(v) = variant {
-        cmd.args(["--variant", v]);
     }
     if let Some(p) = query_prefix {
         cmd.args(["--query-prefix", p]);

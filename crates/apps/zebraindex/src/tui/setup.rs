@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 
-use std::sync::Arc;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -26,17 +24,12 @@ pub fn draw(f: &mut Frame, phase: &SetupPhase, tick: u16) {
             draw_model_selection(f, entries, *selected);
         }
         SetupPhase::DownloadingModel { model_id } => draw_download(f, model_id, tick),
-        SetupPhase::VariantSelection {
-            model_id,
-            variants,
-            selected,
-        } => draw_variant_selection(f, model_id, variants, *selected),
         SetupPhase::IndexMethodSelection {
             methods, selected, ..
         } => draw_method_selection(f, methods, *selected, None, false, false, IndexMethodButton::default()),
         SetupPhase::Launching {
-            model_id, variant, ..
-        } => draw_launching(f, model_id, variant, tick),
+            model_id, ..
+        } => draw_launching(f, model_id, tick),
         SetupPhase::Error {
             message, can_retry, ..
         } => draw_error(f, message, *can_retry),
@@ -101,7 +94,7 @@ fn draw_download(f: &mut Frame, model_id: &str, tick: u16) {
     f.render_widget(para, area);
 }
 
-fn draw_launching(f: &mut Frame, model_id: &str, variant: &str, tick: u16) {
+fn draw_launching(f: &mut Frame, model_id: &str, tick: u16) {
     let area = centered_rect(50, 20, f.area());
     f.render_widget(Clear, area);
 
@@ -122,10 +115,6 @@ fn draw_launching(f: &mut Frame, model_id: &str, variant: &str, tick: u16) {
         Line::from(vec![
             Span::raw("  Model: "),
             Span::styled(model_id, Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(vec![
-            Span::raw("  Variant: "),
-            Span::styled(variant, Style::default().fg(Color::Cyan)),
         ]),
         Line::from(""),
     ];
@@ -191,55 +180,6 @@ fn draw_model_selection(f: &mut Frame, entries: &[ModelEntry], selected: usize) 
     f.render_widget(List::new(items).block(block), layout[0]);
 
     let help = Paragraph::new("  j/k: navigate   Enter: select   q: quit")
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(help, layout[1]);
-}
-
-fn draw_variant_selection(
-    f: &mut Frame,
-    model_id: &str,
-    variants: &[(Arc<str>, Arc<str>)],
-    selected: usize,
-) {
-    let area = centered_rect(70, 60, f.area());
-    f.render_widget(Clear, area);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
-    let mut items: Vec<ListItem> = Vec::with_capacity(variants.len());
-    for (i, (name, desc)) in variants.iter().enumerate() {
-        let is_sel = i == selected;
-        let prefix = if is_sel { "> " } else { "  " };
-        let style = if is_sel {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-
-        let line1 = Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(name.as_ref(), style),
-        ]);
-        let line2 = Line::from(vec![
-            Span::raw("    "),
-            Span::styled(desc.as_ref(), Style::default().fg(Color::DarkGray)),
-        ]);
-        items.push(ListItem::new(vec![line1, line2]));
-    }
-
-    let title = format!(" Select ONNX Variant: {} ", model_id);
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    f.render_widget(List::new(items).block(block), layout[0]);
-
-    let help = Paragraph::new("  j/k: navigate   Enter: select   Esc: back")
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, layout[1]);
 }

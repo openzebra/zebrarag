@@ -21,8 +21,6 @@ use zti_protocol::response::Response;
 
 use app::{App, AppMessage};
 
-// Fallback dimension for method recommendation when model is not yet loaded.
-// Only affects RAM estimation in the Usearch threshold — conservative for common models.
 const DEFAULT_DIM: usize = 768;
 
 const REGISTRY_URL: &str =
@@ -97,7 +95,6 @@ async fn resolve_startup(tx: mpsc::Sender<AppMessage>) {
         let _ = tx
             .send(AppMessage::ConfigResolved {
                 model: Some(cfg.default_model),
-                variant: Some(cfg.default_variant),
                 search_method: cfg.default_search_method,
             })
             .await;
@@ -111,11 +108,10 @@ async fn resolve_startup(tx: mpsc::Sender<AppMessage>) {
             .max_by_key(|p| p.last_indexed_ns)
         && registry::is_model_downloaded(&p.model_id)
     {
-        let _ = config::save(&p.model_id, "auto", None);
+        let _ = config::save(&p.model_id, None);
         let _ = tx
             .send(AppMessage::ConfigResolved {
                 model: Some(p.model_id),
-                variant: Some("auto".into()),
                 search_method: None,
             })
             .await;
@@ -125,7 +121,6 @@ async fn resolve_startup(tx: mpsc::Sender<AppMessage>) {
     let _ = tx
         .send(AppMessage::ConfigResolved {
             model: None,
-            variant: None,
             search_method: None,
         })
         .await;
@@ -160,9 +155,7 @@ async fn fetch_registry(tx: mpsc::Sender<AppMessage>) {
 async fn download_model(model_id: Arc<str>, tx: mpsc::Sender<AppMessage>) {
     let id = Arc::clone(&model_id);
     let result = tokio::task::spawn_blocking(move || {
-        let hw = zti_hw::probe();
-        let variant = zti_embed::OnnxVariant::Auto;
-        zti_embed::model_registry::resolve_model_files(&id, &variant, &hw)
+        zti_embed::model_registry::resolve_model_files(&id)
     })
     .await;
 
@@ -192,11 +185,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
         }
         AppMessage::ConfigResolved {
             model: Some(m),
-            variant,
             search_method,
         } => {
             app.model = Some(Arc::from(m.as_str()));
-            app.variant = variant.map(|v| Arc::from(v.as_str()));
             app.search_method =
                 search_method.as_deref().and_then(zti_ann::SearchMethod::parse);
             app.should_run.store(true, Ordering::Relaxed);
@@ -204,8 +195,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             spawn_daemon_monitor(app, tx);
         }
         AppMessage::RegistryLoaded(mut entries) => {
-            let hw = zti_hw::probe();
-            registry::sort_by_hardware(&mut entries, &hw.device);
+            registry::sort_by_hardware(&mut entries);
             let shared: Arc<[registry::ModelEntry]> = entries.into();
             app.setup_registry = Some(Arc::clone(&shared));
             app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
@@ -220,23 +210,8 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             });
         }
         AppMessage::ModelDownloaded(model_id) => {
-            if let Some(ref reg) = app.setup_registry
-                && let Some(entry) = reg.iter().find(|e| e.model_id.as_str() == model_id.as_ref())
-            {
-                let device = zti_hw::probe().device;
-                let variants = entry.variant_list(Some(&device));
-                app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
-                    model_id,
-                    variants,
-                    selected: 0,
-                });
-                return;
-            }
             let _ = tx
-                .send(AppMessage::SetupComplete {
-                    model: model_id,
-                    variant: Arc::from("auto"),
-                })
+                .send(AppMessage::SetupComplete { model: model_id })
                 .await;
         }
         AppMessage::ModelDownloadError(msg) => {
@@ -245,9 +220,8 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                 can_retry: false,
             });
         }
-        AppMessage::SetupComplete { model, variant } => {
+        AppMessage::SetupComplete { model } => {
             app.model = Some(Arc::clone(&model));
-            app.variant = Some(Arc::clone(&variant));
             app.should_run.store(true, Ordering::Relaxed);
             app.screen = app::Screen::Main;
             spawn_daemon_monitor(app, tx);
@@ -322,11 +296,6 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 {
                     *selected += 1;
                 }
-                app::Screen::Setup(app::SetupPhase::VariantSelection {
-                    variants, selected, ..
-                }) if *selected + 1 < variants.len() => {
-                    *selected += 1;
-                }
                 app::Screen::Setup(app::SetupPhase::IndexMethodSelection {
                     methods, selected, ..
                 }) if *selected + 1 < methods.len() => {
@@ -345,7 +314,6 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
         event::Action::SetupPrev => {
             if let app::Screen::Setup(
                 app::SetupPhase::ModelSelection { selected, .. }
-                | app::SetupPhase::VariantSelection { selected, .. }
                 | app::SetupPhase::IndexMethodSelection { selected, .. },
             ) = &mut app.screen
                 && *selected > 0
@@ -379,12 +347,21 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 let entry = &entries[*selected];
                 let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
                 if entry.is_downloaded() {
-                    let device = zti_hw::probe().device;
-                    let variants = entry.variant_list(Some(&device));
-                    app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
+                    let hw = zti_hw::probe();
+                    let max_chunks = app
+                        .projects
+                        .iter()
+                        .map(|p| p.total_chunks as usize)
+                        .max()
+                        .unwrap_or(5_000);
+                    let recommended = zti_ann::recommend(max_chunks, DEFAULT_DIM, &hw);
+                    let methods: Arc<[(zti_ann::SearchMethod, bool)]> =
+                        Arc::from(zti_ann::SearchMethod::ALL.map(|m| (m, m == recommended)));
+                    let rec_idx = methods.iter().position(|(_, r)| *r).unwrap_or(0);
+                    app.screen = app::Screen::Setup(app::SetupPhase::IndexMethodSelection {
                         model_id,
-                        variants,
-                        selected: 0,
+                        methods,
+                        selected: rec_idx,
                     });
                 } else {
                     let id = Arc::clone(&model_id);
@@ -393,52 +370,19 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                     tokio::spawn(async move { download_model(id, tx_c).await });
                 }
             }
-            app::Screen::Setup(app::SetupPhase::VariantSelection {
-                model_id,
-                variants,
-                selected,
-            }) => {
-                let variant_str: Arc<str> = if *selected == 0 {
-                    Arc::from("auto")
-                } else {
-                    Arc::clone(&variants[*selected].0)
-                };
-                let mid = Arc::clone(model_id);
-                let hw = zti_hw::probe();
-                let max_chunks = app
-                    .projects
-                    .iter()
-                    .map(|p| p.total_chunks as usize)
-                    .max()
-                    .unwrap_or(5_000);
-                let recommended = zti_ann::recommend(max_chunks, DEFAULT_DIM, &hw);
-                let methods: Arc<[(zti_ann::SearchMethod, bool)]> =
-                    Arc::from(zti_ann::SearchMethod::ALL.map(|m| (m, m == recommended)));
-                let rec_idx = methods.iter().position(|(_, r)| *r).unwrap_or(0);
-                app.screen = app::Screen::Setup(app::SetupPhase::IndexMethodSelection {
-                    model_id: mid,
-                    variant: variant_str,
-                    methods,
-                    selected: rec_idx,
-                });
-            }
             app::Screen::Setup(app::SetupPhase::IndexMethodSelection {
                 model_id,
-                variant,
                 methods,
                 selected,
             }) => {
                 let (method, _) = methods[*selected];
                 app.search_method = Some(method);
                 let save_model = Arc::clone(model_id);
-                let save_variant = Arc::clone(variant);
                 let launch_model = Arc::clone(model_id);
-                let launch_variant = Arc::clone(variant);
                 let complete_model = Arc::clone(model_id);
-                let complete_variant = Arc::clone(variant);
 
                 if let Err(e) =
-                    config::save(&save_model, &save_variant, Some(method.as_str()))
+                    config::save(&save_model, Some(method.as_str()))
                 {
                     app.screen = app::Screen::Setup(app::SetupPhase::Error {
                         message: format!("Failed to save config: {e}"),
@@ -449,20 +393,18 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
 
                 app.screen = app::Screen::Setup(app::SetupPhase::Launching {
                     model_id: launch_model,
-                    variant: launch_variant,
                 });
 
                 let _ = tx
                     .send(AppMessage::SetupComplete {
                         model: complete_model,
-                        variant: complete_variant,
                     })
                     .await;
             }
             _ => {}
         },
-        event::Action::SetupBack => match &app.screen {
-            app::Screen::Setup(app::SetupPhase::ModelSelection { .. }) => {
+        event::Action::SetupBack => {
+            if let app::Screen::Setup(app::SetupPhase::ModelSelection { .. }) = &app.screen {
                 if app.model.is_some() {
                     app.should_run.store(true, Ordering::Relaxed);
                     app.screen = app::Screen::Main;
@@ -470,34 +412,7 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                     app.should_quit = true;
                 }
             }
-            app::Screen::Setup(app::SetupPhase::VariantSelection { .. }) => {
-                if let Some(ref entries) = app.setup_registry {
-                    app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
-                        entries: Arc::clone(entries),
-                        selected: 0,
-                    });
-                }
-            }
-            app::Screen::Setup(app::SetupPhase::IndexMethodSelection {
-                model_id,
-                ..
-            }) => {
-                if let Some(ref reg) = app.setup_registry
-                    && let Some(entry) =
-                        reg.iter().find(|e| e.model_id.as_str() == model_id.as_ref())
-                {
-                    let mid = Arc::clone(model_id);
-                    let device = zti_hw::probe().device;
-                    let variants = entry.variant_list(Some(&device));
-                    app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
-                        model_id: mid,
-                        variants,
-                        selected: 0,
-                    });
-                }
-            }
-            _ => {}
-        },
+        }
         event::Action::SetupRetry => {
             app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
             let tx_c = tx.clone();
@@ -706,7 +621,6 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                     app.search_method = Some(method);
                     if let Err(e) = config::save(
                         app.model.as_deref().unwrap_or(""),
-                        app.variant.as_deref().unwrap_or("auto"),
                         Some(method.as_str()),
                     ) {
                         app.modal = Some(app::Modal::Error {
@@ -811,7 +725,6 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
 struct ClientCtx {
     client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
     model: Option<Arc<str>>,
-    variant: Option<Arc<str>>,
     query_prefix: Option<Arc<str>>,
     passage_prefix: Option<Arc<str>>,
     search_method: Option<zti_ann::SearchMethod>,
@@ -822,17 +735,15 @@ impl ClientCtx {
         Self {
             client: app.client.clone(),
             model: app.model.clone(),
-            variant: app.variant.clone(),
             query_prefix: app.query_prefix.clone(),
             passage_prefix: app.passage_prefix.clone(),
             search_method: app.search_method,
         }
     }
 
-    fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+    fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>) {
         (
             self.model.as_deref(),
-            self.variant.as_deref(),
             self.query_prefix.as_deref(),
             self.passage_prefix.as_deref(),
         )
@@ -874,7 +785,6 @@ fn build_change_method_modal(
 async fn ensure_client(
     client: &Arc<Mutex<Option<zti_ipc_client::Client>>>,
     model: Option<&str>,
-    variant: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -883,7 +793,6 @@ async fn ensure_client(
         let mut c = zti_ipc_client::Client::connect(
             Duration::from_secs(10),
             model,
-            variant,
             query_prefix,
             passage_prefix,
         )
@@ -912,8 +821,8 @@ async fn try_connect(
     ctx: &ClientCtx,
     tx: &mpsc::Sender<AppMessage>,
 ) {
-    let (m, v, qp, pp) = ctx.deref_opts();
-    if let Err(e) = ensure_client(&ctx.client, m, v, qp, pp).await {
+    let (m, qp, pp) = ctx.deref_opts();
+    if let Err(e) = ensure_client(&ctx.client, m, qp, pp).await {
         let mut msg = e.to_string();
         read_daemon_log_tail(&mut msg);
         let _ = tx
@@ -1005,8 +914,8 @@ async fn do_search(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let result = async {
-        let (m, v, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, v, qp, pp).await?;
+        let (m, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp).await?;
 
         let project_root = match root {
             Some(r) => r,
@@ -1063,8 +972,8 @@ async fn do_remove_project(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let daemon_err = async {
-        let (m, v, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, v, qp, pp).await?;
+        let (m, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard
@@ -1107,8 +1016,8 @@ async fn do_index(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let result = async {
-        let (m, v, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, v, qp, pp).await?;
+        let (m, qp, pp) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard

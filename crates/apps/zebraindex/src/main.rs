@@ -3,7 +3,6 @@ use std::borrow::Cow;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-use zti_embed::OnnxVariant;
 
 mod cli;
 mod dsl;
@@ -18,9 +17,6 @@ struct TopLevel {
 
     #[arg(short, long, global = true)]
     model: Option<String>,
-
-    #[arg(long, global = true)]
-    variant: Option<OnnxVariant>,
 
     #[arg(long, global = true)]
     query_prefix: Option<String>,
@@ -38,8 +34,6 @@ enum TopCommand {
     Daemon {
         #[arg(short, long)]
         model: String,
-        #[arg(long, default_value = "auto")]
-        variant: OnnxVariant,
         #[arg(long)]
         query_prefix: Option<String>,
         #[arg(long)]
@@ -76,10 +70,6 @@ fn main() -> Result<()> {
     }
 
     let model = top.model.as_deref();
-    let variant: Option<&str> = top.variant.as_ref().and_then(|v| match v {
-        OnnxVariant::Auto => None,
-        other => Some(other.as_str()),
-    });
     let query_prefix = top.query_prefix.as_deref();
     let passage_prefix = top.passage_prefix.as_deref();
 
@@ -90,13 +80,11 @@ fn main() -> Result<()> {
         }
         Some(TopCommand::Daemon {
             model,
-            variant,
             query_prefix,
             passage_prefix,
         }) => {
             let config = zti_daemon::DaemonConfig {
                 model: Cow::Owned(model),
-                variant,
                 query_prefix: query_prefix.as_deref(),
                 passage_prefix: passage_prefix.as_deref(),
             };
@@ -109,7 +97,7 @@ fn main() -> Result<()> {
         Some(TopCommand::Cli(cmd)) => {
             init_tracing("warn");
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(cli::run(cmd, model, variant, query_prefix, passage_prefix))
+            rt.block_on(cli::run(cmd, model, query_prefix, passage_prefix))
         }
     }
 }

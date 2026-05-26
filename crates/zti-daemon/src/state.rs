@@ -9,7 +9,6 @@ use zti_ann::AnnCache;
 use zti_common::ids;
 use zti_dsl::ProjectIndex;
 use zti_embed::{EmbedEngine, LoadOverrides};
-use zti_hw::Hardware;
 use zti_store::Db;
 
 pub struct LoadedProject {
@@ -23,7 +22,7 @@ pub struct DaemonState {
     primary_engine: Arc<EmbedEngine>,
     pub engines: RwLock<HashMap<Arc<str>, Arc<EmbedEngine>>>,
     pub loading_model: RwLock<Option<Arc<str>>>,
-    pub hardware: Hardware,
+    pub hardware: Arc<zti_hw::Hardware>,
     pub registry: RwLock<HashMap<[u8; 32], Arc<LoadedProject>>>,
     pub ann: Arc<AnnCache>,
     pub started_at_ns: u64,
@@ -34,7 +33,7 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    pub fn new(engine: EmbedEngine, model_id: Arc<str>, hardware: Hardware, pid_lock: File) -> Self {
+    pub fn new(engine: EmbedEngine, model_id: Arc<str>, hardware: Arc<zti_hw::Hardware>, pid_lock: File) -> Self {
         let started_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -76,10 +75,10 @@ impl DaemonState {
 
         { *self.loading_model.write().await = Some(Arc::from(model_id)); }
 
-        let hw = self.hardware.clone();
+        let hw = Arc::clone(&self.hardware);
         let owned = model_id.to_owned();
         let result = tokio::task::spawn_blocking(move || {
-            EmbedEngine::load_with(&owned, &hw, &LoadOverrides::default())
+            EmbedEngine::load_with(&owned, hw, &LoadOverrides::default())
         })
         .await?;
 

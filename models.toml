@@ -1,129 +1,71 @@
 [[models]]
 model_id = "sentence-transformers/all-MiniLM-L6-v2"
-optimal_hardware = ["CPU", "RockX", "NPU", "Mobile (ARM64)"]
 parameters = "22.7M"
 technologies = ["BERT", "Knowledge Distillation", "Mean Pooling"]
-description = "Lightweight baseline. Optimized for edge/mobile. High speed, low footprint."
+description = "Lightweight baseline. High speed, extremely low memory footprint."
 
-[[models.onnx_variants]]
-file = "model.onnx"
-description = "FP32 fallback."
-coreml = true
+[[models]]
+model_id = "sentence-transformers/all-MiniLM-L12-v2"
+parameters = "33.4M"
+technologies = ["BERT", "Knowledge Distillation", "Mean Pooling"]
+description = "Slightly deeper baseline. Better accuracy than L6 with minimal speed cost."
 
-[[models.onnx_variants]]
-file = "model_O4.onnx"
-description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
-coreml = false
+[[models]]
+model_id = "BAAI/bge-small-en-v1.5"
+parameters = "33.4M"
+technologies = ["BERT", "CLS Pooling", "Contrastive Learning"]
+description = "Current gold standard for small models. Fast and highly accurate."
 
-[[models.onnx_variants]]
-file = "model_qint8_arm64.onnx"
-description = "INT8 compiled for ARM64 architectures."
-coreml = false
+[[models]]
+model_id = "BAAI/bge-base-en-v1.5"
+parameters = "109M"
+technologies = ["BERT", "CLS Pooling", "Contrastive Learning"]
+description = "Excellent balance of speed and retrieval accuracy for English."
 
-[[models.onnx_variants]]
-file = "model_qint8_avx512_vnni.onnx"
-description = "INT8 optimized for AVX512 CPUs."
-coreml = false
+[[models]]
+model_id = "BAAI/bge-m3"
+parameters = "567M"
+technologies = ["XLM-RoBERTa", "Dense Retrieval", "Multi-lingual"]
+description = "Heavyweight multi-lingual (100+ languages). Needs GPU. Warning: only uses dense embeddings in this mode."
+
+[[models]]
+model_id = "intfloat/e5-small-v2"
+parameters = "33.4M"
+technologies = ["BERT", "Contrastive Learning", "Prefix prompting"]
+description = "Fast English-only. Requires query:/passage: prefixes."
 
 [[models]]
 model_id = "intfloat/e5-base-v2"
-optimal_hardware = ["CPU (AVX512)", "CUDA", "Vulkan", "Metal"]
 parameters = "109M"
 technologies = ["BERT", "Contrastive Learning", "Prefix prompting"]
-description = "English-only model. Requires 'query:' or 'passage:' prefixes. Strong performance-to-memory ratio."
+description = "Standard English-only E5. High accuracy with strict prefix routing."
 
-[[models.onnx_variants]]
-file = "model.onnx"
-description = "Base FP32 graph."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_O4.onnx"
-description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
-coreml = false
-
-[[models.onnx_variants]]
-file = "model_qint8_avx512_vnni.onnx"
-description = "INT8 quantized for AVX512 CPUs."
-coreml = false
+[[models]]
+model_id = "intfloat/multilingual-e5-small"
+parameters = "118M"
+technologies = ["XLM-RoBERTa", "Contrastive Learning", "Prefix prompting"]
+description = "Lightweight multilingual. Good for mixed-language data on standard hardware."
 
 [[models]]
 model_id = "intfloat/multilingual-e5-base"
-optimal_hardware = ["CPU (AVX512)", "CUDA", "Vulkan", "Metal"]
 parameters = "278M"
 technologies = ["XLM-RoBERTa", "Contrastive Learning", "Prefix prompting"]
-description = "Multilingual E5 variant. Heavy XLM-R vocabulary. GPU acceleration recommended."
-
-[[models.onnx_variants]]
-file = "model.onnx"
-description = "Base FP32 graph. Full CoreML/Metal operator coverage."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_O4.onnx"
-description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
-coreml = false
-
-[[models.onnx_variants]]
-file = "model_qint8_avx512_vnni.onnx"
-description = "INT8 optimized for CPU inference."
-coreml = false
+description = "Heavy multilingual. Broad vocabulary, GPU recommended."
 
 [[models]]
-model_id = "nomic-ai/nomic-embed-text-v1.5"
-optimal_hardware = ["CUDA", "Vulkan", "Metal", "CPU"]
-parameters = "137M"
-technologies = ["MRL", "RoPE", "8192 Context"]
-description = "Supports dynamic embedding dimension reduction (MRL) and long context (8192 tokens)."
-
-[[models.onnx_variants]]
-file = "model.onnx"
-description = "Base FP32 graph."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_fp16.onnx"
-description = "Native FP16 for Tensor Cores."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_int8.onnx"
-description = "Generic INT8 for CPUs."
-coreml = false
-
-[[models.onnx_variants]]
-file = "model_q4f16.onnx"
-description = "4-bit quantization with FP16 activations. Strict VRAM limits."
-coreml = false
+model_id = "thenlper/gte-small"
+parameters = "33.4M"
+technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
+description = "Solid alternative to bge-small. Very robust on diverse text."
 
 [[models]]
-model_id = "Alibaba-NLP/gte-large-en-v1.5"
-optimal_hardware = ["CUDA (TensorRT)", "Vulkan", "Metal"]
-parameters = "334M"
-technologies = ["Enhanced BERT", "LayerNorm Optimizations", "8192 Context"]
-description = "Large-scale English embedding. Top-tier retrieval, heavy compute requirements."
+model_id = "thenlper/gte-base"
+parameters = "109M"
+technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
+description = "Competes directly with e5-base and bge-base. No prefixes required."
 
-[[models.onnx_variants]]
-file = "model.onnx"
-description = "Standard FP32 graph."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_fp16.onnx"
-description = "FP16 optimized graph for high-end GPUs."
-coreml = true
-
-[[models.onnx_variants]]
-file = "model_int8.onnx"
-description = "8-bit quantization for CPU fallback."
-coreml = false
-
-[[models.onnx_variants]]
-file = "model_uint8.onnx"
-description = "Unsigned 8-bit for NPUs (e.g., RockX)."
-coreml = false
-
-[[models.onnx_variants]]
-file = "model_bnb4.onnx"
-description = "BitsAndBytes 4-bit quantization. Maximum compression."
-coreml = false
+[[models]]
+model_id = "thenlper/gte-large"
+parameters = "335M"
+technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
+description = "Top-tier retrieval for English. VRAM heavy."
