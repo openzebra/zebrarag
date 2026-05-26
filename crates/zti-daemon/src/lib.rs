@@ -19,6 +19,7 @@ pub struct DaemonConfig<'a> {
     pub model: Cow<'a, str>,
     pub query_prefix: Option<&'a str>,
     pub passage_prefix: Option<&'a str>,
+    pub model_dtype: Option<&'a str>,
 }
 
 pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
@@ -65,6 +66,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
     let opts = LoadOverrides {
         query_prefix: config.query_prefix,
         passage_prefix: config.passage_prefix,
+        model_dtype: config.model_dtype.and_then(zti_embed::parse_model_dtype),
     };
     let engine = EmbedEngine::load_with(&config.model, Arc::clone(&hw), &opts)?;
 

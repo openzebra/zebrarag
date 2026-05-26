@@ -30,6 +30,7 @@ pub fn run_tui(
     model: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
 ) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -43,6 +44,7 @@ pub fn run_tui(
             model: model.map(Arc::from),
             query_prefix: query_prefix.map(Arc::from),
             passage_prefix: passage_prefix.map(Arc::from),
+            model_dtype: model_dtype.map(Arc::from),
             ..App::default()
         };
 
@@ -700,6 +702,7 @@ struct ClientCtx {
     model: Option<Arc<str>>,
     query_prefix: Option<Arc<str>>,
     passage_prefix: Option<Arc<str>>,
+    model_dtype: Option<Arc<str>>,
     search_method: Option<zti_ann::SearchMethod>,
 }
 
@@ -710,15 +713,17 @@ impl ClientCtx {
             model: app.model.clone(),
             query_prefix: app.query_prefix.clone(),
             passage_prefix: app.passage_prefix.clone(),
+            model_dtype: app.model_dtype.clone(),
             search_method: app.search_method,
         }
     }
 
-    fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>) {
+    fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
         (
             self.model.as_deref(),
             self.query_prefix.as_deref(),
             self.passage_prefix.as_deref(),
+            self.model_dtype.as_deref(),
         )
     }
 }
@@ -760,6 +765,7 @@ async fn ensure_client(
     model: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut guard = client.lock().await;
     if guard.is_none() {
@@ -768,6 +774,7 @@ async fn ensure_client(
             model,
             query_prefix,
             passage_prefix,
+            model_dtype,
         )
         .await?;
         c.handshake().await?;
@@ -791,8 +798,8 @@ fn read_daemon_log_tail(msg: &mut String) {
 }
 
 async fn try_connect(ctx: &ClientCtx, tx: &mpsc::Sender<AppMessage>) {
-    let (m, qp, pp) = ctx.deref_opts();
-    if let Err(e) = ensure_client(&ctx.client, m, qp, pp).await {
+    let (m, qp, pp, md) = ctx.deref_opts();
+    if let Err(e) = ensure_client(&ctx.client, m, qp, pp, md).await {
         let mut msg = e.to_string();
         read_daemon_log_tail(&mut msg);
         let _ = tx
@@ -880,8 +887,8 @@ async fn do_search(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let result = async {
-        let (m, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp).await?;
+        let (m, qp, pp, md) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md).await?;
 
         let project_root = match root {
             Some(r) => r,
@@ -938,8 +945,8 @@ async fn do_remove_project(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let daemon_err = async {
-        let (m, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp).await?;
+        let (m, qp, pp, md) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard
@@ -982,8 +989,8 @@ async fn do_index(
     tx: mpsc::Sender<AppMessage>,
 ) {
     let result = async {
-        let (m, qp, pp) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp).await?;
+        let (m, qp, pp, md) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard

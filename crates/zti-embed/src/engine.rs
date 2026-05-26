@@ -65,6 +65,16 @@ pub fn apply_prefix<'a>(text: &'a str, prefix: &Option<String>) -> Cow<'a, str> 
 pub struct LoadOverrides<'a> {
     pub query_prefix: Option<&'a str>,
     pub passage_prefix: Option<&'a str>,
+    pub model_dtype: Option<DType>,
+}
+
+pub fn parse_model_dtype(raw: &str) -> Option<DType> {
+    match raw.to_ascii_lowercase().as_str() {
+        "f16" | "float16" | "half" => Some(DType::F16),
+        "bf16" | "bfloat16" => Some(DType::BF16),
+        "f32" | "float32" | "float" => Some(DType::F32),
+        _ => None,
+    }
 }
 
 struct Scratch {
@@ -125,8 +135,9 @@ impl EmbedEngine {
         tracing::info!(path = %profile.weights_path.display(), "loading safetensors model");
 
         let device = candle_device(&hw);
+        let dtype = opts.model_dtype.unwrap_or(DType::F32);
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&profile.weights_path], DType::F32, &device)?
+            VarBuilder::from_mmaped_safetensors(&[&profile.weights_path], dtype, &device)?
         };
 
         let config: BertConfig = read_json(&profile.config_path)?;

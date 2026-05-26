@@ -24,6 +24,9 @@ struct TopLevel {
     #[arg(long, global = true)]
     passage_prefix: Option<String>,
 
+    #[arg(long, global = true)]
+    model_dtype: Option<String>,
+
     #[command(subcommand)]
     command: Option<TopCommand>,
 }
@@ -38,6 +41,8 @@ enum TopCommand {
         query_prefix: Option<String>,
         #[arg(long)]
         passage_prefix: Option<String>,
+        #[arg(long)]
+        model_dtype: Option<String>,
     },
     #[command(about = "DSL graph dump for debugging")]
     Dsl {
@@ -71,21 +76,24 @@ fn main() -> Result<()> {
     let model = top.model.as_deref();
     let query_prefix = top.query_prefix.as_deref();
     let passage_prefix = top.passage_prefix.as_deref();
+    let model_dtype = top.model_dtype.as_deref();
 
     match top.command {
         None => {
             init_tracing("warn");
-            tui::run_tui(model, query_prefix, passage_prefix)
+            tui::run_tui(model, query_prefix, passage_prefix, model_dtype)
         }
         Some(TopCommand::Daemon {
             model,
             query_prefix,
             passage_prefix,
+            model_dtype,
         }) => {
             let config = zti_daemon::DaemonConfig {
                 model: Cow::Owned(model),
                 query_prefix: query_prefix.as_deref(),
                 passage_prefix: passage_prefix.as_deref(),
+                model_dtype: model_dtype.as_deref(),
             };
             zti_daemon::run_daemon(&config)
         }
@@ -96,7 +104,9 @@ fn main() -> Result<()> {
         Some(TopCommand::Cli(cmd)) => {
             init_tracing("warn");
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(cli::run(cmd, model, query_prefix, passage_prefix))
+            rt.block_on(cli::run(
+                cmd, model, query_prefix, passage_prefix, model_dtype,
+            ))
         }
     }
 }

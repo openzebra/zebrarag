@@ -71,9 +71,16 @@ async fn open_client(
     model: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
 ) -> Result<Client> {
-    let mut client =
-        Client::connect(Duration::from_secs(60), model, query_prefix, passage_prefix).await?;
+    let mut client = Client::connect(
+        Duration::from_secs(60),
+        model,
+        query_prefix,
+        passage_prefix,
+        model_dtype,
+    )
+    .await?;
     client.handshake().await?;
     Ok(client)
 }
@@ -91,8 +98,9 @@ pub async fn run(
     model: Option<&str>,
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
 ) -> Result<()> {
-    let open = || open_client(model, query_prefix, passage_prefix);
+    let open = || open_client(model, query_prefix, passage_prefix, model_dtype);
 
     match cmd {
         CliCommand::Index { root, refresh } => {

@@ -91,7 +91,7 @@ impl ZebraMcpServer {
     ) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, ErrorData> {
         let mut guard = self.daemon.lock().await;
         if guard.is_none() {
-            let mut client = Client::connect(Duration::from_secs(10), None, None, None)
+            let mut client = Client::connect(Duration::from_secs(10), None, None, None, None)
                 .await
                 .map_err(|e| internal_err(format!("daemon connect: {e}")))?;
             client
