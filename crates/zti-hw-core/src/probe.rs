@@ -1,6 +1,6 @@
 use sysinfo::System;
 
-use crate::device::{Device, Hardware};
+use crate::device::{AtomicEpStatus, Device, EpStatus, Hardware};
 
 /// Probe physical hardware. `supported` lists devices whose backend crates are
 /// linked into this build (set by the umbrella `zti-hw` crate from feature
@@ -22,6 +22,7 @@ pub fn probe(supported: &[Device]) -> Hardware {
         cpus,
         mem_total,
         mem_avail,
+        ep_status: AtomicEpStatus::new(EpStatus::Unknown),
     }
 }
 

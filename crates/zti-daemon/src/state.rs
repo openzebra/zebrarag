@@ -76,7 +76,7 @@ impl DaemonState {
 
         { *self.loading_model.write().await = Some(Arc::from(model_id)); }
 
-        let hw = self.hardware;
+        let hw = self.hardware.clone();
         let owned = model_id.to_owned();
         let result = tokio::task::spawn_blocking(move || {
             EmbedEngine::load_with(&owned, &hw, &LoadOverrides::default())

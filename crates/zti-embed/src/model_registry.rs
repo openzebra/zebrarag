@@ -219,7 +219,7 @@ fn auto_variant_order(hw: &Hardware) -> &'static [OnnxVariant] {
 
     match hw.device {
         Device::Cuda => &[O4, Fp16, Q4f16, Q4, Int8, Quantized, Fp32],
-        Device::Metal => &[O4, Fp16, Q4f16, Int8, Quantized, Fp32],
+        Device::Metal => &[Fp16, Fp32, O4, Q4f16, Int8, Quantized],
         Device::Vulkan => &[O4, Fp16, Q4f16, Int8, Quantized, Fp32],
         Device::Npu => &[Int8, Uint8, Quantized, Fp16, O4, Fp32],
         Device::Cpu => match hw.mem_total {
@@ -523,6 +523,7 @@ fn find_onnx_in(dir: &Path, variant: &OnnxVariant, hw: &Hardware) -> Result<Path
 
     let mut best_rank: usize = usize::MAX;
     let mut best_path: Option<PathBuf> = None;
+    let mut best_variant: Option<OnnxVariant> = None;
 
     let mut unknown_path: Option<PathBuf> = None;
     let mut unknown_count: usize = 0;
@@ -562,6 +563,7 @@ fn find_onnx_in(dir: &Path, variant: &OnnxVariant, hw: &Hardware) -> Result<Path
                     {
                         best_rank = rank;
                         best_path = Some(path);
+                        best_variant = Some(v);
                     }
                 }
                 None => {
@@ -575,6 +577,23 @@ fn find_onnx_in(dir: &Path, variant: &OnnxVariant, hw: &Hardware) -> Result<Path
     }
 
     if let Some(p) = best_path {
+        if matches!(hw.device, Device::Metal)
+            && let Some(ref v) = best_variant
+            && matches!(
+                v,
+                OnnxVariant::O4
+                    | OnnxVariant::Int8
+                    | OnnxVariant::Q4
+                    | OnnxVariant::Uint8
+                    | OnnxVariant::Bnb4
+            )
+        {
+            tracing::warn!(
+                variant = %v,
+                "selected variant has limited CoreML operator coverage; \
+                 GPU may fall back to CPU. Use --variant fp32 for GPU acceleration.",
+            );
+        }
         tracing::info!(path = %p.display(), "selected ONNX variant");
         return Ok(p);
     }

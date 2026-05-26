@@ -5,11 +5,25 @@ parameters = "22.7M"
 technologies = ["BERT", "Knowledge Distillation", "Mean Pooling"]
 description = "Lightweight baseline. Optimized for edge/mobile. High speed, low footprint."
 
-[models.onnx_variants]
-"model.onnx" = "FP32 fallback."
-"model_O4.onnx" = "FP16 optimized for GPU/Vulkan/Metal."
-"model_qint8_arm64.onnx" = "INT8 compiled for ARM64 architectures."
-"model_qint8_avx512_vnni.onnx" = "INT8 optimized for AVX512 CPUs."
+[[models.onnx_variants]]
+file = "model.onnx"
+description = "FP32 fallback."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_O4.onnx"
+description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_qint8_arm64.onnx"
+description = "INT8 compiled for ARM64 architectures."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_qint8_avx512_vnni.onnx"
+description = "INT8 optimized for AVX512 CPUs."
+coreml = false
 
 [[models]]
 model_id = "intfloat/e5-base-v2"
@@ -18,10 +32,20 @@ parameters = "109M"
 technologies = ["BERT", "Contrastive Learning", "Prefix prompting"]
 description = "English-only model. Requires 'query:' or 'passage:' prefixes. Strong performance-to-memory ratio."
 
-[models.onnx_variants]
-"model.onnx" = "Base FP32 graph."
-"model_O4.onnx" = "FP16 optimized graph for mid-range GPUs."
-"model_qint8_avx512_vnni.onnx" = "INT8 quantized for AVX512 CPUs."
+[[models.onnx_variants]]
+file = "model.onnx"
+description = "Base FP32 graph."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_O4.onnx"
+description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_qint8_avx512_vnni.onnx"
+description = "INT8 quantized for AVX512 CPUs."
+coreml = false
 
 [[models]]
 model_id = "intfloat/multilingual-e5-base"
@@ -30,10 +54,20 @@ parameters = "278M"
 technologies = ["XLM-RoBERTa", "Contrastive Learning", "Prefix prompting"]
 description = "Multilingual E5 variant. Heavy XLM-R vocabulary. GPU acceleration recommended."
 
-[models.onnx_variants]
-"model.onnx" = "Base FP32 graph."
-"model_O4.onnx" = "FP16 optimized for dedicated GPUs."
-"model_qint8_avx512_vnni.onnx" = "INT8 optimized for CPU inference."
+[[models.onnx_variants]]
+file = "model.onnx"
+description = "Base FP32 graph. Full CoreML/Metal operator coverage."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_O4.onnx"
+description = "Optimum L4 export. Limited CoreML coverage — may fall back to CPU."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_qint8_avx512_vnni.onnx"
+description = "INT8 optimized for CPU inference."
+coreml = false
 
 [[models]]
 model_id = "nomic-ai/nomic-embed-text-v1.5"
@@ -42,11 +76,25 @@ parameters = "137M"
 technologies = ["MRL", "RoPE", "8192 Context"]
 description = "Supports dynamic embedding dimension reduction (MRL) and long context (8192 tokens)."
 
-[models.onnx_variants]
-"model.onnx" = "Base FP32 graph."
-"model_fp16.onnx" = "Native FP16 for Tensor Cores."
-"model_int8.onnx" = "Generic INT8 for CPUs."
-"model_q4f16.onnx" = "4-bit quantization with FP16 activations. Strict VRAM limits."
+[[models.onnx_variants]]
+file = "model.onnx"
+description = "Base FP32 graph."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_fp16.onnx"
+description = "Native FP16 for Tensor Cores."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_int8.onnx"
+description = "Generic INT8 for CPUs."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_q4f16.onnx"
+description = "4-bit quantization with FP16 activations. Strict VRAM limits."
+coreml = false
 
 [[models]]
 model_id = "Alibaba-NLP/gte-large-en-v1.5"
@@ -55,9 +103,27 @@ parameters = "334M"
 technologies = ["Enhanced BERT", "LayerNorm Optimizations", "8192 Context"]
 description = "Large-scale English embedding. Top-tier retrieval, heavy compute requirements."
 
-[models.onnx_variants]
-"model.onnx" = "Standard FP32 graph."
-"model_fp16.onnx" = "FP16 optimized graph for high-end GPUs."
-"model_int8.onnx" = "8-bit quantization for CPU fallback."
-"model_uint8.onnx" = "Unsigned 8-bit for NPUs (e.g., RockX)."
-"model_bnb4.onnx" = "BitsAndBytes 4-bit quantization. Maximum compression."
+[[models.onnx_variants]]
+file = "model.onnx"
+description = "Standard FP32 graph."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_fp16.onnx"
+description = "FP16 optimized graph for high-end GPUs."
+coreml = true
+
+[[models.onnx_variants]]
+file = "model_int8.onnx"
+description = "8-bit quantization for CPU fallback."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_uint8.onnx"
+description = "Unsigned 8-bit for NPUs (e.g., RockX)."
+coreml = false
+
+[[models.onnx_variants]]
+file = "model_bnb4.onnx"
+description = "BitsAndBytes 4-bit quantization. Maximum compression."
+coreml = false

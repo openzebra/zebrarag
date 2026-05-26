@@ -1,6 +1,6 @@
 use ort::ep::ExecutionProviderDispatch;
 
-pub use zti_hw_core::{BackendKind, Capability, Device, Hardware};
+pub use zti_hw_core::{AtomicEpStatus, BackendKind, Capability, Device, EpStatus, Hardware};
 
 pub fn supported_devices() -> Vec<Device> {
     let mut devs = Vec::with_capacity(4);

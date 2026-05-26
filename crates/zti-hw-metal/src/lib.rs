@@ -1,14 +1,30 @@
 use ort::ep::coreml::{ComputeUnits, ModelFormat, SpecializationStrategy};
 use ort::ep::{CoreML, ExecutionProviderDispatch};
 
+fn resolve_compute_units() -> ComputeUnits {
+    match std::env::var("ZTI_COREML_COMPUTE_UNITS").ok().as_deref() {
+        Some("cpu_and_gpu") => ComputeUnits::CPUAndGPU,
+        Some("cpu_and_ane") => ComputeUnits::CPUAndNeuralEngine,
+        Some("cpu_only") => ComputeUnits::CPUOnly,
+        _ => ComputeUnits::All,
+    }
+}
+
 pub fn register() -> Vec<ExecutionProviderDispatch> {
+    let units = resolve_compute_units();
+    let profile_plan = std::env::var("ZTI_COREML_PROFILE").is_ok();
+
     let mut ep = CoreML::default()
-        .with_compute_units(ComputeUnits::CPUAndGPU)
+        .with_compute_units(units)
         .with_model_format(ModelFormat::MLProgram)
-        .with_specialization_strategy(SpecializationStrategy::Default)
+        .with_specialization_strategy(SpecializationStrategy::FastPrediction)
         .with_static_input_shapes(true)
         .with_subgraphs(true)
         .with_low_precision_accumulation_on_gpu(false);
+
+    if profile_plan {
+        ep = ep.with_profile_compute_plan(true);
+    }
 
     match zti_common::paths::models_dir() {
         Ok(dir) => {
@@ -33,7 +49,9 @@ pub fn register() -> Vec<ExecutionProviderDispatch> {
     }
 
     tracing::debug!(
-        "configuring CoreML execution provider (CPUAndGPU, MLProgram, FP32 accumulation, static shapes)"
+        ?units,
+        profile_plan,
+        "configuring CoreML execution provider"
     );
     vec![ep.build()]
 }

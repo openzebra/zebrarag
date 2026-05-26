@@ -13,7 +13,7 @@ use crate::model_registry::{ModelProfile, OnnxVariant, resolve_profile};
 use crate::normalize::normalize_l2;
 use crate::pooling::{PoolingStrategy, pool_row_into};
 use crate::tokenizer::{Tokenized, Tokenizer};
-use zti_hw::{Device, Hardware, probe, register};
+use zti_hw::{Device, EpStatus, Hardware, probe, register};
 
 /// Flat pooled embeddings. `data` is laid out as `batch` contiguous rows of
 /// `dim` `f32`s, so callers can hand `data` straight to an Arrow
@@ -199,13 +199,10 @@ impl EmbedEngine {
             tracing::info!(dim = probed, "probed embedding dim by warmup");
         }
 
-        // Golden-path warmup on Metal: pay the (~2 s) MLProgram compile for
-        // the (batch=8, seq=512) shape eagerly so the first real batch is
-        // fast. Other bucket shapes JIT-compile lazily on first hit; see
-        // `note_shape_seen` for the one-time info log.
         let golden_seq = TYPICAL_SEQ_LEN.min(profile.max_length);
         let golden_batch = 8usize;
         let mut warmed_shapes: HashSet<(usize, usize)> = HashSet::new();
+        let hw = hw.clone();
         if matches!(hw.device, Device::Metal) {
             let started = std::time::Instant::now();
             tracing::info!(
@@ -225,6 +222,30 @@ impl EmbedEngine {
                 "CoreML golden path warm",
             );
             warmed_shapes.insert((golden_batch, golden_seq));
+
+            let verify = std::time::Instant::now();
+            warmup_one(
+                &mut session,
+                &profile,
+                needs_token_type_ids,
+                golden_batch,
+                golden_seq,
+            )?;
+            let verify_ms = verify.elapsed().as_millis() as u64;
+
+            let ep_threshold_ms = 500u64;
+            if verify_ms > ep_threshold_ms {
+                tracing::warn!(
+                    verify_ms,
+                    ep_threshold_ms,
+                    "CoreML may not be using GPU/ANE — inference slower than expected. \
+                     Consider --variant fp32 for GPU acceleration.",
+                );
+                hw.ep_status.set(EpStatus::Fallback);
+            } else {
+                tracing::info!(verify_ms, "CoreML GPU/ANE acceleration verified");
+                hw.ep_status.set(EpStatus::Active);
+            }
         }
 
         tracing::info!(
@@ -245,7 +266,7 @@ impl EmbedEngine {
             state: Arc::new(Mutex::new(State { session, scratch })),
             tokenizer,
             profile,
-            hardware: *hw,
+            hardware: hw,
             needs_token_type_ids,
             warmed_shapes: Mutex::new(warmed_shapes),
         })

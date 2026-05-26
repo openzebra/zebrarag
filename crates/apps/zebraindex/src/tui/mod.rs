@@ -223,7 +223,8 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             if let Some(ref reg) = app.setup_registry
                 && let Some(entry) = reg.iter().find(|e| e.model_id.as_str() == model_id.as_ref())
             {
-                let variants = entry.variant_list();
+                let device = zti_hw::probe().device;
+                let variants = entry.variant_list(Some(&device));
                 app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
                     model_id,
                     variants,
@@ -378,7 +379,8 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                 let entry = &entries[*selected];
                 let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
                 if entry.is_downloaded() {
-                    let variants = entry.variant_list();
+                    let device = zti_hw::probe().device;
+                    let variants = entry.variant_list(Some(&device));
                     app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
                         model_id,
                         variants,
@@ -485,7 +487,8 @@ async fn handle_action(app: &mut App, action: event::Action, tx: &mpsc::Sender<A
                         reg.iter().find(|e| e.model_id.as_str() == model_id.as_ref())
                 {
                     let mid = Arc::clone(model_id);
-                    let variants = entry.variant_list();
+                    let device = zti_hw::probe().device;
+                    let variants = entry.variant_list(Some(&device));
                     app.screen = app::Screen::Setup(app::SetupPhase::VariantSelection {
                         model_id: mid,
                         variants,

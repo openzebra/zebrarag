@@ -1,5 +1,6 @@
 use fs2::available_space;
 
+use zti_hw::EpStatus;
 use zti_protocol::request::DoctorReq;
 use zti_protocol::response::{CheckStatus, DoctorCheck, DoctorReport, Response};
 
@@ -37,7 +38,7 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
         state.primary_engine()
     };
 
-    let onnx_path = engine.profile().onnx_path.clone();
+    let onnx_path = &engine.profile().onnx_path;
     if !onnx_path.exists() {
         checks.push(error_check(
             "model_load",
@@ -65,6 +66,21 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
                 format!("embed probe failed: {}", e),
             )),
         }
+    }
+
+    match engine.hardware().ep_status.get() {
+        EpStatus::Active => checks.push(ok_check("ep_verify", "CoreML GPU/ANE active")),
+        EpStatus::Fallback => checks.push(DoctorCheck {
+            name: "ep_verify".to_string(),
+            status: CheckStatus::Warn,
+            message: "CoreML registered but ops running on CPU. Try --variant fp32.".to_string(),
+        }),
+        EpStatus::CpuOnly => checks.push(ok_check("ep_verify", "CPU execution provider")),
+        EpStatus::Unknown => checks.push(DoctorCheck {
+            name: "ep_verify".to_string(),
+            status: CheckStatus::Warn,
+            message: "EP status not verified".to_string(),
+        }),
     }
 
     // -- data_dir_writable: probe by writing a tiny file under data_dir and
@@ -112,7 +128,7 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
             Ok(p) => p.join("lance"),
             Err(e) => {
                 checks.push(error_check("db_open", e.to_string()));
-                return finalize(&state.hardware.device, checks);
+                return finalize(&engine, checks);
             }
         };
 
@@ -141,12 +157,14 @@ pub async fn handle(req: &DoctorReq, state: &DaemonState) -> Response {
         }
     }
 
-    finalize(&state.hardware.device, checks)
+    finalize(&engine, checks)
 }
 
-fn finalize(device: &zti_hw::Device, checks: Vec<DoctorCheck>) -> Response {
+fn finalize(engine: &zti_embed::EmbedEngine, checks: Vec<DoctorCheck>) -> Response {
+    let ep = engine.hardware().ep_status.get();
+    let device = ep.device_label(&engine.hardware().device).into_owned();
     Response::Doctor(Ok(DoctorReport {
-        device: device.as_str().to_string(),
+        device,
         checks,
     }))
 }

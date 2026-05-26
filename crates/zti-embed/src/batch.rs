@@ -110,6 +110,7 @@ mod tests {
             cpus: 8,
             mem_total: mem_avail_gib << 30,
             mem_avail: mem_avail_gib << 30,
+            ..Default::default()
         }
     }
 

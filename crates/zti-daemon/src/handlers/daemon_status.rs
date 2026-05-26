@@ -12,12 +12,16 @@ pub async fn handle(state: &DaemonState) -> Response {
     };
     let loading_model = state.loading_model.read().await.as_deref().map(str::to_string);
 
+    let engine = state.primary_engine();
+    let ep = engine.hardware().ep_status.get();
+    let device = ep.device_label(&state.hardware.device).into_owned();
+
     Response::DaemonStatus(DaemonStatusInfo {
         started_at_ns: state.started_at_ns,
         uptime_secs: state.started_at.elapsed().as_secs(),
         projects_loaded,
         model_id: state.primary_model.to_string(),
-        device: state.hardware.device.as_str().to_string(),
+        device,
         loaded_models,
         loading_model,
     })
