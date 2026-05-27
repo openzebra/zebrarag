@@ -157,7 +157,7 @@ pub async fn resolve_project(project_ref: Option<&str>) -> Result<String> {
 
     find_project(&projects, r)
         .map(|p| p.root_path.clone())
-        .ok_or_else(|| project_list_error(&projects))
+        .ok_or_else(|| project_list_error(&projects, Some(r)))
 }
 
 fn resolve_auto(projects: &[ProjectRow]) -> Result<String> {
@@ -175,13 +175,20 @@ fn resolve_auto(projects: &[ProjectRow]) -> Result<String> {
             "No indexed projects. Index a project first."
         )),
         1 => Ok(projects[0].root_path.clone()),
-        _ => Err(project_list_error(projects)),
+        _ => Err(project_list_error(projects, None)),
     }
 }
 
-pub(crate) fn project_list_error(projects: &[ProjectRow]) -> anyhow::Error {
+pub(crate) fn project_list_error(projects: &[ProjectRow], query: Option<&str>) -> anyhow::Error {
     let mut msg = String::with_capacity(64 + projects.len() * 88);
-    msg.push_str("Multiple projects found. Use --root or `project`:\n");
+    match query {
+        Some(q) => {
+            let _ = writeln!(msg, "Project '{q}' not found in index. Available projects:");
+        }
+        None => {
+            msg.push_str("Multiple projects found. Use --root or `project`:\n");
+        }
+    }
     for (i, p) in projects.iter().enumerate() {
         let name = std::path::Path::new(&p.root_path)
             .file_name()
@@ -309,7 +316,7 @@ mod tests {
     #[test]
     fn project_list_error_format() {
         let projects = vec![proj("/alpha/beta"), proj("/gamma/delta")];
-        let err = project_list_error(&projects);
+        let err = project_list_error(&projects, None);
         let msg = format!("{err:#}");
         assert!(msg.contains("1."));
         assert!(msg.contains("2."));
@@ -318,5 +325,18 @@ mod tests {
         assert!(msg.contains("delta"));
         assert!(msg.contains("/gamma/delta"));
         assert!(msg.contains("--root"));
+    }
+
+    #[test]
+    fn project_not_found_error_format() {
+        let projects = vec![proj("/a/b"), proj("/c/d")];
+        let err = project_list_error(&projects, Some("foobar"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("foobar"));
+        assert!(msg.contains("not found in index"));
+        assert!(msg.contains("a"));
+        assert!(msg.contains("b"));
+        assert!(msg.contains("c"));
+        assert!(msg.contains("d"));
     }
 }
