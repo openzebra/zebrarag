@@ -76,4 +76,8 @@ impl TurboReranker {
     pub fn dim(&self) -> usize {
         self.quantizer.dim()
     }
+
+    pub fn quantizer(&self) -> &TurboQuantizer {
+        &self.quantizer
+    }
 }

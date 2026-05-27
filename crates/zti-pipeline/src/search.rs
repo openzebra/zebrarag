@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
 
 use zti_ann::{AnnCache, AnnHandle, AnnIndexBuilder, SearchMethod, SearchParams};
 use zti_embed::EmbedEngine;
 use zti_rerank::TurboReranker;
+use zti_rerank::gpu::{BATCH_SIZE, GpuTurboScorer, TurboCodeBatch, parse_turbo_code_into};
 use zti_store::chunks_table::{ChunkHit, ChunksTable};
 
 const KNN_OVERFETCH_MULT: usize = 12;
@@ -148,11 +150,63 @@ pub async fn search(
 
     let mut candidates: Vec<ChunkHit> = match params.method {
         SearchMethod::TurboQuant => {
+            let gpu_scorer = GpuTurboScorer::from_reranker(reranker, &engine.device()?)?;
+            let rotated_query = gpu_scorer.pre_rotate(query_emb);
+            let dim_over_2 = gpu_scorer.dim_over_2();
+            let sign_bytes = gpu_scorer.sign_bytes_per_code();
+
+            let mut pending = TurboCodeBatch::with_capacity(BATCH_SIZE, dim_over_2, sign_bytes);
+            let mut batches: Vec<TurboCodeBatch> = Vec::with_capacity(16);
+
             chunks_table
-                .knn_turbo(raw_k, opts.languages, opts.path_glob, |code| {
-                    reranker.score(code, query_emb)
+                .iter_turbo_codes(opts.languages, opts.path_glob, |id, code| {
+                    parse_turbo_code_into(code, &mut pending, id);
+                    if pending.len() >= BATCH_SIZE {
+                        batches.push(std::mem::replace(
+                            &mut pending,
+                            TurboCodeBatch::with_capacity(BATCH_SIZE, dim_over_2, sign_bytes),
+                        ));
+                    }
                 })
-                .await?
+                .await?;
+            if !pending.is_empty() {
+                batches.push(pending);
+            }
+
+            let mut heap: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(raw_k + 1);
+            for batch in &batches {
+                let scored = gpu_scorer
+                    .score_batch(batch, &rotated_query)
+                    .map_err(|e| anyhow!("GPU score batch: {e}"))?;
+                for (chunk_id, score) in scored {
+                    heap.push(Reverse(ScoredEntry { score, chunk_id }));
+                    if heap.len() > raw_k {
+                        heap.pop();
+                    }
+                }
+            }
+
+            let mut scores: Vec<(f32, [u8; 16])> = Vec::with_capacity(heap.len());
+            while let Some(Reverse(entry)) = heap.pop() {
+                scores.push((entry.score, entry.chunk_id));
+            }
+            scores.reverse();
+
+            let top_ids: Vec<[u8; 16]> = scores.iter().map(|(_, id)| *id).collect();
+            let score_by_id: HashMap<[u8; 16], f32> =
+                scores.iter().map(|(s, id)| (*id, *s)).collect();
+
+            let mut hits = chunks_table
+                .fetch_by_chunk_ids(&top_ids, opts.languages, opts.path_glob)
+                .await?;
+            for hit in &mut hits {
+                if let Some(s) = score_by_id.get(&hit.chunk_id) {
+                    hit.score = *s;
+                }
+            }
+            hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+
+            hits
         }
         SearchMethod::Usearch => {
             let graph: AnnHandle = ann_cache
@@ -278,6 +332,34 @@ async fn rebuild(
         .await?;
 
     builder.build()
+}
+
+#[derive(Copy, Clone)]
+struct ScoredEntry {
+    score: f32,
+    chunk_id: [u8; 16],
+}
+
+impl PartialEq for ScoredEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score
+    }
+}
+
+impl Eq for ScoredEntry {}
+
+impl PartialOrd for ScoredEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
+    }
 }
 
 #[cfg(test)]

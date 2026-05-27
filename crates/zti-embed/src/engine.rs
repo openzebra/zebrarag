@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::array::{FixedSizeListArray, Float32Array};
 use arrow::datatypes::{DataType, Field};
 use candle_core::{DType, Tensor};
@@ -194,6 +194,14 @@ impl EmbedEngine {
 
     pub fn hardware(&self) -> &Hardware {
         &self.hardware
+    }
+
+    pub fn device(&self) -> Result<candle_core::Device> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("embed state lock poisoned"))?;
+        Ok(state.device.clone())
     }
 
     pub fn recommended_batch_size(&self) -> usize {
