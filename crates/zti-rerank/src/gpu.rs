@@ -258,3 +258,150 @@ pub fn parse_turbo_code_into(
     batch.signs.extend_from_slice(&qjl_bytes[7..]);
     true
 }
+
+#[cfg(test)]
+mod tq_tests {
+    use super::*;
+    use std::f32;
+
+    fn test_dim() -> usize {
+        128
+    }
+
+    fn test_chunk_id(val: u8) -> [u8; 16] {
+        let mut id = [0u8; 16];
+        id[0] = val;
+        id
+    }
+
+    fn make_reranker(dim: usize) -> crate::turbo::TurboReranker {
+        crate::turbo::TurboReranker::new(dim)
+            .expect("TurboReranker::new should succeed")
+    }
+
+    fn unit_vector(dim: usize) -> Vec<f32> {
+        let scale = (dim as f32).sqrt().recip();
+        vec![scale; dim]
+    }
+
+    #[test]
+    fn build_qjl_matrix_size() {
+        let dim = 16;
+        let proj = 32;
+        let m = build_qjl_matrix(dim, proj, 42);
+        assert_eq!(m.len(), proj * dim);
+    }
+
+    #[test]
+    fn build_qjl_matrix_deterministic() {
+        let m1 = build_qjl_matrix(16, 32, 42);
+        let m2 = build_qjl_matrix(16, 32, 42);
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn build_qjl_matrix_different_seed() {
+        let m1 = build_qjl_matrix(16, 32, 42);
+        let m2 = build_qjl_matrix(16, 32, 99);
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn turbo_code_batch_capacities() {
+        let n = 10;
+        let dim_over_2 = 64;
+        let sign_bytes = 8;
+        let batch = TurboCodeBatch::with_capacity(n, dim_over_2, sign_bytes);
+        assert_eq!(batch.chunk_ids.capacity(), n);
+        assert!(batch.radii.capacity() >= n * dim_over_2);
+        assert!(batch.angle_indices.capacity() >= n * dim_over_2);
+        assert!(batch.norms.capacity() >= n);
+        assert!(batch.signs.capacity() >= n * sign_bytes);
+    }
+
+    #[test]
+    fn turbo_code_batch_clear() {
+        let mut batch = TurboCodeBatch {
+            chunk_ids: vec![test_chunk_id(1)],
+            radii: vec![0.5f32; 4],
+            angle_indices: vec![0u16; 4],
+            norms: vec![1.0f32],
+            signs: vec![0xabu8; 8],
+        };
+        assert_eq!(batch.len(), 1);
+        assert!(!batch.is_empty());
+        batch.clear();
+        assert_eq!(batch.len(), 0);
+        assert!(batch.is_empty());
+        assert!(batch.radii.is_empty());
+        assert!(batch.angle_indices.is_empty());
+        assert!(batch.norms.is_empty());
+        assert!(batch.signs.is_empty());
+    }
+
+    #[test]
+    fn parse_too_short_false() {
+        let mut batch = TurboCodeBatch::default();
+        let id = test_chunk_id(1);
+        assert!(!parse_turbo_code_into(&[0x01, 0x00], &mut batch, &id));
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn parse_wrong_version_false() {
+        let mut batch = TurboCodeBatch::default();
+        let id = test_chunk_id(1);
+        let data = [0x02u8; 16];
+        assert!(!parse_turbo_code_into(&data, &mut batch, &id));
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn parse_truncated_polar_false() {
+        let mut batch = TurboCodeBatch::default();
+        let id = test_chunk_id(1);
+        let polar_len = 100u32;
+        let mut header = Vec::with_capacity(5);
+        header.push(COMPACT_VERSION);
+        header.extend_from_slice(&polar_len.to_le_bytes());
+        header.extend_from_slice(&[0u8; 10]);
+        assert!(!parse_turbo_code_into(&header, &mut batch, &id));
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn parse_round_trip_single() -> Result<()> {
+        let r = make_reranker(test_dim());
+        let v = unit_vector(test_dim());
+        let code_bytes = r.encode(&v)?;
+        let id = test_chunk_id(42);
+        let mut batch = TurboCodeBatch::default();
+        let ok = parse_turbo_code_into(&code_bytes, &mut batch, &id);
+        assert!(ok, "should parse valid code");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.chunk_ids[0], id);
+        assert_eq!(batch.norms.len(), 1);
+        assert!(batch.radii.len() > 0);
+        assert!(batch.angle_indices.len() > 0);
+        assert!(batch.signs.len() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_round_trip_multiple() -> Result<()> {
+        let r = make_reranker(test_dim());
+        let v = unit_vector(test_dim());
+        let code1 = r.encode(&v)?;
+        let code2 = r.encode(&v)?;
+        let id1 = test_chunk_id(1);
+        let id2 = test_chunk_id(2);
+        let mut batch = TurboCodeBatch::default();
+        assert!(parse_turbo_code_into(&code1, &mut batch, &id1));
+        assert!(parse_turbo_code_into(&code2, &mut batch, &id2));
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.chunk_ids[0], id1);
+        assert_eq!(batch.chunk_ids[1], id2);
+        assert_eq!(batch.norms.len(), 2);
+        Ok(())
+    }
+}

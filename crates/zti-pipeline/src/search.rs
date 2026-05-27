@@ -576,3 +576,79 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tq_tests {
+    use super::*;
+
+    fn make_candidate(parent_sym_id: Option<u32>) -> ChunkHit {
+        ChunkHit {
+            chunk_id: [0u8; 16],
+            file_path: String::new(),
+            symbol_qualified: String::new(),
+            symbol_kind: String::new(),
+            sym_id: 0,
+            parent_sym_id,
+            appendix_sym_ids: Vec::with_capacity(0),
+            start_line: 0,
+            end_line: 0,
+            content: String::new(),
+            turbo_code: Vec::with_capacity(0),
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn diversify_penalizes_repeated_parent() {
+        let candidates = vec![
+            make_candidate(Some(1)),
+            make_candidate(Some(1)),
+            make_candidate(Some(2)),
+        ];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 10.0), (1, 9.0), (2, 8.0)];
+        diversify_by_parent_in_place(&mut ranked, &candidates, 3);
+        assert!(ranked.len() == 3);
+        let pen = DIVERSITY_PENALTY;
+        assert!(
+            (ranked[0].1 - 10.0).abs() < 1e-6,
+            "first occurrence of parent=1 should have no penalty, got {}",
+            ranked[0].1
+        );
+        assert!(
+            (ranked[1].1 - (9.0 - pen)).abs() < 1e-6,
+            "second occurrence of parent=1 should be penalized by {pen}, got {}",
+            ranked[1].1
+        );
+        assert!(
+            (ranked[2].1 - 8.0).abs() < 1e-6,
+            "parent=2 has no repeats, should be unpenalized, got {}",
+            ranked[2].1
+        );
+    }
+
+    #[test]
+    fn diversify_truncates_to_k() {
+        let candidates = vec![make_candidate(None); 10];
+        let mut ranked: Vec<(usize, f32)> = (0..10).map(|i| (i, i as f32)).collect();
+        diversify_by_parent_in_place(&mut ranked, &candidates, 3);
+        assert_eq!(ranked.len(), 3);
+    }
+
+    #[test]
+    fn diversify_no_parent_noop() {
+        let candidates = vec![make_candidate(None), make_candidate(None)];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 5.0), (1, 3.0)];
+        diversify_by_parent_in_place(&mut ranked, &candidates, 5);
+        assert_eq!(ranked.len(), 2);
+        assert!((ranked[0].1 - 5.0).abs() < 1e-6);
+        assert!((ranked[1].1 - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn diversify_empty_input() {
+        let candidates: Vec<ChunkHit> = Vec::with_capacity(0);
+        let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(0);
+        diversify_by_parent_in_place(&mut ranked, &candidates, 5);
+        assert!(ranked.is_empty());
+    }
+}
