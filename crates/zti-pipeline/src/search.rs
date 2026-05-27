@@ -143,6 +143,7 @@ pub async fn search(
     };
 
     let chunks_table = db.chunks_table(engine.dim()).await?;
+    chunks_table.optimize().await?;
     let raw_k = opts.limit.saturating_mul(KNN_OVERFETCH_MULT);
 
     let query_lc = query.to_ascii_lowercase();
@@ -150,33 +151,35 @@ pub async fn search(
 
     let mut candidates: Vec<ChunkHit> = match params.method {
         SearchMethod::TurboQuant => {
-            let gpu_scorer = GpuTurboScorer::from_reranker(reranker, &engine.device()?)?;
+            let mut gpu_scorer = GpuTurboScorer::from_reranker(reranker, &engine.device()?)?;
             let rotated_query = gpu_scorer.pre_rotate(query_emb);
             let dim_over_2 = gpu_scorer.dim_over_2();
             let sign_bytes = gpu_scorer.sign_bytes_per_code();
 
-            let mut pending = TurboCodeBatch::with_capacity(BATCH_SIZE, dim_over_2, sign_bytes);
-            let mut batches: Vec<TurboCodeBatch> = Vec::with_capacity(16);
+            let mut batch = TurboCodeBatch::with_capacity(BATCH_SIZE, dim_over_2, sign_bytes);
+            let mut heap: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(raw_k + 1);
 
             chunks_table
                 .iter_turbo_codes(opts.languages, opts.path_glob, |id, code| {
-                    parse_turbo_code_into(code, &mut pending, id);
-                    if pending.len() >= BATCH_SIZE {
-                        batches.push(std::mem::replace(
-                            &mut pending,
-                            TurboCodeBatch::with_capacity(BATCH_SIZE, dim_over_2, sign_bytes),
-                        ));
+                    parse_turbo_code_into(code, &mut batch, id);
+                    if batch.len() >= BATCH_SIZE {
+                        let scored = gpu_scorer
+                            .score_batch(&batch, &rotated_query)
+                            .map_err(|e| anyhow!("GPU score batch: {e}"))?;
+                        for (chunk_id, score) in scored {
+                            heap.push(Reverse(ScoredEntry { score, chunk_id }));
+                            if heap.len() > raw_k {
+                                heap.pop();
+                            }
+                        }
+                        batch.clear();
                     }
+                    Ok(true)
                 })
                 .await?;
-            if !pending.is_empty() {
-                batches.push(pending);
-            }
-
-            let mut heap: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(raw_k + 1);
-            for batch in &batches {
+            if !batch.is_empty() {
                 let scored = gpu_scorer
-                    .score_batch(batch, &rotated_query)
+                    .score_batch(&batch, &rotated_query)
                     .map_err(|e| anyhow!("GPU score batch: {e}"))?;
                 for (chunk_id, score) in scored {
                     heap.push(Reverse(ScoredEntry { score, chunk_id }));

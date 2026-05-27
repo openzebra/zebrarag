@@ -449,6 +449,7 @@ pub async fn index_project(
         hw.mem_avail >> 20
     );
 
+    chunks_table.optimize().await?;
     chunks_table.build_index(&params).await?;
 
     upsert_files(&files_table, &snapshots, &need_reindex).await?;

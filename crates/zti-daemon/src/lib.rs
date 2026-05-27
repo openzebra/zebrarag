@@ -48,7 +48,8 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new(
                 "info,zti_daemon=debug,zti_embed=debug,\
-                 zti_pipeline=debug,zti_dsl=debug,zti_store=debug",
+                 zti_pipeline=debug,zti_dsl=debug,zti_store=debug,\
+                 zti_rerank=trace",
             )
         }))
         .with_writer(std::io::stderr)

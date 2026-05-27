@@ -39,17 +39,27 @@ impl TurboCodeBatch {
     pub fn is_empty(&self) -> bool {
         self.chunk_ids.is_empty()
     }
+
+    pub fn clear(&mut self) {
+        self.chunk_ids.clear();
+        self.radii.clear();
+        self.angle_indices.clear();
+        self.norms.clear();
+        self.signs.clear();
+    }
 }
 
 pub struct GpuTurboScorer {
     device: Device,
     dim_over_2: usize,
+    num_projections: usize,
     scale_factor: f32,
     sign_bytes_per_code: usize,
     cos_table: Tensor,
     sin_table: Tensor,
     qjl_proj: Tensor,
     rotation: StoredRotation,
+    pre_signs_flat: Vec<f32>,
 }
 
 impl GpuTurboScorer {
@@ -82,12 +92,14 @@ impl GpuTurboScorer {
         Ok(Self {
             device: device.clone(),
             dim_over_2,
+            num_projections,
             scale_factor,
             sign_bytes_per_code,
             cos_table,
             sin_table,
             qjl_proj,
             rotation,
+            pre_signs_flat: Vec::with_capacity(BATCH_SIZE * num_projections),
         })
     }
 
@@ -106,7 +118,7 @@ impl GpuTurboScorer {
     }
 
     pub fn score_batch(
-        &self,
+        &mut self,
         batch: &TurboCodeBatch,
         rotated_query: &[f32],
     ) -> Result<Vec<([u8; 16], f32)>> {
@@ -115,15 +127,24 @@ impl GpuTurboScorer {
             return Ok(Vec::new());
         }
 
+        tracing::trace!(
+            n = n,
+            device = ?self.device,
+            dim = self.dim_over_2 * 2,
+            proj = self.num_projections,
+            "score_batch: GPU QJL matmul",
+        );
+
         let dim = self.dim_over_2 * 2;
         let rotated_query_t = Tensor::from_slice(rotated_query, dim, &self.device)?;
 
+        // Step 1: QJL projection of query — keep result on GPU.
         let projected = self
             .qjl_proj
             .matmul(&rotated_query_t.unsqueeze(1)?)?
             .squeeze(1)?;
-        let projected_host = projected.to_vec1::<f32>()?;
 
+        // Step 2: polar decode on GPU (unchanged from original).
         let radii_t = Tensor::from_slice(&batch.radii, (n, self.dim_over_2), &self.device)?
             .to_dtype(DType::F32)?;
         let angle_i64: Vec<i64> = batch.angle_indices.iter().map(|&v| v as i64).collect();
@@ -149,23 +170,35 @@ impl GpuTurboScorer {
             .sum(1)?
             .to_vec1::<f32>()?;
 
-        let mut scores = Vec::with_capacity(n);
-        for (i, &polar_score) in polar_ip.iter().enumerate() {
-            let mut qjl_sum = 0.0f32;
-            let sign_offset = i * self.sign_bytes_per_code;
-            for (p, &proj) in projected_host.iter().enumerate() {
-                let byte_idx = p / 8;
-                let bit_idx = p % 8;
-                let sign = if (batch.signs[sign_offset + byte_idx] >> bit_idx) & 1 == 1 {
-                    1.0
-                } else {
-                    -1.0
-                };
-                qjl_sum += sign * proj;
+        // Step 3: QJL sum — branchless bit unpack on CPU, then GPU matmul.
+        let proj_count = self.num_projections;
+        let sign_stride = self.sign_bytes_per_code;
+
+        self.pre_signs_flat.clear();
+        for i in 0..n {
+            let base = i * sign_stride;
+            for p in 0..proj_count {
+                let byte_idx = p >> 3;
+                let bit_idx = p & 7;
+                let bit = (batch.signs[base + byte_idx] >> bit_idx) & 1;
+                self.pre_signs_flat.push((bit as f32) * 2.0 - 1.0);
             }
-            let qjl_ip = batch.norms[i] * self.scale_factor * qjl_sum;
-            let total = polar_score + qjl_ip;
-            scores.push((batch.chunk_ids[i], total));
+        }
+
+        let signs_t = Tensor::from_slice(
+            &self.pre_signs_flat,
+            (n, proj_count),
+            &self.device,
+        )?;
+        // projected is [proj_count]; reshape to [proj_count, 1] for matmul
+        let qjl_sums_t = signs_t.matmul(&projected.unsqueeze(1)?)?.squeeze(1)?;
+        let qjl_sums = qjl_sums_t.to_vec1::<f32>()?;
+
+        // Step 4: combine polar + QJL scores.
+        let mut scores = Vec::with_capacity(n);
+        for i in 0..n {
+            let qjl_ip = batch.norms[i] * self.scale_factor * qjl_sums[i];
+            scores.push((batch.chunk_ids[i], polar_ip[i] + qjl_ip));
         }
         Ok(scores)
     }

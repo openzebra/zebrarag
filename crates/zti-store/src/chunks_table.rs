@@ -313,7 +313,7 @@ impl ChunksTable {
         mut on_row: F,
     ) -> Result<usize>
     where
-        F: FnMut(&[u8; 16], &[u8]),
+        F: FnMut(&[u8; 16], &[u8]) -> Result<bool>,
     {
         let mut filter = String::from("turbo_code IS NOT NULL");
         if let Some(lp) = build_lang_path_filter(languages, path_glob) {
@@ -355,7 +355,9 @@ impl ChunksTable {
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                on_row(id, codes.value(i));
+                if !on_row(id, codes.value(i))? {
+                    return Ok(count);
+                }
                 count += 1;
             }
         }
@@ -467,6 +469,13 @@ impl ChunksTable {
 
     pub async fn len(&self) -> Result<usize> {
         Ok(self.table.count_rows(None).await?)
+    }
+
+    pub async fn optimize(&self) -> Result<()> {
+        use lancedb::table::OptimizeAction;
+
+        self.table.optimize(OptimizeAction::All).await?;
+        Ok(())
     }
 }
 

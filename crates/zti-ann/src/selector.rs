@@ -1,8 +1,9 @@
-use zti_hw_core::Hardware;
+use zti_hw_core::{Device, Hardware};
 
 use crate::method::{SearchMethod, SearchParams};
 
 const FLAT_MAX: usize = 1_024;
+const TURBO_MAX: usize = 5_000_000;
 const HNSW_RS_MAX: usize = 10_000;
 const HYSTERESIS_PCT: u64 = 25;
 
@@ -14,6 +15,8 @@ pub fn recommend(n_chunks: usize, dim: usize, hw: &Hardware) -> SearchMethod {
 
     if n_chunks < FLAT_MAX {
         SearchMethod::Flat
+    } else if hw.device != Device::Cpu && n_chunks < TURBO_MAX {
+        SearchMethod::TurboQuant
     } else if n_chunks < HNSW_RS_MAX && est_full_vec_mem < mem_quarter {
         SearchMethod::Usearch
     } else {
