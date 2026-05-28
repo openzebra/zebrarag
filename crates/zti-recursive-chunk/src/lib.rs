@@ -15,14 +15,30 @@ pub struct SubChunk {
     pub end_line: u32,
 }
 
-use crate::merge::chunk_text;
+use crate::merge::{chunk_text, chunk_text_with_ts};
 
 pub fn split_text(
     source: &str,
     config: &ChunkConfig,
-    _lang: Option<tree_sitter::Language>,
+    lang: Option<tree_sitter::Language>,
 ) -> Vec<SubChunk> {
     let min_chunk = config.min_chunk_size;
     let overlap = config.chunk_overlap.min(min_chunk);
+
+    if let Some(ts_lang) = lang {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&ts_lang).is_err() {
+            // fall through to regex
+        } else if let Some(tree) = parser.parse(source, None) {
+            return chunk_text_with_ts(
+                source,
+                config.chunk_size,
+                overlap,
+                min_chunk,
+                tree.root_node(),
+            );
+        }
+    }
+
     chunk_text(source, config.chunk_size, overlap, min_chunk)
 }

@@ -9,6 +9,56 @@ const MISSING_OVERLAP: usize = 512;
 const PER_LB: usize = 64;
 const TOO_SMALL: usize = 1048576;
 
+/// Walk a tree-sitter AST node, collecting atoms from its children.
+/// Gaps between siblings and terminal nodes fall through to regex splitting.
+fn collect_atoms_ts(
+    text: &str,
+    node: tree_sitter::Node,
+    min_atom: usize,
+    level: usize,
+    collector: &mut AtomCollector,
+) {
+    let start = node.start_byte();
+    let end = node.end_byte();
+
+    if end - start <= min_atom {
+        collector.curr_level = level;
+        collector.add(start, end);
+        return;
+    }
+
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        collector.curr_level = level + 1;
+        collect_atoms(text, start, end, 0, min_atom, collector);
+        return;
+    }
+
+    let mut prev_end = start;
+    loop {
+        let child = cursor.node();
+        let cs = child.start_byte();
+
+        if cs > prev_end {
+            collector.curr_level = level + 1;
+            collect_atoms(text, prev_end, cs, 0, min_atom, collector);
+        }
+
+        collect_atoms_ts(text, child, min_atom, level + 1, collector);
+
+        prev_end = child.end_byte();
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    if prev_end < end {
+        collector.curr_level = level + 1;
+        collect_atoms(text, prev_end, end, 0, min_atom, collector);
+    }
+}
+
 /// Recursively split a byte range using progressively finer regex separators.
 fn collect_atoms(
     text: &str,
@@ -181,6 +231,43 @@ fn merge_atoms(atoms: Vec<AtomChunk>, chunk_size: usize, chunk_overlap: usize, m
 
 fn overlap_cost_base(text_len: usize, offset: usize, overlap: usize) -> usize {
     text_len.saturating_sub(offset).saturating_mul(MISSING_OVERLAP).checked_div(overlap).unwrap_or(0)
+}
+
+pub(crate) fn chunk_text_with_ts(
+    source: &str,
+    chunk_size: usize,
+    chunk_overlap: usize,
+    min_chunk: usize,
+    root: tree_sitter::Node,
+) -> Vec<SubChunk> {
+    let min_atom = if chunk_overlap > 0 { chunk_overlap } else { min_chunk };
+
+    let mut collector = AtomCollector {
+        text: source,
+        curr_level: 0,
+        min_level: 0,
+        chunks: Vec::with_capacity(source.len() / 32 + 1),
+    };
+
+    collect_atoms_ts(source, root, min_atom, 0, &mut collector);
+    let atoms = collector.seal();
+    let mut raw = merge_atoms(atoms, chunk_size, chunk_overlap, min_chunk, source);
+
+    let all_pos: Vec<&mut BytePos> = raw.iter_mut().flat_map(|(s, e)| {
+        std::iter::once(&mut *s).chain(std::iter::once(&mut *e))
+    }).collect();
+    compute_positions(source, all_pos);
+
+    raw.into_iter().map(|(sp, ep)| {
+        let s = sp.output.unwrap();
+        let e = ep.output.unwrap();
+        SubChunk {
+            byte_start: sp.byte_offset,
+            byte_end: ep.byte_offset,
+            start_line: s.line,
+            end_line: e.line,
+        }
+    }).collect()
 }
 
 pub(crate) fn chunk_text(
