@@ -22,8 +22,8 @@ use zti_tree_sitter::{Language, frontend_for};
 
 const APPENDIX_DEPTH: usize = 2;
 const APPENDIX_CAP_PER_CHUNK: usize = 32;
-const CHARS_PER_TOKEN: usize = 3;
-const CHUNK_SIZE_MULT: usize = 3;
+const CHARS_PER_TOKEN: usize = 4;
+const CHUNK_SIZE_MULT: usize = 4;
 const CHUNK_MIN_MULT: usize = 2;
 const CHUNK_OVERLAP: usize = 200;
 
@@ -516,7 +516,7 @@ pub async fn index_project(
     let previous_params: Option<zti_ann::SearchParams> = previous_row
         .as_ref()
         .and_then(|r| r.search_params.as_deref())
-        .and_then(|s| serde_json::from_str(s).ok());
+        .and_then(|s| toml::from_str(s).ok());
     let total_in_db = chunks_table.len().await?;
     let mut params =
         zti_ann::choose_method(total_in_db, engine.dim(), hw, previous_params.as_ref());
@@ -652,7 +652,7 @@ async fn upsert_project(
     );
 
     let search_method = StringArray::from(vec![choice.method.as_str()]);
-    let search_params = StringArray::from(vec![serde_json::to_string(&choice)?]);
+    let search_params = StringArray::from(vec![toml::to_string(&choice)?]);
 
     let record = RecordBatch::try_new(
         Arc::new(zti_store::schema::projects_schema()),

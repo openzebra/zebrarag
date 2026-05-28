@@ -108,7 +108,7 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             // heap String fields.
             let mut by_sym: HashMap<u32, ChunkHit> = HashMap::with_capacity(rows.len());
             for r in rows {
-                by_sym.insert(r.sym_id, r);
+                by_sym.entry(r.sym_id).or_insert(r);
             }
             let mut out: Vec<SearchHit> = Vec::with_capacity(appendix_ids.len());
             for sid in &appendix_ids {

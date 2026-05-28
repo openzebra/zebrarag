@@ -133,7 +133,7 @@ pub async fn search(
     let previous: Option<SearchParams> = project
         .search_params
         .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
+        .and_then(|s| toml::from_str(s).ok());
 
     let params: SearchParams = match previous {
         Some(p) => p,
@@ -147,7 +147,15 @@ pub async fn search(
 
     let chunks_table = db.chunks_table(engine.dim()).await?;
     chunks_table.optimize().await?;
-    let raw_k = opts.limit.saturating_mul(KNN_OVERFETCH_MULT);
+    let total_chunks = project.total_chunks as usize;
+    let overfetch = if total_chunks > 100_000 {
+        6
+    } else if total_chunks > 20_000 {
+        8
+    } else {
+        KNN_OVERFETCH_MULT
+    };
+    let raw_k = opts.limit.saturating_mul(overfetch);
 
     let query_lc = query.to_ascii_lowercase();
     let words = split_query_words(&query_lc);
@@ -255,6 +263,9 @@ pub async fn search(
     let mut ranked = reranker.rerank(&rerank_input, query_emb);
 
     diversify_by_parent_in_place(&mut ranked, &candidates, opts.limit);
+
+    let mut seen_sym_ids: HashSet<u32> = HashSet::with_capacity(ranked.len());
+    ranked.retain(|(idx, _)| seen_sym_ids.insert(candidates[*idx].sym_id));
 
     let mut slots: Vec<Option<ChunkHit>> = candidates.drain(..).map(Some).collect();
     let mut hits: Vec<Hit> = Vec::with_capacity(ranked.len());
