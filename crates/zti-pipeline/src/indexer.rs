@@ -23,6 +23,9 @@ use zti_tree_sitter::{Language, frontend_for};
 const APPENDIX_DEPTH: usize = 2;
 const APPENDIX_CAP_PER_CHUNK: usize = 32;
 const CHARS_PER_TOKEN: usize = 3;
+const CHUNK_SIZE_MULT: usize = 4;
+const CHUNK_MIN_MULT: usize = 2;
+const CHUNK_OVERLAP: usize = 200;
 
 use crate::manifest::{FileSnapshot, SourceKind, detect_changes, walk_source_files};
 use crate::progress::ProgressReporter;
@@ -43,9 +46,9 @@ fn generate_sub_chunks(
     let sub_chunks = zti_recursive_chunk::split_text(
         &chunk.body,
         &zti_recursive_chunk::ChunkConfig {
-            chunk_size: max_tokens * 4,
-            min_chunk_size: max_tokens * 2,
-            chunk_overlap: 0,
+            chunk_size: max_tokens * CHUNK_SIZE_MULT,
+            min_chunk_size: max_tokens * CHUNK_MIN_MULT,
+            chunk_overlap: CHUNK_OVERLAP,
         },
         lang,
     );
