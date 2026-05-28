@@ -36,8 +36,7 @@ fn collect_atoms_ts(
 
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
-        collector.curr_level = level + 1;
-        collect_atoms(text, start, end, 0, min_atom, collector);
+        collect_atoms(text, start, end, level, 0, min_atom, collector);
         return;
     }
 
@@ -47,8 +46,7 @@ fn collect_atoms_ts(
         let cs = child.start_byte();
 
         if cs > prev_end {
-            collector.curr_level = level + 1;
-            collect_atoms(text, prev_end, cs, 0, min_atom, collector);
+            collect_atoms(text, prev_end, cs, level, 0, min_atom, collector);
         }
 
         collect_atoms_ts(text, child, min_atom, level + 1, collector, terminal_kinds);
@@ -61,26 +59,30 @@ fn collect_atoms_ts(
     }
 
     if prev_end < end {
-        collector.curr_level = level + 1;
-        collect_atoms(text, prev_end, end, 0, min_atom, collector);
+        collect_atoms(text, prev_end, end, level, 0, min_atom, collector);
     }
 }
 
 /// Recursively split a byte range using progressively finer regex separators.
+/// `base_level` offsets syntax levels so gaps inside tree-sitter nodes at depth D
+/// produce atoms on the same scale as sibling TS nodes (both at D+1).
 fn collect_atoms(
     text: &str,
     range_start: usize,
     range_end: usize,
+    base_level: usize,
     sep_id: usize,
     min_atom: usize,
     collector: &mut AtomCollector<'_>,
 ) {
     if range_end - range_start <= min_atom {
+        collector.curr_level = base_level + sep_id + 1;
         collector.add(range_start, range_end);
         return;
     }
     let cfg: &SynLangConfig = &DEFAULT_LANG_CONFIG;
     if sep_id >= cfg.separator_regex.len() {
+        collector.curr_level = base_level + sep_id + 1;
         collector.add(range_start, range_end);
         return;
     }
@@ -90,13 +92,18 @@ fn collect_atoms(
     for m in re.find_iter(fragment) {
         let sep_end = range_start + m.end();
         if cursor < sep_end {
-            collect_atoms(text, cursor, range_start + m.start(), sep_id + 1, min_atom, collector);
+            collect_atoms(text, cursor, range_start + m.start(), base_level, sep_id + 1, min_atom, collector);
         }
         cursor = sep_end;
     }
     if cursor < range_end {
-        collect_atoms(text, cursor, range_end, sep_id + 1, min_atom, collector);
+        collect_atoms(text, cursor, range_end, base_level, sep_id + 1, min_atom, collector);
     }
+    let lvl = base_level + sep_id + 1;
+    if lvl < collector.min_level {
+        collector.min_level = lvl;
+    }
+    collector.curr_level = lvl;
 }
 
 fn lb_gap(boundary: &LineBreakLevel, internal: &LineBreakLevel) -> usize {
@@ -119,7 +126,7 @@ fn merge_atoms(atoms: Vec<AtomChunk>, chunk_size: usize, chunk_overlap: usize, m
     let mut plans: Vec<Plan> = Vec::with_capacity(n);
     plans.push(Plan { start_idx: 0, prev_plan: 0, cost: 0, overlap_base: overlap_cost_base(text.len(), 0, chunk_overlap) });
 
-    let mut heap: BinaryHeap<(std::cmp::Reverse<usize>, usize)> = BinaryHeap::new();
+    let mut heap: BinaryHeap<(std::cmp::Reverse<usize>, usize)> = BinaryHeap::with_capacity(n);
     let mut gap_cache = vec![0usize];
 
     for i in 0..n.saturating_sub(1) {
@@ -225,7 +232,7 @@ fn merge_atoms(atoms: Vec<AtomChunk>, chunk_size: usize, chunk_overlap: usize, m
         heap.clear();
     }
 
-    let mut out: Vec<(BytePos, BytePos)> = Vec::new();
+    let mut out: Vec<(BytePos, BytePos)> = Vec::with_capacity(plans.len());
     let mut pi = plans.len() - 1;
     while pi > 0 {
         let p = &plans[pi];
@@ -270,6 +277,10 @@ fn finish_chunks(
     }).collect()
 }
 
+fn min_atom_size(chunk_overlap: usize, min_chunk: usize) -> usize {
+    if chunk_overlap > 0 { chunk_overlap } else { min_chunk }
+}
+
 pub(crate) fn chunk_text_with_ts(
     source: &str,
     chunk_size: usize,
@@ -278,15 +289,8 @@ pub(crate) fn chunk_text_with_ts(
     root: tree_sitter::Node,
     terminal_kinds: &[u16],
 ) -> Vec<SubChunk> {
-    let min_atom = if chunk_overlap > 0 { chunk_overlap } else { min_chunk };
-
-    let mut collector = AtomCollector {
-        text: source,
-        curr_level: 0,
-        min_level: 0,
-        chunks: Vec::with_capacity(source.len() / 32 + 1),
-    };
-
+    let min_atom = min_atom_size(chunk_overlap, min_chunk);
+    let mut collector = AtomCollector::new(source);
     collect_atoms_ts(source, root, min_atom, 0, &mut collector, terminal_kinds);
     finish_chunks(source, collector, chunk_size, chunk_overlap, min_chunk)
 }
@@ -297,16 +301,9 @@ pub(crate) fn chunk_text(
     chunk_overlap: usize,
     min_chunk: usize,
 ) -> Vec<SubChunk> {
-    let min_atom = if chunk_overlap > 0 { chunk_overlap } else { min_chunk };
-
-    let mut collector = AtomCollector {
-        text: source,
-        curr_level: 0,
-        min_level: 0,
-        chunks: Vec::with_capacity(source.len() / 32 + 1),
-    };
-
-    collect_atoms(source, 0, source.len(), 0, min_atom, &mut collector);
+    let min_atom = min_atom_size(chunk_overlap, min_chunk);
+    let mut collector = AtomCollector::new(source);
+    collect_atoms(source, 0, source.len(), 0, 0, min_atom, &mut collector);
     finish_chunks(source, collector, chunk_size, chunk_overlap, min_chunk)
 }
 
@@ -315,32 +312,154 @@ mod tests_merge {
     use super::*;
 
     #[test]
-    fn terminal_kinds_prevent_regex_inside_comment() {
-        let source = "/*\npara 1\n\npara 2\n\npara 3\n*/\nfn f() {}";
+    fn test_split_basic() {
+        let source = "Linea 1.\nLinea 2.\n\nLinea 3.";
+        let chunks = chunk_text(source, 15, 0, 5);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(&source[chunks[0].byte_start..chunks[0].byte_end], "Linea 1.");
+        assert_eq!(&source[chunks[1].byte_start..chunks[1].byte_end], "Linea 2.");
+        assert_eq!(&source[chunks[2].byte_start..chunks[2].byte_end], "Linea 3.");
+    }
+
+    #[test]
+    fn test_split_long_text() {
+        let source = "A very very long text that needs to be split.";
+        let chunks = chunk_text(source, 20, 0, 12);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            let t = &source[chunk.byte_start..chunk.byte_end];
+            assert!(t.len() <= 20, "Chunk too long: '{}'", t);
+        }
+    }
+
+    #[test]
+    fn test_split_with_overlap() {
+        let source = "This is a test text that is a bit longer to see how the overlap works.";
+        let chunks = chunk_text(source, 20, 5, 10);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            let t = &source[chunk.byte_start..chunk.byte_end];
+            assert!(t.len() <= 25, "Chunk too long: '{}'", t);
+        }
+    }
+
+    #[test]
+    fn test_split_trims_whitespace() {
+        let source = "  \n First chunk  \n\n  Second chunk with spaces at the end    \n";
+        let chunks = chunk_text(source, 30, 0, 10);
+        assert!(!chunks.is_empty());
+        let first = &source[chunks[0].byte_start..chunks[0].byte_end];
+        assert!(!first.starts_with("  "), "First chunk should not start with spaces, got: '{}'", first);
+    }
+
+    /// Returns `(byte_start, byte_end, boundary_syntax_level)` for every atom
+    /// produced by `collect_atoms_ts` + `seal` — used by differential tests.
+    fn atoms_for_ts(source: &str, min_atom: usize) -> Vec<(usize, usize, usize)> {
+        let tree = parse_rust(source);
+        let mut collector = AtomCollector::new(source);
+        collect_atoms_ts(source, tree.root_node(), min_atom, 0, &mut collector, &[]);
+        let atoms = collector.seal();
+        atoms
+            .into_iter()
+            .map(|a| (a.byte_start, a.byte_end, a.boundary_syntax_level))
+            .collect()
+    }
+
+    fn parse_rust(source: &str) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_rust::LANGUAGE.into())
             .unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        let ts_lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.parse(source, None).unwrap()
+    }
 
+    #[test]
+    fn test_ts_depth_offset_deep_gap() {
+        // Blank-line gap inside `fn` at depth 2.
+        // Cocoindex ground truth (tree-sitter-rust 0.24.0):
+        //   atom[5]  "    let" (first let)         byte 12-19 bsl=4
+        //   atom[10] "    let" (second let, after gap) byte 28-35 bsl=4
+        //   sentinel bsl=0
+        let source = "fn main() {\n    let a = 1;\n\n    let b = 2;\n}\n";
+        let atoms = atoms_for_ts(source, 1);
+
+        // Find the two let declarations by byte position.
+        // First: source contains "    let" at bytes 12-19
+        // Second: source contains "    let" at bytes 28-35
+        let first_let_idx = atoms.iter().position(|&(s, e, _)| s == 12 && e == 19);
+        let second_let_idx = atoms.iter().position(|&(s, e, _)| s == 28 && e == 35);
+
+        let first_bsl = first_let_idx.map(|i| atoms[i].2);
+        let second_bsl = second_let_idx.map(|i| atoms[i].2);
+
+        assert!(
+            first_bsl.is_some(),
+            "first let_declaration atom (byte 12-19) not found in atoms"
+        );
+        assert!(
+            second_bsl.is_some(),
+            "second let_declaration atom (byte 28-35) not found in atoms"
+        );
+
+        let first_bsl = first_bsl.unwrap();
+        let second_bsl = second_bsl.unwrap();
+
+        // Both let declarations are at the same TS depth (children of block).
+        // Cocoindex gives bsl=4 for both. Without base_level offset,
+        // min_level resets to ~1 after the gap → second_bsl would be ~1.
+        assert_eq!(
+            first_bsl, second_bsl,
+            "both let declarations should have same bsl (same TS depth); \
+             first={}, second={}  (TS depth offset bug: gap resets min_level)",
+            first_bsl, second_bsl,
+        );
+        // Cocoindex gives bsl=4; zebra is uniform −1 (no Once root frame).
+        // The invariant is equality, not the absolute value.
+        assert_eq!(first_bsl, 3, "expected bsl=3 (zebra = cocoindex − 1)");
+
+        // Sentinel must be 0 (cocoindex ground truth, enforced by finish_chunks).
+        let sentinel = atoms.last().unwrap();
+        assert_eq!(sentinel.2, 0, "sentinel boundary_syntax_level must be 0");
+    }
+
+    #[test]
+    fn test_split_with_rust_language() {
+        let source = r#"
+fn main() {
+    println!("Hello");
+}
+
+fn other() {
+    let x = 1;
+}
+"#;
+        let tree = parse_rust(source);
+        let root = tree.root_node();
+        let chunks = chunk_text_with_ts(source, 50, 0, 20, root, &[]);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_split_positions() {
+        let source = "Chunk1\n\nChunk2";
+        let chunks = chunk_text(source, 10, 0, 5);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[1].start_line, 3);
+    }
+
+    #[test]
+    fn terminal_kinds_prevent_regex_inside_comment() {
+        let source = "/*\npara 1\n\npara 2\n\npara 3\n*/\nfn f() {}";
+        let tree = parse_rust(source);
+        let ts_lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
         let block_comment_id = ts_lang.id_for_node_kind("block_comment", true);
 
-        let mut collector_no_term = AtomCollector {
-            text: source,
-            curr_level: 0,
-            min_level: 0,
-            chunks: Vec::with_capacity(16),
-        };
+        let mut collector_no_term = AtomCollector::new(source);
         collect_atoms_ts(source, tree.root_node(), 5, 0, &mut collector_no_term, &[]);
         let atoms_no_term = collector_no_term.seal();
 
-        let mut collector_term = AtomCollector {
-            text: source,
-            curr_level: 0,
-            min_level: 0,
-            chunks: Vec::with_capacity(16),
-        };
+        let mut collector_term = AtomCollector::new(source);
         collect_atoms_ts(
             source,
             tree.root_node(),
@@ -362,26 +481,12 @@ mod tests_merge {
     #[test]
     fn terminal_kinds_empty_no_effect() {
         let source = "fn f() { let x = 1; }";
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        let tree = parse_rust(source);
 
-        let mut collector1 = AtomCollector {
-            text: source,
-            curr_level: 0,
-            min_level: 0,
-            chunks: Vec::with_capacity(16),
-        };
+        let mut collector1 = AtomCollector::new(source);
         collect_atoms_ts(source, tree.root_node(), 100, 0, &mut collector1, &[]);
 
-        let mut collector2 = AtomCollector {
-            text: source,
-            curr_level: 0,
-            min_level: 0,
-            chunks: Vec::with_capacity(16),
-        };
+        let mut collector2 = AtomCollector::new(source);
         collect_atoms_ts(source, tree.root_node(), 100, 0, &mut collector2, &[9999]);
 
         let atoms1 = collector1.seal();

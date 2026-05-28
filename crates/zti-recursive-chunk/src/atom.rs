@@ -77,6 +77,15 @@ pub(crate) struct AtomCollector<'s> {
 const SPACE: [char; 2] = [' ', '\t'];
 
 impl<'s> AtomCollector<'s> {
+    pub fn new(text: &'s str) -> Self {
+        Self {
+            text,
+            curr_level: 0,
+            min_level: 0,
+            chunks: Vec::with_capacity(text.len() / 32 + 1),
+        }
+    }
+
     pub fn add(&mut self, start: usize, end: usize) {
         let trimmed = self.text[start..end].trim_end();
         if trimmed.is_empty() {
@@ -107,6 +116,7 @@ impl<'s> AtomCollector<'s> {
     }
 
     pub fn seal(mut self) -> Vec<AtomChunk> {
+        self.min_level = 0;
         self.chunks.push(AtomChunk {
             byte_start: self.text.len(),
             byte_end: self.text.len(),
