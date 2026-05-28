@@ -23,9 +23,9 @@ use zti_tree_sitter::{Language, frontend_for};
 const APPENDIX_DEPTH: usize = 2;
 const APPENDIX_CAP_PER_CHUNK: usize = 32;
 const CHARS_PER_TOKEN: usize = 3;
-const CHUNK_SIZE_MULT: usize = 4;
+const CHUNK_SIZE_MULT: usize = 3;
 const CHUNK_MIN_MULT: usize = 2;
-const CHUNK_OVERLAP: usize = 1024;
+const CHUNK_OVERLAP: usize = 200;
 
 use crate::manifest::{FileSnapshot, SourceKind, detect_changes, walk_source_files};
 use crate::progress::ProgressReporter;
