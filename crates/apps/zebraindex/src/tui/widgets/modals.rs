@@ -205,6 +205,7 @@ fn draw_modal_error(f: &mut Frame, message: &str) {
     f.render_widget(para, area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn phase_row(
     pdef: zti_protocol::response::IndexPhase,
     name: &'static str,

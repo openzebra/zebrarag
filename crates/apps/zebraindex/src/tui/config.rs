@@ -13,7 +13,7 @@ pub struct TuiConfig {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    Ok(zti_common::paths::data_dir()?.join("config.json"))
+    Ok(zti_common::paths::data_dir()?.join("config.toml"))
 }
 
 pub fn load() -> Result<Option<TuiConfig>> {
@@ -21,9 +21,8 @@ pub fn load() -> Result<Option<TuiConfig>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(&path)?;
-    let cfg: TuiConfig = serde_json::from_slice(&bytes)?;
-    Ok(Some(cfg))
+    let text = std::fs::read_to_string(&path)?;
+    Ok(Some(toml::from_str(&text)?))
 }
 
 pub fn save(model: &str, search_method: Option<&str>, dtype: Option<&str>) -> Result<()> {
@@ -33,7 +32,6 @@ pub fn save(model: &str, search_method: Option<&str>, dtype: Option<&str>) -> Re
         default_dtype: dtype.map(str::to_string),
     };
     let path = config_path()?;
-    let json = serde_json::to_vec(&cfg)?;
-    std::fs::write(&path, &json)?;
+    std::fs::write(&path, toml::to_string(&cfg)?)?;
     Ok(())
 }

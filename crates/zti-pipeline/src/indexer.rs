@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use arrow::array::{
-    BinaryBuilder, FixedSizeBinaryBuilder, Float32Array, ListBuilder, RecordBatch, StringArray,
+    BinaryBuilder, FixedSizeBinaryBuilder, ListBuilder, RecordBatch, StringArray,
     StringBuilder, UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
 };
 use tracing::info;
@@ -479,21 +479,18 @@ pub async fn index_project(
                 let mut content_builder = StringBuilder::with_capacity(n, n * 64);
                 let mut turbo_code_builder = BinaryBuilder::new();
                 let mut indexed_at_builder = UInt64Array::builder(n);
-                let mut skipped = 0u32;
 
                 for (i, &idx) in idxs.iter().enumerate() {
                     let (chunk, lang) = &all_pending[idx];
                     let emb = embs.row(i);
 
                     if emb.iter().any(|v| v.is_nan()) {
-                        tracing::warn!(
-                            "NaN in embedding for {}:{}-{}, skipping",
+                        anyhow::bail!(
+                            "NaN embedding for {}:{}-{}",
                             chunk.file,
                             chunk.start_line,
-                            chunk.end_line
+                            chunk.end_line,
                         );
-                        skipped += 1;
-                        continue;
                     }
 
                     let mut hasher = blake3::Hasher::new();
@@ -561,30 +558,8 @@ pub async fn index_project(
                     total_embedded += 1;
                 }
 
-                let n_valid = n - skipped as usize;
-                if n_valid > 0 {
-                    let embedding_arr: arrow::array::FixedSizeListArray = if skipped == 0 {
-                        embs.into_fixed_size_list()
-                    } else {
-                        let mut filtered = Vec::with_capacity(n_valid * dim);
-                        for (i, &_idx) in idxs.iter().enumerate() {
-                            let emb = embs.row(i);
-                            if emb.iter().any(|v| v.is_nan()) {
-                                continue;
-                            }
-                            filtered.extend_from_slice(emb);
-                        }
-                        arrow::array::FixedSizeListArray::new(
-                            std::sync::Arc::new(arrow::datatypes::Field::new(
-                                "item",
-                                arrow::datatypes::DataType::Float32,
-                                false,
-                            )),
-                            dim as i32,
-                            std::sync::Arc::new(Float32Array::from(filtered)),
-                            None,
-                        )
-                    };
+                {
+                    let embedding_arr = embs.into_fixed_size_list();
 
                     let record = RecordBatch::try_new(
                         std::sync::Arc::new(zti_store::schema::chunks_schema(dim)),
