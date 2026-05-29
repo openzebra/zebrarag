@@ -201,11 +201,10 @@ pub async fn run(
                 .await?;
             match resp {
                 Response::Search(Ok(results)) => {
+                    print!("{}", format_search_results(&results));
                     if results.total == 0 {
-                        print!("{}", format_search_results(&results));
                         println!("0 results (hint: project may not be indexed; run `zebraindex index --root <root>` to index)");
                     } else {
-                        print!("{}", format_search_results(&results));
                         println!("{} results", results.total);
                     }
                 }

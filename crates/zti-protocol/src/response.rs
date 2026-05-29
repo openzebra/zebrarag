@@ -41,6 +41,7 @@ impl std::fmt::Display for IndexPhase {
 }
 
 impl IndexPhase {
+    #[inline]
     pub fn order(&self) -> u8 {
         match self {
             Self::Start => 0,

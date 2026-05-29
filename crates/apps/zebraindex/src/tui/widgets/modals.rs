@@ -205,6 +205,69 @@ fn draw_modal_error(f: &mut Frame, message: &str) {
     f.render_widget(para, area);
 }
 
+fn phase_row(
+    pdef: zti_protocol::response::IndexPhase,
+    name: &'static str,
+    active_order: u8,
+    current: u64,
+    total: u64,
+    files: u64,
+    chunks: u64,
+    message: &str,
+) -> Line<'static> {
+    use std::cmp::Ordering;
+    let ord = pdef.order();
+    let (icon, color) = match ord.cmp(&active_order) {
+        Ordering::Less => ("\u{2713}", Color::Green),
+        Ordering::Equal => ("\u{25b6}", Color::Cyan),
+        Ordering::Greater => ("\u{00b7}", Color::DarkGray),
+    };
+    let head = Span::styled(
+        format!("  {} {}  ", icon, name),
+        Style::default().fg(color),
+    );
+    if ord < active_order {
+        let suffix = match pdef {
+            zti_protocol::response::IndexPhase::Gather => {
+                format!("{} files parsed", files)
+            }
+            zti_protocol::response::IndexPhase::Tokenize => {
+                format!("{} chunks", chunks)
+            }
+            _ => String::new(),
+        };
+        Line::from(vec![
+            head,
+            Span::styled(suffix, Style::default().fg(Color::Gray)),
+        ])
+    } else if ord == active_order {
+        let bar = if total > 0 {
+            let filled = ((current as f64 / total as f64) * 20.0) as usize;
+            format!(
+                "[{}{}]",
+                bar_slice(FILLED_20, filled.min(20)),
+                bar_slice(EMPTY_20, 20 - filled.min(20)),
+            )
+        } else {
+            String::from("[                    ]")
+        };
+        let tail = if total > 0 {
+            Span::styled(
+                format!(" {}/{}", current, total),
+                Style::default().fg(Color::White),
+            )
+        } else {
+            Span::styled(message.to_string(), Style::default().fg(Color::Gray))
+        };
+        Line::from(vec![head, Span::styled(bar, Style::default().fg(Color::Cyan)), tail])
+    } else {
+        Line::from(vec![
+            head,
+            Span::styled("pending", Style::default().fg(Color::DarkGray)),
+        ])
+    }
+}
+
 fn draw_modal_indexing(
     f: &mut Frame,
     tick: u16,
@@ -266,66 +329,9 @@ fn draw_modal_indexing(
     lines.push(Line::from(""));
 
     for (pdef, name) in phase_labels {
-        let ord = pdef.order();
-        let icon = if ord < active_order {
-            "\u{2713}" // ✓
-        } else if ord == active_order {
-            "\u{25b6}" // ▶
-        } else {
-            "\u{00b7}" // ·
-        };
-        let icon_color = if ord < active_order {
-            Color::Green
-        } else if ord == active_order {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
-
-        if ord < active_order {
-            let suffix = match pdef {
-                zti_protocol::response::IndexPhase::Gather => {
-                    format!("{} files parsed", files)
-                }
-                zti_protocol::response::IndexPhase::Tokenize => {
-                    format!("{} chunks", chunks)
-                }
-                _ => String::new(),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} {}  ", icon, name), Style::default().fg(icon_color)),
-                Span::styled(suffix, Style::default().fg(Color::Gray)),
-            ]));
-        } else if ord == active_order {
-            let bar_width: usize = 20;
-            let filled = if total > 0 {
-                ((current as f64 / total as f64) * bar_width as f64) as usize
-            } else {
-                0
-            };
-            let bar = format!(
-                "[{}{}]",
-                bar_slice(FILLED_20, filled.min(bar_width)),
-                bar_slice(EMPTY_20, bar_width - filled.min(bar_width)),
-            );
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} {}  ", icon, name), Style::default().fg(icon_color)),
-                Span::styled(bar, Style::default().fg(Color::Cyan)),
-                if total > 0 {
-                    Span::styled(
-                        format!(" {}/{}", current, total),
-                        Style::default().fg(Color::White),
-                    )
-                } else {
-                    Span::styled(message, Style::default().fg(Color::Gray))
-                },
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} {}  ", icon, name), Style::default().fg(icon_color)),
-                Span::styled("pending", Style::default().fg(Color::DarkGray)),
-            ]));
-        }
+        lines.push(phase_row(
+            *pdef, name, active_order, current, total, files, chunks, message,
+        ));
     }
 
     lines.push(Line::from(""));

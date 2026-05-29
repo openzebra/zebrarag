@@ -173,32 +173,17 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             message,
             is_reindex,
         } => {
-            let (started_at, project_root, files, chunks) = match &app.modal {
-                Some(Modal::Indexing { started_at, project_root, files, chunks, .. }) => {
-                    let mut f = *files;
-                    let mut c = *chunks;
-                    if phase == zti_protocol::response::IndexPhase::Gather {
-                        f = total;
-                    }
-                    if phase == zti_protocol::response::IndexPhase::Tokenize {
-                        c = total;
-                    }
-                    (*started_at, project_root.clone(), f, c)
-                }
-                _ => {
-                    let f = if phase == zti_protocol::response::IndexPhase::Gather {
-                        total
-                    } else {
-                        0
-                    };
-                    let c = if phase == zti_protocol::response::IndexPhase::Tokenize {
-                        total
-                    } else {
-                        0
-                    };
-                    (std::time::Instant::now(), String::new(), f, c)
-                }
+            let (started_at, project_root, mut files, mut chunks) = match &app.modal {
+                Some(Modal::Indexing { started_at, project_root, files, chunks, .. }) =>
+                    (*started_at, project_root.clone(), *files, *chunks),
+                _ => (std::time::Instant::now(), String::new(), 0, 0),
             };
+            if phase == zti_protocol::response::IndexPhase::Gather {
+                files = total;
+            }
+            if phase == zti_protocol::response::IndexPhase::Tokenize {
+                chunks = total;
+            }
             app.modal = Some(Modal::Indexing {
                 project_root,
                 phase,

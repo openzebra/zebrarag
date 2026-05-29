@@ -160,10 +160,24 @@ pub async fn index_project(
         changes.unchanged.len(),
     );
 
-    let mut need_reindex: Vec<String>;
+    let mut chunks_table = db.chunks_table(engine.dim()).await?;
+
+    let force_rebuild = if refresh {
+        true
+    } else if !previous.is_empty() {
+        chunks_table.len().await? == 0
+    } else {
+        false
+    };
+
+    if force_rebuild && !refresh {
+        info!("self-heal: empty index detected, forcing full reindex");
+    }
+
+    let need_reindex: Vec<String>;
     let to_delete: Vec<&str>;
 
-    if refresh {
+    if force_rebuild {
         need_reindex = snapshots.keys().cloned().collect();
         to_delete = previous.iter().map(|r| r.file_path.as_str()).collect();
     } else {
@@ -182,23 +196,9 @@ pub async fn index_project(
     }
 
     if !to_delete.is_empty() {
-        let chunks_table = db.chunks_table(engine.dim()).await?;
         chunks_table.delete_for_files(&to_delete).await?;
         files_table.delete_for_paths(&to_delete).await?;
         info!("deleted chunks for {} files", to_delete.len());
-    }
-
-    // Self-heal: if files table has entries but chunks table is empty, force
-    // a full rebuild to recover from the old silent-empty-index bug.
-    if !refresh && need_reindex.is_empty() && !previous.is_empty() {
-        let chunks_table = db.chunks_table(engine.dim()).await?;
-        if chunks_table.len().await? == 0 {
-            info!("self-heal: empty index, forcing full reindex");
-            let del: Vec<&str> = previous.iter().map(|r| r.file_path.as_str()).collect();
-            chunks_table.delete_for_files(&del).await?;
-            files_table.delete_for_paths(&del).await?;
-            need_reindex = snapshots.keys().cloned().collect();
-        }
     }
 
     if need_reindex.is_empty() {
@@ -372,7 +372,6 @@ pub async fn index_project(
 
     let mut total_embedded = 0usize;
     let reranker = TurboReranker::new(engine.dim())?;
-    let mut chunks_table = db.chunks_table(engine.dim()).await?;
 
     let total_chunks = all_pending.len();
     // Tokenize in batches so the progress bar advances 0→N instead of
