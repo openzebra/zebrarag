@@ -48,9 +48,9 @@ blake3 = "1"
 regex = "1"
 ignore = "0.4"
 walkdir = "2"
-dirs   = "5"
+dirs   = "6"
 fs2    = "0.4"
-sysinfo = "0.39"
+sysinfo = "0.38"
 
 tree-sitter            = "0.26"
 tree-sitter-rust       = "0.24"
@@ -68,7 +68,7 @@ bitpolar = { version = "0.3", features = ["parallel", "simd", "serde-support"] }
 
 usearch = "2"
 
-lancedb     = "0.29"
+lancedb     = "0.30"
 arrow       = "58"
 arrow-array = "58"
 
