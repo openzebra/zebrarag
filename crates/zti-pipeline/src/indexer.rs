@@ -222,13 +222,6 @@ pub async fn index_project(
     // time inside `zti_dsl::build_index`. Text-kind snapshots have no
     // tree-sitter frontend, so they're filtered out here and chunked
     // separately below.
-    let n_files = need_reindex.len();
-    reporter.set_phase(
-        zti_protocol::response::IndexPhase::Gather,
-        0,
-        n_files as u64,
-        "parsing code files",
-    );
     let dsl_sources = snapshots.iter().filter_map(|(rel, snap)| match snap.kind {
         SourceKind::Code(lang) => Some(SourceFile {
             full_path: root.join(rel).display().to_string(),
@@ -237,19 +230,23 @@ pub async fn index_project(
         }),
         SourceKind::Text => None,
     });
-    let dsl_index = build_index_from_sources(root_str.to_string(), dsl_sources);
+    let dsl_index = build_index_from_sources(
+        root_str.to_string(),
+        dsl_sources,
+        |processed, total| {
+            reporter.set_phase(
+                zti_protocol::response::IndexPhase::Gather,
+                processed as u64,
+                total as u64,
+                "parsing code files",
+            );
+        },
+    );
     info!(
         "dsl-graph: {} symbols, {} edges, {} files",
         dsl_index.symbols.len(),
         dsl_index.edges.len(),
         dsl_index.files.len(),
-    );
-
-    reporter.set_phase(
-        zti_protocol::response::IndexPhase::Gather,
-        dsl_index.files.len() as u64,
-        n_files as u64,
-        "generating chunks",
     );
     let chunker = DslChunker::new(&dsl_index);
 

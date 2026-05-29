@@ -97,15 +97,24 @@ pub struct SourceFile<'a> {
 /// used by `zti-pipeline::indexer::index_project` — the indexer has already
 /// walked the filesystem and read every file, so we must not walk a second
 /// time.
-pub fn build_index_from_sources<'a, I>(root: String, sources: I) -> ProjectIndex
+///
+/// `on_progress` is called after each file is parsed with `(processed, total)`.
+pub fn build_index_from_sources<'a, I, F>(
+    root: String,
+    sources: I,
+    on_progress: F,
+) -> ProjectIndex
 where
     I: IntoIterator<Item = SourceFile<'a>>,
+    F: Fn(u32, u32),
 {
-    let mut files: Vec<FileEntry> = Vec::new();
+    let items: Vec<SourceFile<'a>> = sources.into_iter().collect();
+    let total = items.len() as u32;
+    let mut files: Vec<FileEntry> = Vec::with_capacity(items.len());
     let mut all_symbols: Vec<zti_ts_core::types::Symbol> = Vec::new();
     let mut all_edges: Vec<zti_ts_core::types::Edge> = Vec::new();
 
-    for src in sources {
+    for (i, src) in items.into_iter().enumerate() {
         let SourceFile {
             full_path,
             content,
@@ -129,6 +138,7 @@ where
                 tracing::warn!("Failed to parse {}: {}", full_path, e);
             }
         }
+        on_progress(i as u32 + 1, total);
     }
 
     let qualified_map = build_qualified_map(&all_symbols, &files);
@@ -207,6 +217,7 @@ pub fn build_index(root: &str) -> Result<ProjectIndex> {
     Ok(build_index_from_sources(
         root_path.to_string_lossy().to_string(),
         sources,
+        |_, _| {},
     ))
 }
 
