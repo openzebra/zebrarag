@@ -45,7 +45,7 @@ pub fn run_tui(
             ..App::default()
         };
 
-        let (tx, mut rx) = mpsc::channel::<AppMessage>(32);
+        let (tx, mut rx) = mpsc::channel::<AppMessage>(4096);
 
         if model.is_some() {
             app.screen = Screen::Main;
@@ -217,5 +217,121 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             }
         }
         other => app.apply_message(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn index_progress_preserves_files_and_chunks_across_phases() {
+        let mut app = App::default();
+        let (tx, _rx) = mpsc::channel(4096);
+
+        let total_code = 318u64;
+        let total_chunks = 6668u64;
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Dsl,
+                current: total_code,
+                total: total_code,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (f, c) = modal_files_chunks(&app);
+        assert_eq!(f, total_code, "Dsl should set files");
+        assert_eq!(c, 0, "Dsl should not change chunks");
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Gather,
+                current: total_code,
+                total: total_code,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (f, c) = modal_files_chunks(&app);
+        assert_eq!(f, total_code, "Gather should preserve files");
+        assert_eq!(c, 0, "Gather should not set chunks");
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Start,
+                current: 0,
+                total: total_chunks,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (f, c) = modal_files_chunks(&app);
+        assert_eq!(f, total_code, "Start should preserve files");
+        assert_eq!(c, 0, "Start should not set chunks");
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Tokenize,
+                current: 0,
+                total: total_chunks,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (f, c) = modal_files_chunks(&app);
+        assert_eq!(f, total_code, "Tokenize should preserve files");
+        assert_eq!(c, total_chunks, "Tokenize should set chunks = total");
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Tokenize,
+                current: 1234,
+                total: total_chunks,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (_f, c) = modal_files_chunks(&app);
+        assert_eq!(c, total_chunks, "Tokenize progress should keep chunks");
+
+        dispatch(
+            &mut app,
+            AppMessage::IndexProgress {
+                phase: zti_protocol::response::IndexPhase::Embed,
+                current: 4827,
+                total: total_chunks,
+                message: String::new(),
+                is_reindex: false,
+            },
+            &tx,
+        )
+        .await;
+        let (f, c) = modal_files_chunks(&app);
+        assert_eq!(f, total_code, "Embed should preserve files");
+        assert_eq!(c, total_chunks, "Embed should preserve chunks");
+    }
+
+    fn modal_files_chunks(app: &App) -> (u64, u64) {
+        match &app.modal {
+            Some(Modal::Indexing { files, chunks, .. }) => (*files, *chunks),
+            _ => (0, 0),
+        }
     }
 }

@@ -468,13 +468,15 @@ pub async fn do_index(
                 }),
                 |frame| {
                     if let Response::IndexProgress(p) = frame {
-                        let _ = tx_p.try_send(app::AppMessage::IndexProgress {
+                        if tx_p.try_send(app::AppMessage::IndexProgress {
                             phase: p.phase,
                             current: p.current,
                             total: p.total,
                             message: p.message,
                             is_reindex: matches!(mode, IndexMode::Reindex | IndexMode::ForceReindex),
-                        });
+                        }).is_err() {
+                            tracing::warn!("dropped index progress frame");
+                        }
                     }
                 },
             )
