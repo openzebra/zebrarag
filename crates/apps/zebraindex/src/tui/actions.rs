@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use super::app::{self, DEFAULT_DIM};
 use super::config;
 use super::event;
-use super::tasks::{build_change_method_modal, spawn_daemon_monitor, ClientCtx, do_index, do_remove_project, do_search, download_model, fetch_registry};
+use super::tasks::{build_change_method_modal, cancel_index, spawn_daemon_monitor, ClientCtx, do_index, do_remove_project, do_search, download_model, fetch_registry};
 
 pub async fn handle_action(
     app: &mut app::App,
@@ -366,7 +366,8 @@ pub async fn handle_action(
                             .as_deref()
                             .and_then(zti_ann::SearchMethod::parse);
                         app.modal = Some(app::Modal::Indexing {
-                            phase: String::with_capacity(16),
+                            project_root: root.clone(),
+                            phase: zti_protocol::response::IndexPhase::Start,
                             current: 0,
                             total: 0,
                             message: String::with_capacity(64),
@@ -417,7 +418,8 @@ pub async fn handle_action(
                 if let Some(root) = &project_root {
                     let root_s = root.to_string();
                     app.modal = Some(app::Modal::Indexing {
-                        phase: String::with_capacity(16),
+                        project_root: root_s.clone(),
+                        phase: zti_protocol::response::IndexPhase::Start,
                         current: 0,
                         total: 0,
                         message: String::with_capacity(64),
@@ -494,6 +496,18 @@ pub async fn handle_action(
                         *error = Some(String::from("Cannot resolve path"));
                     }
                 }
+            }
+        }
+        event::Action::CancelIndex => {
+            let root = match &app.modal {
+                Some(app::Modal::Indexing { project_root, .. }) => Some(project_root.clone()),
+                _ => None,
+            };
+            if let Some(project_root) = root {
+                let ctx = ClientCtx::from_app(app);
+                tokio::spawn(async move {
+                    cancel_index(project_root, ctx).await;
+                });
             }
         }
         event::Action::None => {}

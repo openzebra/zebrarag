@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
-use zti_protocol::request::Request;
+use zti_protocol::request::{CancelIndexReq, Request};
 use zti_protocol::response::Response;
 
 use super::app::{self, DEFAULT_DIM};
@@ -486,7 +486,34 @@ pub async fn do_index(
             let _ = tx.send(app::AppMessage::IndexComplete).await;
         }
         Err(e) => {
-            let _ = tx.send(app::AppMessage::IndexError(e.to_string())).await;
+            let msg = e.to_string();
+            if msg == "indexing cancelled" {
+                let _ = tx.send(app::AppMessage::IndexCancelled).await;
+            } else {
+                let _ = tx.send(app::AppMessage::IndexError(msg)).await;
+            }
         }
     }
+}
+
+pub async fn cancel_index(project_root: String, ctx: ClientCtx) {
+    let (m, qp, pp, md) = ctx.deref_opts();
+    let mut client = match zti_ipc_client::Client::connect(
+        Duration::from_secs(10),
+        m,
+        qp,
+        pp,
+        md,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if client.handshake().await.is_err() {
+        return;
+    }
+    let _ = client
+        .request(Request::CancelIndex(CancelIndexReq { project_root }))
+        .await;
 }

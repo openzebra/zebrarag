@@ -96,6 +96,7 @@ async fn handle_request(req: Request, state: &DaemonState) -> Response {
     match req {
         Request::Handshake(h) => crate::handlers::handshake::handle(&h),
         Request::Index(_) => unreachable!("Index is handled in streaming path"),
+        Request::CancelIndex(ci) => crate::handlers::cancel_index::handle(&ci, state).await,
         Request::Search(s) => crate::handlers::search::handle(&s, state).await,
         Request::ProjectStatus(ps) => crate::handlers::status::handle(&ps, state).await,
         Request::DaemonStatus => crate::handlers::daemon_status::handle(state).await,

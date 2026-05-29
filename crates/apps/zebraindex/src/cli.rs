@@ -100,7 +100,14 @@ pub async fn run(
     match cmd {
         CliCommand::Index { root, refresh } => {
             let mut client = open().await?;
-            let project_root = resolve_root(&root).await?;
+            let project_root = match resolve_root(&root).await {
+                Ok(p) => p,
+                Err(_) => root
+                    .canonicalize()
+                    .map_err(|_| anyhow::anyhow!("Project directory not found: {}", root.display()))?
+                    .to_string_lossy()
+                    .to_string(),
+            };
             let bar = RefCell::new(None::<ProgressBar>);
 
             let resp = client
@@ -113,8 +120,8 @@ pub async fn run(
                     |frame| {
                         if let Response::IndexProgress(p) = frame {
                             let mut slot = bar.borrow_mut();
-                            match p.phase.as_str() {
-                                "start" => {
+                            match p.phase {
+                                zti_protocol::response::IndexPhase::Start => {
                                     if let Some(old) = slot.take() {
                                         old.finish_and_clear();
                                     }
@@ -127,17 +134,23 @@ pub async fn run(
                                     );
                                     *slot = Some(b);
                                 }
-                                "embed" => {
+                                zti_protocol::response::IndexPhase::Gather
+                                | zti_protocol::response::IndexPhase::Tokenize => {
+                                    if let Some(b) = slot.as_ref() {
+                                        b.set_position(p.current);
+                                        b.set_message(p.message);
+                                    }
+                                }
+                                zti_protocol::response::IndexPhase::Embed => {
                                     if let Some(b) = slot.as_ref() {
                                         b.set_position(p.current);
                                     }
                                 }
-                                "finish" => {
+                                zti_protocol::response::IndexPhase::Finish => {
                                     if let Some(b) = slot.take() {
                                         b.finish_with_message(p.message);
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     },

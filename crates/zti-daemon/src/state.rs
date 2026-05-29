@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +16,7 @@ pub struct LoadedProject {
     pub db: Db,
     pub dsl_index: RwLock<Option<Arc<ProjectIndex>>>,
     pub indexing_lock: Mutex<()>,
+    pub cancel: AtomicBool,
 }
 
 pub struct DaemonState {
@@ -119,6 +121,7 @@ impl DaemonState {
             db,
             dsl_index: RwLock::new(None),
             indexing_lock: Mutex::new(()),
+            cancel: AtomicBool::new(false),
         });
 
         {

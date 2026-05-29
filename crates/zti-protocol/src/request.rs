@@ -44,6 +44,11 @@ pub struct IndexReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelIndexReq {
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchReq {
     pub project_root: String,
     pub query: String,
@@ -112,6 +117,7 @@ pub struct SymbolBodiesReq {
 pub enum Request {
     Handshake(HandshakeReq),
     Index(IndexReq),
+    CancelIndex(CancelIndexReq),
     Search(SearchReq),
     ProjectStatus(ProjectStatusReq),
     DaemonStatus,

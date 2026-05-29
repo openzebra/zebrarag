@@ -5,6 +5,7 @@ use zti_protocol::response::ErrorBody;
 
 use crate::state::{DaemonState, LoadedProject};
 
+pub mod cancel_index;
 pub mod daemon_status;
 pub mod doctor;
 pub mod dsl_dep_tree;

@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -29,6 +31,7 @@ where
     };
 
     let _lock = project.indexing_lock.lock().await;
+    project.cancel.store(false, Ordering::Relaxed);
 
     let root = std::path::Path::new(&req.project_root).to_path_buf();
     let engine = state.primary_engine();
@@ -41,8 +44,9 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel();
     let reporter = IpcReporter::new(tx);
 
+    let project = project.clone();
     let mut indexing = Box::pin(async move {
-        zti_pipeline::indexer::index_project(&root, &engine, &db, &reporter, override_method).await
+        zti_pipeline::indexer::index_project(&root, &engine, &db, &reporter, override_method, &project.cancel).await
     });
 
     let final_result = loop {

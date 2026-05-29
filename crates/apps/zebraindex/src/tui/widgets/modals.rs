@@ -218,8 +218,8 @@ fn draw_modal_indexing(
             total,
             message,
             is_reindex,
-            started_at,
-        } => (phase.as_str(), *current, *total, message.as_str(), *is_reindex, *started_at),
+            started_at, ..
+        } => (phase, *current, *total, message.as_str(), *is_reindex, *started_at),
         _ => return,
     };
 
@@ -305,7 +305,7 @@ fn draw_modal_indexing(
         Line::from(""),
         Line::from(vec![
             Span::styled("  Phase:   ", Style::default().fg(Color::DarkGray)),
-            Span::raw(phase),
+            Span::raw(format!("{phase}")),
         ]),
         Line::from(vec![
             Span::styled("  Message: ", Style::default().fg(Color::DarkGray)),
@@ -333,6 +333,11 @@ fn draw_modal_indexing(
             Span::styled("DType: ", Style::default().fg(Color::DarkGray)),
             Span::raw(dtype),
         ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Esc/c: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
     ];
 

@@ -100,7 +100,8 @@ pub enum Modal {
         message: String,
     },
     Indexing {
-        phase: String,
+        project_root: String,
+        phase: zti_protocol::response::IndexPhase,
         current: u64,
         total: u64,
         message: String,
@@ -146,8 +147,9 @@ pub enum AppMessage {
     ProjectRemoved,
     ProjectRemoveError(String),
     IndexComplete,
+    IndexCancelled,
     IndexProgress {
-        phase: String,
+        phase: zti_protocol::response::IndexPhase,
         current: u64,
         total: u64,
         message: String,

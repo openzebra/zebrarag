@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 pub trait ProgressReporter: Send + Sync {
     fn start(&self, total: u64);
+    fn set_phase(&self, phase: zti_protocol::response::IndexPhase, current: u64, total: u64, message: &str);
     fn inc(&self, n: u64);
     fn finish_with_message(&self, msg: &str);
 }
@@ -40,6 +41,13 @@ impl ProgressReporter for IndicatifReporter {
         *guard = Some(bar);
     }
 
+    fn set_phase(&self, _phase: zti_protocol::response::IndexPhase, _current: u64, _total: u64, message: &str) {
+        let guard = self.bar.lock().unwrap();
+        if let Some(bar) = guard.as_ref() {
+            bar.set_message(message.to_string());
+        }
+    }
+
     fn inc(&self, n: u64) {
         let guard = self.bar.lock().unwrap();
         if let Some(bar) = guard.as_ref() {
@@ -59,6 +67,7 @@ pub struct SilentReporter;
 
 impl ProgressReporter for SilentReporter {
     fn start(&self, _total: u64) {}
+    fn set_phase(&self, _phase: zti_protocol::response::IndexPhase, _current: u64, _total: u64, _message: &str) {}
     fn inc(&self, _n: u64) {}
     fn finish_with_message(&self, _msg: &str) {}
 }
@@ -89,10 +98,19 @@ impl ProgressReporter for IpcReporter {
             .store(total, std::sync::atomic::Ordering::Relaxed);
         self.current.store(0, std::sync::atomic::Ordering::Relaxed);
         let _ = self.tx.send(zti_protocol::response::IndexingProgress {
-            phase: "start".to_string(),
+            phase: zti_protocol::response::IndexPhase::Start,
             current: 0,
             total,
             message: String::new(),
+        });
+    }
+
+    fn set_phase(&self, phase: zti_protocol::response::IndexPhase, current: u64, total: u64, message: &str) {
+        let _ = self.tx.send(zti_protocol::response::IndexingProgress {
+            phase,
+            current,
+            total,
+            message: message.to_string(),
         });
     }
 
@@ -103,7 +121,7 @@ impl ProgressReporter for IpcReporter {
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
             + n;
         let _ = self.tx.send(zti_protocol::response::IndexingProgress {
-            phase: "embed".to_string(),
+            phase: zti_protocol::response::IndexPhase::Embed,
             current,
             total,
             message: String::new(),
@@ -114,7 +132,7 @@ impl ProgressReporter for IpcReporter {
         let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
         let current = self.current.load(std::sync::atomic::Ordering::Relaxed);
         let _ = self.tx.send(zti_protocol::response::IndexingProgress {
-            phase: "finish".to_string(),
+            phase: zti_protocol::response::IndexPhase::Finish,
             current,
             total,
             message: msg.to_string(),

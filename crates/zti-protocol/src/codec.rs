@@ -90,7 +90,7 @@ mod tests {
     #[tokio::test]
     async fn index_progress_response_roundtrip() {
         let resp = Response::IndexProgress(IndexingProgress {
-            phase: "embed".to_string(),
+            phase: crate::response::IndexPhase::Embed,
             current: 42,
             total: 200,
             message: "batch 3".to_string(),

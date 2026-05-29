@@ -173,11 +173,12 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             message,
             is_reindex,
         } => {
-            let started_at = match &app.modal {
-                Some(Modal::Indexing { started_at, .. }) => *started_at,
-                _ => std::time::Instant::now(),
+            let (started_at, project_root) = match &app.modal {
+                Some(Modal::Indexing { started_at, project_root, .. }) => (*started_at, project_root.clone()),
+                _ => (std::time::Instant::now(), String::new()),
             };
             app.modal = Some(Modal::Indexing {
+                project_root,
                 phase,
                 current,
                 total,
@@ -185,6 +186,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                 is_reindex,
                 started_at,
             });
+        }
+        AppMessage::IndexCancelled => {
+            app.modal = None;
         }
         AppMessage::IndexError(e) => {
             app.modal = Some(Modal::Error { message: e });

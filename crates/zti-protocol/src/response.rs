@@ -17,9 +17,30 @@ pub struct IndexStats {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IndexPhase {
+    Start,
+    Gather,
+    Tokenize,
+    Embed,
+    Finish,
+}
+
+impl std::fmt::Display for IndexPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Start => "start",
+            Self::Gather => "gather",
+            Self::Tokenize => "tokenize",
+            Self::Embed => "embed",
+            Self::Finish => "finish",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingProgress {
-    pub phase: String,
+    pub phase: IndexPhase,
     pub current: u64,
     pub total: u64,
     pub message: String,
@@ -136,6 +157,7 @@ pub enum Response {
     Handshake(HandshakeResp),
     Index(Result<IndexStats, ErrorBody>),
     IndexProgress(IndexingProgress),
+    CancelIndex(Result<(), ErrorBody>),
     Search(Result<SearchResults, ErrorBody>),
     ProjectStatus(Result<ProjectStatus, ErrorBody>),
     DaemonStatus(DaemonStatusInfo),

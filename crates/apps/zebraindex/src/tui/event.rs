@@ -34,6 +34,7 @@ pub enum Action {
     ConfirmRemoveNo,
     SubmitPath,
     SetupAutoRecommend,
+    CancelIndex,
 }
 
 pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
@@ -129,7 +130,10 @@ fn map_modal_key(key: &event::KeyEvent, app: &App) -> Action {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => Action::DetailBack,
             _ => Action::None,
         },
-        Some(Modal::Indexing { .. }) => Action::None,
+        Some(Modal::Indexing { .. }) => match key.code {
+            KeyCode::Esc | KeyCode::Char('c') => Action::CancelIndex,
+            _ => Action::None,
+        },
         Some(Modal::AddProject { .. }) => match key.code {
             KeyCode::Enter => Action::SubmitPath,
             KeyCode::Esc => Action::DetailBack,

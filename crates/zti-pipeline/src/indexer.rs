@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -135,6 +136,7 @@ pub async fn index_project(
     db: &Db,
     reporter: &dyn ProgressReporter,
     override_method: Option<zti_ann::SearchMethod>,
+    cancel: &AtomicBool,
 ) -> Result<IndexStats> {
     let start = std::time::Instant::now();
     let pid = project_id(root);
@@ -196,6 +198,13 @@ pub async fn index_project(
     // time inside `zti_dsl::build_index`. Text-kind snapshots have no
     // tree-sitter frontend, so they're filtered out here and chunked
     // separately below.
+    let n_files = need_reindex.len();
+    reporter.set_phase(
+        zti_protocol::response::IndexPhase::Gather,
+        0,
+        n_files as u64,
+        "parsing code files",
+    );
     let dsl_sources = snapshots.iter().filter_map(|(rel, snap)| match snap.kind {
         SourceKind::Code(lang) => Some(SourceFile {
             full_path: root.join(rel).display().to_string(),
@@ -212,12 +221,27 @@ pub async fn index_project(
         dsl_index.files.len(),
     );
 
+    reporter.set_phase(
+        zti_protocol::response::IndexPhase::Gather,
+        dsl_index.files.len() as u64,
+        n_files as u64,
+        "generating chunks",
+    );
     let chunker = DslChunker::new(&dsl_index);
     let mut terminal_cache: HashMap<Language, Vec<u16>> = HashMap::with_capacity(4);
 
     let mut all_pending: Vec<(zti_dsl::chunking::Chunk, &'static str)> =
-        Vec::with_capacity(need_reindex.len());
-    for rel in &need_reindex {
+        Vec::with_capacity(n_files);
+    let report_interval = n_files.max(20) / 20;
+    for (i, rel) in need_reindex.iter().enumerate() {
+        if (i + 1) % report_interval == 0 || i + 1 == n_files {
+            reporter.set_phase(
+                zti_protocol::response::IndexPhase::Gather,
+                (i + 1) as u64,
+                n_files as u64,
+                "generating chunks",
+            );
+        }
         let snap = match snapshots.get(rel) {
             Some(s) => s,
             None => continue,
@@ -306,7 +330,14 @@ pub async fn index_project(
         out
     };
 
-    reporter.start(all_pending.len() as u64);
+    let total_chunks = all_pending.len();
+    reporter.start(total_chunks as u64);
+    reporter.set_phase(
+        zti_protocol::response::IndexPhase::Tokenize,
+        0,
+        total_chunks as u64,
+        "tokenizing chunks",
+    );
 
     let batch_size = engine.recommended_batch_size();
     let hw = engine.hardware();
@@ -322,6 +353,13 @@ pub async fn index_project(
     let reranker = TurboReranker::new(engine.dim())?;
     let mut chunks_table = db.chunks_table(engine.dim()).await?;
 
+    let total_chunks = all_pending.len();
+    reporter.set_phase(
+        zti_protocol::response::IndexPhase::Tokenize,
+        0,
+        total_chunks as u64,
+        "tokenizing chunks",
+    );
     // Tokenize all chunks once, then sort by token length so each batch's
     // dynamic padding in `prepare_from_encs` stays tight (no long chunk
     // forcing short batch-mates to pad up to its length).
@@ -366,6 +404,9 @@ pub async fn index_project(
 
     let mut cursor = 0usize;
     while cursor < order.len() {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("indexing cancelled");
+        }
         let mut end = cursor;
         let mut pad_len = 0usize;
         while end < order.len() {
