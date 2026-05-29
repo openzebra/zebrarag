@@ -723,8 +723,79 @@ async fn upsert_project(
 
 #[cfg(test)]
 mod tests_indexing {
+    use super::{MIN_CHUNK_FLOOR, floor_boundary, sizing_for};
     use zti_dsl::chunking::{Chunk, ChunkStrategy};
     use zti_ts_core::types::Kind;
+
+    #[test]
+    fn floor_boundary_returns_len_when_under_max() {
+        let s = "hello";
+        assert_eq!(floor_boundary(s, 100), s.len());
+        assert_eq!(floor_boundary(s, s.len()), s.len());
+    }
+
+    #[test]
+    fn floor_boundary_ascii_is_exact() {
+        // Every byte index in ASCII is a char boundary.
+        let s = "abcdefgh";
+        assert_eq!(floor_boundary(s, 3), 3);
+    }
+
+    #[test]
+    fn floor_boundary_never_splits_a_codepoint() {
+        // "é" is 2 bytes (0xC3 0xA9); "€" is 3 bytes. Build a string where a max
+        // cut would land mid-codepoint, and assert we always get a valid slice.
+        let s = "aé€b"; // bytes: a(1) é(2) €(3) b(1) = 7 bytes
+        for max in 0..s.len() {
+            let end = floor_boundary(s, max);
+            assert!(end <= max);
+            assert!(s.is_char_boundary(end), "end {end} not a boundary for max {max}");
+            // The slice must not panic and must be valid UTF-8 (guaranteed by &str).
+            let _ = &s[..end];
+        }
+    }
+
+    #[test]
+    fn sizing_for_none_when_body_fits() {
+        // body_len <= max_len * bpt → fits in one chunk.
+        assert!(sizing_for(2048, 512, 4).is_none()); // exactly at the limit
+        assert!(sizing_for(100, 512, 4).is_none()); // well under
+    }
+
+    #[test]
+    fn sizing_for_splits_and_uses_measured_bpt() {
+        // Sparse markdown: bpt high → larger byte-chunks than the old `* 4`.
+        let s = sizing_for(170_000_000, 512, 7).expect("huge sparse body must split");
+        assert_eq!(s.chunk_size, 512 * 7); // 3584, not the old 2048
+        assert_eq!(s.min_chunk_size, 256 * 7); // (max_len/2)*bpt = 1792
+        assert!(s.chunk_size > s.min_chunk_size, "chunker requires chunk_size > min");
+    }
+
+    #[test]
+    fn sizing_for_dense_code_smaller_chunks() {
+        // Dense code: bpt low → tighter byte-chunks that still fit max_len tokens.
+        let s = sizing_for(50_000, 512, 2).expect("body exceeds 1024 bytes → split");
+        assert_eq!(s.chunk_size, 1024);
+        assert_eq!(s.min_chunk_size, 512);
+    }
+
+    #[test]
+    fn sizing_for_enforces_floors() {
+        // Tiny max_len * bpt would drop below the floor; floors must clamp it
+        // while preserving chunk_size > min_chunk_size.
+        let s = sizing_for(10_000, 10, 1).expect("10_000 > 10 → split");
+        assert_eq!(s.chunk_size, MIN_CHUNK_FLOOR + 1); // 513
+        assert_eq!(s.min_chunk_size, MIN_CHUNK_FLOOR); // 512
+        assert!(s.chunk_size > s.min_chunk_size);
+    }
+
+    #[test]
+    fn sizing_for_saturates_without_panic() {
+        // chunk_size saturates to usize::MAX → nothing can exceed it → None, no overflow.
+        assert!(sizing_for(10, usize::MAX, 4).is_none());
+        assert!(sizing_for(usize::MAX, 512, usize::MAX).is_none());
+        assert!(sizing_for(usize::MAX - 1, usize::MAX, usize::MAX).is_none());
+    }
 
     #[test]
     fn test_generate_sub_chunks_metadata() {
