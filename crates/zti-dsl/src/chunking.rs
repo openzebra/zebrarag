@@ -1,7 +1,8 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use rustc_hash::FxHashMap;
 
 pub use zti_common::chunk_strategy::ChunkStrategy;
 use zti_common::line_byte_range;
@@ -26,8 +27,8 @@ pub fn write_preamble(index: &ProjectIndex, out: &mut String) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Chunk {
+#[derive(Debug, Clone)]
+pub struct Chunk<'a> {
     pub file: String,
     pub rel_file: String,
     pub start_line: u32,
@@ -36,41 +37,37 @@ pub struct Chunk {
     pub sub_chunk_idx: u32,
     pub total_sub_chunks: u32,
     pub chunk_strategy: ChunkStrategy,
-    pub body: String,
+    pub body: Cow<'a, str>,
     pub qualified: String,
     pub kind: Kind,
 }
 
 pub struct DslChunker<'a> {
     index: &'a ProjectIndex,
+    symbols_by_file: FxHashMap<u16, Vec<&'a zti_ts_core::types::Symbol>>,
 }
 
 impl<'a> DslChunker<'a> {
     pub fn new(index: &'a ProjectIndex) -> Self {
-        Self { index }
+        let mut symbols_by_file: FxHashMap<u16, Vec<&'a zti_ts_core::types::Symbol>> =
+            FxHashMap::with_capacity_and_hasher(index.files.len(), rustc_hash::FxBuildHasher);
+        for sym in &index.symbols {
+            symbols_by_file.entry(sym.file_idx).or_default().push(sym);
+        }
+        Self { index, symbols_by_file }
     }
 
-    pub fn chunks_for_file(&self, file_path: &str, source: &str) -> Vec<Chunk> {
+    pub fn chunks_for_file<'s>(&self, file_path: &str, source: &'s str) -> Vec<Chunk<'s>> {
         let file_idx = match self.locate_file(file_path) {
             Some(idx) => idx,
             None => return Vec::new(),
         };
-        // Symbols filtered by file + chunkable kind. Body extraction in
-        // `make_chunk` slices `source` via `line_byte_range` (one pass per
-        // symbol up to its end_line) — no `lines.collect()` per symbol.
-        let approx = self
-            .index
-            .symbols
-            .iter()
-            .filter(|s| s.file_idx == file_idx && is_chunkable_kind(s.kind))
-            .count();
+        let Some(symbols) = self.symbols_by_file.get(&file_idx) else {
+            return Vec::new();
+        };
+        let approx = symbols.iter().filter(|s| is_chunkable_kind(s.kind)).count();
         let mut out = Vec::with_capacity(approx);
-        for sym in self
-            .index
-            .symbols
-            .iter()
-            .filter(|s| s.file_idx == file_idx && is_chunkable_kind(s.kind))
-        {
+        for sym in symbols.iter().filter(|s| is_chunkable_kind(s.kind)) {
             if let Some(c) = self.make_chunk(sym, source) {
                 out.push(c);
             }
@@ -97,7 +94,7 @@ impl<'a> DslChunker<'a> {
         fallback.map(|i| i as u16)
     }
 
-    fn make_chunk(&self, sym: &zti_ts_core::types::Symbol, source: &str) -> Option<Chunk> {
+    fn make_chunk<'s>(&self, sym: &zti_ts_core::types::Symbol, source: &'s str) -> Option<Chunk<'s>> {
         if sym.line == 0 || sym.end_line < sym.line {
             return None;
         }
@@ -111,15 +108,7 @@ impl<'a> DslChunker<'a> {
         if range.is_empty() {
             return None;
         }
-        let raw = &source[range];
-
-        let mut body = String::with_capacity(raw.len());
-        for (i, line) in raw.split('\n').enumerate() {
-            if i > 0 {
-                body.push('\n');
-            }
-            body.push_str(line);
-        }
+        let body = Cow::Borrowed(&source[range]);
 
         let file = self.index.files.get(sym.file_idx as usize)?;
         let rel_file = file
@@ -180,7 +169,7 @@ fn looks_like_doc_or_attr(t: &str) -> bool {
 
 /// One whole-file chunk for files we don't parse with tree-sitter (READMEs,
 /// docs, plain text). Takes ownership of `content` — no clone.
-pub fn chunk_text_file(rel_path: String, full_path: String, content: String) -> Chunk {
+pub fn chunk_text_file(rel_path: String, full_path: String, content: String) -> Chunk<'static> {
     let newlines = content.bytes().filter(|&b| b == b'\n').count() as u32;
     let end_line = if content.is_empty() { 1 } else { newlines + 1 };
     Chunk {
@@ -192,8 +181,7 @@ pub fn chunk_text_file(rel_path: String, full_path: String, content: String) -> 
         sub_chunk_idx: 0,
         total_sub_chunks: 1,
         chunk_strategy: ChunkStrategy::Symbol,
-        // parent chunk before recursive split; sub-chunks override to Recursive
-        body: content,
+        body: Cow::Owned(content),
         qualified: String::new(),
         kind: Kind::Document,
     }

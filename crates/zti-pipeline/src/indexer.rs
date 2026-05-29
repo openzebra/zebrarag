@@ -1,5 +1,7 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
+
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -9,11 +11,12 @@ use arrow::array::{
     BinaryBuilder, FixedSizeBinaryBuilder, ListBuilder, RecordBatch, StringArray,
     StringBuilder, UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
 };
+use rayon::prelude::*;
 use tracing::info;
 
 use zti_common::ids::project_id;
-use zti_dsl::chunking::{Chunk, ChunkStrategy};
-use zti_dsl::{DslChunker, EdgeKind, SourceFile, Target, build_index_from_sources};
+use zti_dsl::chunking::ChunkStrategy;
+use zti_dsl::{Chunk, DslChunker, EdgeKind, SourceFile, Target, build_index_from_sources};
 use zti_embed::EmbedEngine;
 use zti_recursive_chunk;
 use zti_rerank::TurboReranker;
@@ -85,12 +88,12 @@ fn adaptive_split(body: &str, engine: &EmbedEngine) -> Option<AdaptiveChunkSizin
 }
 
 #[inline]
-fn generate_sub_chunks(
-    chunk: &Chunk,
+fn generate_sub_chunks<'a>(
+    chunk: &Chunk<'a>,
     sizing: &AdaptiveChunkSizing,
     lang: Option<&tree_sitter::Language>,
     kind_label: &'static str,
-    out: &mut Vec<(Chunk, &'static str)>,
+    out: &mut Vec<(Chunk<'a>, &'static str)>,
     terminal_kinds: &[u16],
 ) {
     let sub_chunks = zti_recursive_chunk::split_text(
@@ -114,7 +117,7 @@ fn generate_sub_chunks(
             sub_chunk_idx: i as u32,
             total_sub_chunks: total,
             chunk_strategy: ChunkStrategy::Recursive,
-            body: chunk.body[sub.byte_start..sub.byte_end].to_string(),
+            body: Cow::Owned(chunk.body[sub.byte_start..sub.byte_end].to_string()),
             qualified: chunk.qualified.clone(),
             kind: chunk.kind,
         };
@@ -249,63 +252,78 @@ pub async fn index_project(
         "generating chunks",
     );
     let chunker = DslChunker::new(&dsl_index);
-    let mut terminal_cache: HashMap<Language, Vec<u16>> = HashMap::with_capacity(4);
 
-    let mut all_pending: Vec<(zti_dsl::chunking::Chunk, &'static str)> =
-        Vec::with_capacity(n_files);
-    let report_interval = n_files.max(20) / 20;
-    for (i, rel) in need_reindex.iter().enumerate() {
-        if (i + 1) % report_interval == 0 || i + 1 == n_files {
-            reporter.set_phase(
-                zti_protocol::response::IndexPhase::Gather,
-                (i + 1) as u64,
-                n_files as u64,
-                "generating chunks",
-            );
+    // Pre-compute terminal node kinds for every language in the project
+    // (read-only access from parallel threads below).
+    let mut terminal_cache: FxHashMap<Language, Vec<u16>> =
+        FxHashMap::with_capacity_and_hasher(4, rustc_hash::FxBuildHasher);
+    for lang in dsl_index.files.iter().map(|f| f.language) {
+        if terminal_cache.contains_key(&lang) {
+            continue;
         }
-        let snap = match snapshots.get(rel) {
-            Some(s) => s,
-            None => continue,
-        };
-        match snap.kind {
-            SourceKind::Code(lang) => {
-                let full_path = root.join(rel);
-                let label = full_path.display().to_string();
-                let chunks = chunker.chunks_for_file(&label, &snap.contents);
-                let frontend = frontend_for(lang);
-                let ts_lang = frontend.language();
-                let terminal_ids = terminal_cache.entry(lang).or_insert_with(|| {
-                    let names = frontend.config().terminal_node_kinds;
-                    let mut ids = Vec::with_capacity(names.len());
-                    for name in names {
-                        let id = ts_lang.id_for_node_kind(name, true);
-                        if id != 0 {
-                            ids.push(id);
+        let frontend = frontend_for(lang);
+        let ts_lang = frontend.language();
+        let names = frontend.config().terminal_node_kinds;
+        let mut ids = Vec::with_capacity(names.len());
+        for name in names {
+            let id = ts_lang.id_for_node_kind(name, true);
+            if id != 0 {
+                ids.push(id);
+            }
+        }
+        terminal_cache.insert(lang, ids);
+    }
+
+    let all_pending: Vec<(Chunk<'_>, &'static str)> = need_reindex
+        .par_iter()
+        .flat_map(|rel| {
+            let snap = match snapshots.get(rel) {
+                Some(s) => s,
+                None => return Vec::new(),
+            };
+            match snap.kind {
+                SourceKind::Code(lang) => {
+                    let full_path = root.join(rel);
+                    let label = full_path.display().to_string();
+                    let chunks = chunker.chunks_for_file(&label, &snap.contents);
+                    let frontend = frontend_for(lang);
+                    let ts_lang = frontend.language();
+                    let terminal_ids = terminal_cache
+                        .get(&lang)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    let mut out = Vec::with_capacity(chunks.len());
+                    for c in chunks {
+                        match adaptive_split(&c.body, engine) {
+                            Some(sizing) => generate_sub_chunks(
+                                &c, &sizing, Some(&ts_lang), lang.as_str(), &mut out, terminal_ids,
+                            ),
+                            None => out.push((c, lang.as_str())),
                         }
                     }
-                    ids
-                });
-                for c in chunks {
-                    match adaptive_split(&c.body, engine) {
-                        Some(sizing) => generate_sub_chunks(&c, &sizing, Some(&ts_lang), lang.as_str(), &mut all_pending, terminal_ids),
-                        None => all_pending.push((c, lang.as_str())),
+                    out
+                }
+                SourceKind::Text => {
+                    let full_path = root.join(rel).display().to_string();
+                    let chunk = zti_dsl::chunking::chunk_text_file(
+                        rel.clone(),
+                        full_path,
+                        snap.contents.clone(),
+                    );
+                    match adaptive_split(&chunk.body, engine) {
+                        Some(sizing) => {
+                            let mut out = Vec::with_capacity(4);
+                            generate_sub_chunks(
+                                &chunk, &sizing, None, "text", &mut out, &[],
+                            );
+                            out
+                        }
+                        None => vec![(chunk, "text")],
                     }
                 }
             }
-            SourceKind::Text => {
-                let full_path = root.join(rel).display().to_string();
-                let chunk = zti_dsl::chunking::chunk_text_file(
-                    rel.clone(),
-                    full_path,
-                    snap.contents.clone(),
-                );
-                match adaptive_split(&chunk.body, engine) {
-                    Some(sizing) => generate_sub_chunks(&chunk, &sizing, None, "text", &mut all_pending, &[]),
-                    None => all_pending.push((chunk, "text")),
-                }
-            }
-        }
-    }
+        })
+        .collect();
 
     info!(
         "collected {} chunks from {} files",
@@ -779,6 +797,7 @@ async fn upsert_project(
 
 #[cfg(test)]
 mod tests_indexing {
+    use std::borrow::Cow;
     use super::{MIN_CHUNK_FLOOR, floor_boundary, sizing_for};
     use zti_dsl::chunking::{Chunk, ChunkStrategy};
     use zti_ts_core::types::Kind;
@@ -864,7 +883,7 @@ mod tests_indexing {
             sub_chunk_idx: 0,
             total_sub_chunks: 1,
             chunk_strategy: ChunkStrategy::Symbol,
-            body: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7".into(),
+            body: Cow::Borrowed("line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7"),
             qualified: "foo::bar".into(),
             kind: Kind::Function,
         };
@@ -896,7 +915,7 @@ mod tests_indexing {
                 sub_chunk_idx: i as u32,
                 total_sub_chunks: total,
                 chunk_strategy: ChunkStrategy::Recursive,
-                body: parent.body[sub.byte_start..sub.byte_end].to_string(),
+                body: Cow::Owned(parent.body[sub.byte_start..sub.byte_end].to_string()),
                 qualified: parent.qualified.clone(),
                 kind: parent.kind,
             };

@@ -5,7 +5,7 @@ pub mod model;
 pub mod render;
 
 pub use batch::resolve_symbol_bodies;
-pub use chunking::{Chunk, DslChunker};
+pub use chunking::{Chunk, DslChunker, ChunkStrategy};
 pub use index::{
     SourceFile, build_index, build_index_from_sources, files_by_language, filter_files,
     glob_match_files,
