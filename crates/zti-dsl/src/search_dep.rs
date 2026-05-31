@@ -90,7 +90,7 @@ pub fn render_symbol_overview(
         let callees = renderer.render_callees_clean(id, depth);
         let body = trim_tree_header(&callees);
         if !body.is_empty() {
-            let _ = writeln!(out, "  -- callees:");
+            let _ = writeln!(out, "-- callees:");
             let _ = writeln!(out, "{body}");
         }
     }
