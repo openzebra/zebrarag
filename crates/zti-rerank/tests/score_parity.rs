@@ -1,8 +1,8 @@
 use candle_core::Device;
 use zti_rerank::TurboReranker;
 use zti_rerank::gpu::{
-    GpuTurboCore, GpuTurboScratch, TurboCodeBatch, TurboScorerCache, parse_turbo_code_into,
-    score_batch,
+    BATCH_SIZE, GpuTurboCore, GpuTurboScratch, TurboCodeBatch, TurboScorerCache,
+    parse_turbo_code_into, score_batch,
 };
 
 const FIXTURE_DIM: usize = 128;
@@ -191,4 +191,67 @@ fn empty_batch_returns_empty_slice() -> anyhow::Result<()> {
     assert!(scores.is_empty());
 
     Ok(())
+}
+
+#[test]
+fn bound_to_core_shrinks_overallocated_buffers() {
+    // Simulate what happens when a scratch sized for a large-dim project
+    // is later used with a smaller-dim core: the Vec capacities are
+    // stuck at the larger size.  bound_to_core must shrink them back.
+    let reranker = fixture_reranker();
+    let core = GpuTurboCore::from_reranker(&reranker, &Device::Cpu).expect("build core");
+
+    let ceiling_pre_signs = BATCH_SIZE * core.num_projections();
+    let ceiling_angle = BATCH_SIZE * core.dim_over_2();
+    let ceiling_scores = BATCH_SIZE;
+
+    let mut scratch = GpuTurboScratch::with_capacity(core.num_projections(), core.dim_over_2());
+
+    // Artificially bloat: reserve enough to push capacity past 2× ceiling.
+    scratch.pre_signs_flat.reserve(ceiling_pre_signs * 2 + 1);
+    scratch.angle_i64.reserve(ceiling_angle * 2 + 1);
+    scratch.scores.reserve(ceiling_scores * 2 + 1);
+
+    assert!(scratch.pre_signs_flat.capacity() > ceiling_pre_signs * 2);
+    assert!(scratch.angle_i64.capacity() > ceiling_angle * 2);
+    assert!(scratch.scores.capacity() > ceiling_scores * 2);
+
+    // bound_to_core with 2× threshold triggers shrink on all three.
+    scratch.bound_to_core(&core);
+
+    assert!(
+        scratch.pre_signs_flat.capacity() <= ceiling_pre_signs,
+        "pre_signs_flat should shrink to ceiling {ceiling_pre_signs}, got {}",
+        scratch.pre_signs_flat.capacity(),
+    );
+    assert!(
+        scratch.angle_i64.capacity() <= ceiling_angle,
+        "angle_i64 should shrink to ceiling {ceiling_angle}, got {}",
+        scratch.angle_i64.capacity(),
+    );
+    assert!(
+        scratch.scores.capacity() <= ceiling_scores,
+        "scores should shrink to ceiling {ceiling_scores}, got {}",
+        scratch.scores.capacity(),
+    );
+}
+
+#[test]
+fn bound_to_core_leaves_normal_capacity_untouched() {
+    // When capacity is already at or near the ceiling, bound_to_core
+    // must NOT shrink (avoids pointless reallocation on every batch).
+    let reranker = fixture_reranker();
+    let core = GpuTurboCore::from_reranker(&reranker, &Device::Cpu).expect("build core");
+
+    let mut scratch = GpuTurboScratch::with_capacity(core.num_projections(), core.dim_over_2());
+
+    let cap_pre = scratch.pre_signs_flat.capacity();
+    let cap_angle = scratch.angle_i64.capacity();
+    let cap_scores = scratch.scores.capacity();
+
+    scratch.bound_to_core(&core);
+
+    assert_eq!(scratch.pre_signs_flat.capacity(), cap_pre);
+    assert_eq!(scratch.angle_i64.capacity(), cap_angle);
+    assert_eq!(scratch.scores.capacity(), cap_scores);
 }

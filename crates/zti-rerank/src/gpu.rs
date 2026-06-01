@@ -143,6 +143,30 @@ impl GpuTurboScratch {
             scores: Vec::with_capacity(BATCH_SIZE),
         }
     }
+
+    /// Shrink any overallocated buffers back to the ceiling implied by
+    /// `core`'s dimensions. Only triggers when capacity exceeds 2× the
+    /// ceiling — the common case (capacity already at ceiling) is a
+    /// handful of integer comparisons with no reallocation.
+    ///
+    /// This prevents high-water-mark memory bloat in the long-running
+    /// daemon: if an anomalous batch forces a `Vec` to grow, the extra
+    /// capacity is released on the next call rather than being held
+    /// indefinitely.
+    pub fn bound_to_core(&mut self, core: &GpuTurboCore) {
+        let ceiling = BATCH_SIZE * core.num_projections();
+        if self.pre_signs_flat.capacity() > ceiling * 2 {
+            self.pre_signs_flat.shrink_to(ceiling);
+        }
+        let ceiling = BATCH_SIZE * core.dim_over_2();
+        if self.angle_i64.capacity() > ceiling * 2 {
+            self.angle_i64.shrink_to(ceiling);
+        }
+        let ceiling = BATCH_SIZE;
+        if self.scores.capacity() > ceiling * 2 {
+            self.scores.shrink_to(ceiling);
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -314,6 +338,9 @@ pub fn score_batch<'s>(
             .zip(&combined_vec)
             .map(|(&id, &score)| (id, score)),
     );
+
+    // Release any high-water-mark overcapacity (long-running daemon guard).
+    scratch.bound_to_core(core);
 
     Ok(&scratch.scores)
 }
