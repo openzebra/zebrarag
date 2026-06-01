@@ -30,7 +30,8 @@ pub async fn ensure_dsl_index(
         }
     }
 
-    let idx = Arc::new(zti_dsl::build_index(root)?);
+    let (idx_inner, _text_files) = zti_dsl::build_index(root)?;
+    let idx = Arc::new(idx_inner);
     {
         let mut guard = project.dsl_index.write().await;
         if guard.is_none() {

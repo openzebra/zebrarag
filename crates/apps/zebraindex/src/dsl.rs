@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Subcommand;
 
+use zti_dsl::chunking::chunk_text_file;
 use zti_dsl::render::dsl::{DslRenderer, render_files_only};
 use zti_dsl::render::tree::AsciiTreeRenderer;
 use zti_dsl::DslChunker;
@@ -181,7 +182,7 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
         let dep_root = resolve_dep_path(root, lib_name).ok_or_else(|| {
             anyhow::anyhow!("dependency '{lib_name}' not found in cargo registry, npm, or pub cache")
         })?;
-        let index = zti_dsl::build_index(dep_root.to_string_lossy().as_ref())?;
+        let (index, _text_files) = zti_dsl::build_index(dep_root.to_string_lossy().as_ref())?;
         match zti_dsl::resolve_name(&index, name_lib) {
             zti_dsl::NameMatch::Found(id) => {
                 print!("{}", zti_dsl::render_symbol_overview(&index, id, depth, 6000))
@@ -199,12 +200,13 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
     let canonical = root.canonicalize()?;
     let root_cow = canonical.to_string_lossy();
 
-    let index = zti_dsl::build_index(&root_cow)?;
+    let (index, text_files) = zti_dsl::build_index(&root_cow)?;
     tracing::info!(
-        "{} symbols, {} edges, {} files",
+        "{} symbols, {} edges, {} files (code), {} text files",
         index.symbols.len(),
         index.edges.len(),
-        index.files.len()
+        index.files.len(),
+        text_files.len(),
     );
 
     match command {
@@ -290,6 +292,8 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
             }
         }
         DslCommands::ChunkTrace => {
+            const CHARS_PER_TOKEN: usize = 4;
+
             let chunker = DslChunker::new(&index);
 
             let mut terminal_cache: HashMap<zti_tree_sitter::Language, Vec<u16>> =
@@ -311,10 +315,13 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 terminal_cache.insert(lang, ids);
             }
 
+            let code_total = index.files.len();
+            let text_total = text_files.len();
             eprintln!(
-                "terminal_cache: {} languages, starting sequential trace for {} files",
+                "terminal_cache: {} languages, {} code files, {} text files",
                 terminal_cache.len(),
-                index.files.len(),
+                code_total,
+                text_total,
             );
 
             let sizing = zti_recursive_chunk::ChunkConfig {
@@ -323,9 +330,10 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 chunk_overlap: 200,
             };
 
-            let total = index.files.len();
+            let total = code_total + text_total;
             let mut total_chunks = 0usize;
             let mut total_sub = 0usize;
+            let mut total_est_tokens = 0usize;
             let trace_start = Instant::now();
 
             for (i, file) in index.files.iter().enumerate() {
@@ -347,20 +355,19 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 let chunks = chunker.chunks_for_file(&file.path, &contents);
                 let f_locate = f_start.elapsed();
 
+                let file_tokens = contents.len() / CHARS_PER_TOKEN;
+                total_est_tokens += file_tokens;
                 eprintln!(
-                    "DEBUG [{}/{}] {} ({}B, {}) -> {} chunks in {:?}{}",
+                    "DEBUG [{}/{}] {} ({}B, ~{} tok, {}) -> {} chunks in {:?}{}",
                     i + 1,
                     total,
                     file.path,
                     contents.len(),
+                    file_tokens,
                     file.language.as_str(),
                     chunks.len(),
                     f_locate,
-                    if f_locate.as_millis() > 500 {
-                        " WARN"
-                    } else {
-                        ""
-                    },
+                    if f_locate.as_millis() > 500 { " WARN" } else { "" },
                 );
 
                 let frontend = frontend_for(file.language);
@@ -390,11 +397,7 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                             chunk.body.len(),
                             sub.len(),
                             c_elapsed,
-                            if c_elapsed.as_millis() > 500 {
-                                " WARN"
-                            } else {
-                                ""
-                            },
+                            if c_elapsed.as_millis() > 500 { " WARN" } else { "" },
                         );
                     }
 
@@ -411,11 +414,75 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 let _ = std::io::stderr().flush();
             }
 
+            // Process text files — move ownership out with into_iter (no clone).
+            for (ti, (path, contents)) in text_files.into_iter().enumerate() {
+                let i = code_total + ti;
+                let bytes = contents.len();
+                let est_tokens = bytes / CHARS_PER_TOKEN;
+                total_est_tokens += est_tokens;
+                let f_start = Instant::now();
+
+                let rel = path
+                    .strip_prefix(root_cow.as_ref())
+                    .unwrap_or(&path)
+                    .trim_start_matches('/')
+                    .to_string();
+                let chunk = chunk_text_file(rel, path, contents);
+                let f_locate = f_start.elapsed();
+
+                eprintln!(
+                    "DEBUG [{}/{}] {} ({}B, ~{} tok, text) -> 1 chunk in {:?}{}",
+                    i + 1,
+                    total,
+                    chunk.file,
+                    bytes,
+                    est_tokens,
+                    f_locate,
+                    if f_locate.as_millis() > 500 { " WARN" } else { "" },
+                );
+
+                let c_start = Instant::now();
+                let sub = zti_recursive_chunk::split_text(
+                    &chunk.body,
+                    &sizing,
+                    None,
+                    &[],
+                );
+                let c_elapsed = c_start.elapsed();
+
+                if c_elapsed.as_millis() > 50 {
+                    eprintln!(
+                        "DEBUG   [1/1] sym=N/A kind=Document body={}B -> {} sub in {:?}{}",
+                        chunk.body.len(),
+                        sub.len(),
+                        c_elapsed,
+                        if c_elapsed.as_millis() > 500 { " WARN" } else { "" },
+                    );
+                }
+
+                total_sub += sub.len();
+                total_chunks += 1;
+
+                let f_total = f_start.elapsed();
+                if f_total.as_millis() > 1000 {
+                    eprintln!("DEBUG   WARN: file took {:?}", f_total);
+                }
+
+                let _ = std::io::stderr().flush();
+            }
+
             let elapsed = trace_start.elapsed();
             println!();
             println!("--- Chunk Trace Summary ---");
             println!(
-                "Files: {total}, Chunks: {total_chunks}, Sub-chunks: {total_sub}, Time: {:.2}s",
+                "Files: {total} (code={code_total}, text={text_total})",
+            );
+            println!(
+                "Chunks: {total_chunks}, Sub-chunks: {total_sub}",
+            );
+            println!(
+                "Bytes: ~{} MB, Est. tokens: ~{total_est_tokens}, Time: {:.2}s",
+                total_est_tokens * CHARS_PER_TOKEN / (1024 * 1024),
                 elapsed.as_secs_f64(),
             );
         }

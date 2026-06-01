@@ -170,11 +170,13 @@ where
 /// Standalone walker entry point — used by `zebra-dsl` and other callers that
 /// don't have pre-walked sources. The pipeline must not use this path
 /// (it would walk twice); use `build_index_from_sources` instead.
-pub fn build_index(root: &str) -> Result<ProjectIndex> {
+pub fn build_index(root: &str) -> Result<(ProjectIndex, Vec<(String, String)>)> {
     let root_path = Path::new(root).canonicalize()?;
+    let root_str = root_path.to_string_lossy().to_string();
 
     // (full_path, content, language)
     let mut loaded: Vec<(String, String, Language)> = Vec::with_capacity(64);
+    let mut text_files: Vec<(String, String)> = Vec::with_capacity(16);
 
     let walker = WalkBuilder::new(&root_path)
         .hidden(false)
@@ -201,7 +203,13 @@ pub fn build_index(root: &str) -> Result<ProjectIndex> {
         }
         let lang = match detect_from_path(path) {
             Some(l) => l,
-            None => continue,
+            None => {
+                let path_str = path.to_string_lossy().to_string();
+                if let Ok(c) = std::fs::read_to_string(path) {
+                    text_files.push((path_str, c));
+                }
+                continue;
+            }
         };
         // Per-file: skip if its language's extra_skip_dirs match any path component
         let skip_dirs = frontend_for(lang).config().extra_skip_dirs;
@@ -225,11 +233,8 @@ pub fn build_index(root: &str) -> Result<ProjectIndex> {
         language: *l,
     });
 
-    Ok(build_index_from_sources(
-        root_path.to_string_lossy().to_string(),
-        sources,
-        |_| {},
-    ))
+    let index = build_index_from_sources(root_str, sources, |_| {});
+    Ok((index, text_files))
 }
 
 /// Directory names that are source roots (not module names).
