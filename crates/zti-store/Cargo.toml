@@ -14,3 +14,6 @@ arrow-array.workspace = true
 zti-common.workspace = true
 zti-ann.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

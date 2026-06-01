@@ -161,7 +161,9 @@ pub async fn search(
     };
 
     let chunks_table = db.chunks_table(engine.dim()).await?;
-    chunks_table.optimize().await?;
+    // No `optimize()` here: compaction is a *write* (rewrites fragments +
+    // manifest) and belongs to the indexing path (`index_project` runs it once
+    // after embedding). The read path must stay read-only.
     let total_chunks = project.total_chunks as usize;
     let overfetch = if total_chunks > 100_000 {
         6

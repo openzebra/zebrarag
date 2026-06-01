@@ -463,6 +463,15 @@ pub async fn index_project(
     // and refilled with references each iteration).
     let mut batch_encs: Vec<&zti_embed::Tokenized> = Vec::with_capacity(max_items);
 
+    // Coalesce embed-batch RecordBatches and flush them with a single Lance
+    // `add` (one manifest commit) once ~CHUNK_FLUSH_ROWS rows accumulate,
+    // instead of a merge_insert per embed batch. The indexer deletes each
+    // (re)indexed file's prior chunks before this loop, so freshly-hashed
+    // chunk_ids can't collide with surviving rows — append is duplicate-free.
+    const CHUNK_FLUSH_ROWS: usize = 4096;
+    let mut pending_batches: Vec<RecordBatch> = Vec::new();
+    let mut pending_rows = 0usize;
+
     let mut cursor = 0usize;
     while cursor < order.len() {
         if cancel.load(Ordering::Relaxed) {
@@ -496,6 +505,22 @@ pub async fn index_project(
                     .as_nanos() as u64;
 
                 let n = idxs.len();
+
+                // Quantize the whole batch in parallel: TurboQuantizer::encode
+                // is the #1 app-CPU cost and was previously run serially on the
+                // async task while rayon cores sat idle. `&reranker` is Sync;
+                // results are index-aligned with `idxs`, preserving order.
+                let turbo_codes: Vec<Option<Vec<u8>>> = (0..n)
+                    .into_par_iter()
+                    .map(|i| match reranker.encode(embs.row(i)) {
+                        Ok(t) => Some(t),
+                        Err(e) => {
+                            tracing::debug!("turbo encode failed: {}", e);
+                            None
+                        }
+                    })
+                    .collect();
+
                 let mut chunk_id_builder = FixedSizeBinaryBuilder::new(16);
                 let mut file_path_builder = StringBuilder::with_capacity(n, n * 64);
                 let mut language_builder = StringBuilder::with_capacity(n, n * 8);
@@ -536,14 +561,6 @@ pub async fn index_project(
                     let mut chunk_id = [0u8; 16];
                     chunk_id.copy_from_slice(&hash.as_bytes()[..16]);
 
-                    let turbo = match reranker.encode(emb) {
-                        Ok(t) => Some(t),
-                        Err(e) => {
-                            tracing::debug!("turbo encode failed: {}", e);
-                            None
-                        }
-                    };
-
                     let parent_sym_id = if chunk.sym_id == u32::MAX {
                         None
                     } else {
@@ -582,7 +599,7 @@ pub async fn index_project(
                     start_line_builder.append_value(chunk.start_line);
                     end_line_builder.append_value(chunk.end_line);
                     content_builder.append_value(&chunk.body);
-                    match &turbo {
+                    match turbo_codes.get(i).and_then(Option::as_ref) {
                         Some(t) => turbo_code_builder.append_value(t),
                         None => turbo_code_builder.append_null(),
                     }
@@ -617,7 +634,14 @@ pub async fn index_project(
                         ],
                     )?;
 
-                    chunks_table.upsert(record).await?;
+                    pending_rows += record.num_rows();
+                    pending_batches.push(record);
+                    if pending_rows >= CHUNK_FLUSH_ROWS {
+                        chunks_table
+                            .append_batches(std::mem::take(&mut pending_batches))
+                            .await?;
+                        pending_rows = 0;
+                    }
                 }
             }
             Err(e) => {
@@ -632,6 +656,11 @@ pub async fn index_project(
         );
         reporter.inc(n_batch as u64);
         cursor = end;
+    }
+
+    // Flush the tail batches accumulated below the per-flush threshold.
+    if !pending_batches.is_empty() {
+        chunks_table.append_batches(pending_batches).await?;
     }
 
     if total_chunks > 0 && total_embedded == 0 {
@@ -715,42 +744,56 @@ async fn upsert_files(
     snapshots: &std::collections::HashMap<String, FileSnapshot>,
     changed_paths: &[String],
 ) -> Result<()> {
-    for path in changed_paths {
-        let snap = match snapshots.get(path) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let mut blake3_builder = FixedSizeBinaryBuilder::new(32);
-        blake3_builder.append_value(snap.blake3)?;
-
-        let record = RecordBatch::try_new(
-            std::sync::Arc::new(zti_store::schema::files_schema()),
-            vec![
-                std::sync::Arc::new(StringArray::from(vec![path.clone()])),
-                std::sync::Arc::new(blake3_builder.finish()),
-                std::sync::Arc::new(UInt64Array::from(vec![snap.mtime_ns as u64])),
-                std::sync::Arc::new(UInt64Array::from(vec![snap.size_bytes])),
-                std::sync::Arc::new(StringArray::from(vec![snap.kind.label()])),
-                std::sync::Arc::new(arrow::array::ListArray::new_null(
-                    std::sync::Arc::new(arrow::datatypes::Field::new(
-                        "item",
-                        arrow::datatypes::DataType::FixedSizeBinary(16),
-                        false,
-                    )),
-                    1,
-                )),
-                std::sync::Arc::new(UInt64Array::from(vec![
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos() as u64,
-                ])),
-            ],
-        )?;
-
-        files_table.upsert(record).await?;
+    // Build one RecordBatch covering every changed file and merge it in a
+    // single call, instead of one merge_insert (and one commit) per file.
+    let rows: Vec<(&String, &FileSnapshot)> = changed_paths
+        .iter()
+        .filter_map(|p| snapshots.get(p).map(|s| (p, s)))
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
     }
+
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    let n = rows.len();
+    let mut blake3_builder = FixedSizeBinaryBuilder::new(32);
+    let mut paths: Vec<&str> = Vec::with_capacity(n);
+    let mut mtimes: Vec<u64> = Vec::with_capacity(n);
+    let mut sizes: Vec<u64> = Vec::with_capacity(n);
+    let mut langs: Vec<&str> = Vec::with_capacity(n);
+    for (path, snap) in &rows {
+        blake3_builder.append_value(snap.blake3)?;
+        paths.push(path.as_str());
+        mtimes.push(snap.mtime_ns as u64);
+        sizes.push(snap.size_bytes);
+        langs.push(snap.kind.label());
+    }
+
+    let record = RecordBatch::try_new(
+        std::sync::Arc::new(zti_store::schema::files_schema()),
+        vec![
+            std::sync::Arc::new(StringArray::from(paths)),
+            std::sync::Arc::new(blake3_builder.finish()),
+            std::sync::Arc::new(UInt64Array::from(mtimes)),
+            std::sync::Arc::new(UInt64Array::from(sizes)),
+            std::sync::Arc::new(StringArray::from(langs)),
+            std::sync::Arc::new(arrow::array::ListArray::new_null(
+                std::sync::Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    arrow::datatypes::DataType::FixedSizeBinary(16),
+                    false,
+                )),
+                n,
+            )),
+            std::sync::Arc::new(UInt64Array::from(vec![now_ns; n])),
+        ],
+    )?;
+
+    files_table.upsert(record).await?;
     Ok(())
 }
 

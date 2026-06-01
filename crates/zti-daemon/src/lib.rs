@@ -74,7 +74,19 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
     };
     let engine = EmbedEngine::load_with(&config.model, Arc::clone(&hw), &opts)?;
 
-    let rt = tokio::runtime::Runtime::new()?;
+    // Build the runtime explicitly: a fixed, named worker pool (one per core)
+    // keeps the reactor from over-provisioning and makes thread profiles
+    // legible (`zti-rt-*` vs anonymous `tokio-runtime-worker`). The blocking
+    // pool is left at its default bound — Lance drives its own IO through
+    // `spawn_blocking`, so capping it risks starving storage operations.
+    let worker_threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name("zti-rt")
+        .enable_all()
+        .build()?;
     rt.block_on(async {
         let model_id: Arc<str> = Arc::from(config.model.as_ref());
         let model_dtype = config.model_dtype.map(String::from);

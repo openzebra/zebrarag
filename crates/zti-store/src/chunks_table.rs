@@ -109,6 +109,14 @@ impl ChunksTable {
         crate::upsert::upsert_batch(&self.table, "chunk_id", batch).await
     }
 
+    /// Append already-deduplicated chunk batches in one commit. Callers must
+    /// ensure the incoming `chunk_id`s are absent from the table (the indexer
+    /// deletes a file's old chunks before re-inserting). See
+    /// [`crate::upsert::append_batches`].
+    pub async fn append_batches(&self, batches: Vec<RecordBatch>) -> Result<()> {
+        crate::upsert::append_batches(&self.table, batches).await
+    }
+
     pub async fn build_index(&mut self, params: &zti_ann::SearchParams) -> Result<()> {
         if self.index_created {
             return Ok(());
