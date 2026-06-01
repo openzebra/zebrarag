@@ -247,12 +247,154 @@ fn is_non_module_basename(name: &str) -> bool {
     matches!(name, "lib" | "main" | "mod" | "index")
 }
 
+fn file_stem(path: &str) -> &str {
+    let file_name = match path.rsplit('/').next() {
+        Some(name) => name,
+        None => path,
+    };
+    [".rs", ".ts", ".tsx", ".dart", ".sol"]
+        .iter()
+        .find_map(|suffix| file_name.strip_suffix(suffix))
+        .unwrap_or(file_name)
+}
+
+fn push_unique_alias(aliases: &mut Vec<String>, alias: String) {
+    if !alias.is_empty() && aliases.iter().all(|existing| existing != &alias) {
+        aliases.push(alias);
+    }
+}
+
+fn normalize_rust_path_segment(segment: &str) -> std::borrow::Cow<'_, str> {
+    if segment.contains('-') {
+        std::borrow::Cow::Owned(segment.replace('-', "_"))
+    } else {
+        std::borrow::Cow::Borrowed(segment)
+    }
+}
+
+fn is_rust_non_module_basename(name: &str) -> bool {
+    matches!(name, "lib" | "main" | "mod")
+}
+
+fn root_crate_name(root: &str) -> Option<std::borrow::Cow<'_, str>> {
+    Path::new(root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_rust_path_segment)
+}
+
+fn push_rust_crate_alias(
+    aliases: &mut Vec<String>,
+    rel: &str,
+    root: &str,
+    short_path: &str,
+    qualified: &str,
+) {
+    let comp_count = rel.split('/').count();
+    let mut comps = Vec::with_capacity(comp_count);
+    rel.split('/')
+        .filter(|comp| !comp.is_empty())
+        .for_each(|comp| comps.push(comp));
+    let (crate_name, module_comps) = match comps.as_slice() {
+        ["crates", "apps", crate_name, "src", rest @ ..] => (*crate_name, rest),
+        ["crates", crate_name, "src", rest @ ..] => (*crate_name, rest),
+        ["src", rest @ ..] => match root_crate_name(root) {
+            Some(name) => {
+                let mut segments = Vec::with_capacity(rest.len().saturating_add(2));
+                segments.push(name.into_owned());
+                push_rust_module_segments(&mut segments, rest, short_path);
+                segments.push(qualified.to_string());
+                push_unique_alias(aliases, segments.join("::"));
+                return;
+            }
+            None => return,
+        },
+        _ => return,
+    };
+
+    let mut segments = Vec::with_capacity(comp_count.saturating_add(1));
+    segments.push(normalize_rust_path_segment(crate_name).into_owned());
+    push_rust_module_segments(&mut segments, module_comps, short_path);
+    segments.push(qualified.to_string());
+    push_unique_alias(aliases, segments.join("::"));
+}
+
+fn push_rust_module_segments(segments: &mut Vec<String>, module_comps: &[&str], short_path: &str) {
+    module_comps
+        .iter()
+        .filter_map(|comp| {
+            let stem = file_stem(comp);
+            (!stem.is_empty() && !is_rust_non_module_basename(stem))
+                .then(|| normalize_rust_path_segment(stem).into_owned())
+        })
+        .for_each(|segment| segments.push(segment));
+
+    if module_comps.is_empty() && !is_rust_non_module_basename(short_path) {
+        segments.push(normalize_rust_path_segment(short_path).into_owned());
+    }
+}
+
+fn symbol_lookup_aliases(
+    sym: &zti_ts_core::types::Symbol,
+    file: &FileEntry,
+    root: &str,
+) -> Vec<String> {
+    let file_path = file.path.as_str();
+    let short_path = file_stem(file_path);
+    let mut aliases = Vec::with_capacity(4);
+
+    // file-basename qualified: keychain::KeyChainErrors
+    if short_path != sym.name {
+        push_unique_alias(&mut aliases, format!("{}::{}", short_path, sym.name));
+    }
+
+    // directory-prefixed qualified: errors::keychain::KeyChainErrors
+    // Strip the project root prefix (and trailing slash) to get a relative path.
+    let rel = file_path
+        .strip_prefix(root)
+        .unwrap_or(file_path)
+        .trim_start_matches('/');
+    if let Some(slash) = rel.rfind('/') {
+        let dir_part = &rel[..slash];
+        let dir_comp_count = dir_part.split('/').count();
+        let mut dir_comps = Vec::with_capacity(dir_comp_count);
+        dir_part
+            .split('/')
+            .filter(|c| !c.is_empty() && !is_src_root_dir(c))
+            .for_each(|c| dir_comps.push(c));
+        if !dir_comps.is_empty() {
+            let dir_prefix = dir_comps.join("::");
+            // Always emit the form without the file basename — covers
+            // Solidity contracts (where the contract scope is already in
+            // sym.qualified) and crate-root files (lib.rs/main.rs).
+            push_unique_alias(&mut aliases, format!("{}::{}", dir_prefix, sym.qualified));
+
+            // Also emit the form with the file basename as a module
+            // segment, unless the basename is a non-module root
+            // (lib/main/mod/index).  This covers Rust files where the
+            // file module is not part of sym.qualified.
+            if !is_non_module_basename(short_path) {
+                push_unique_alias(
+                    &mut aliases,
+                    format!("{}::{}::{}", dir_prefix, short_path, sym.qualified),
+                );
+            }
+        }
+    }
+
+    if file.language == Language::Rust {
+        push_rust_crate_alias(&mut aliases, rel, root, short_path, sym.qualified.as_str());
+    }
+
+    aliases
+}
+
 fn build_qualified_map(
     symbols: &[zti_ts_core::types::Symbol],
     files: &[FileEntry],
     root: &str,
 ) -> HashMap<String, u32> {
-    let mut map = HashMap::with_capacity(symbols.len());
+    let mut map = HashMap::with_capacity(symbols.len().saturating_mul(4));
 
     let mut name_counts: HashMap<&str, usize> = HashMap::with_capacity(symbols.len());
     for sym in symbols {
@@ -266,54 +408,8 @@ fn build_qualified_map(
         }
 
         if let Some(file) = files.get(sym.file_idx as usize) {
-            let file_path = &file.path;
-            let short_path = file_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(file_path)
-                .trim_end_matches(".rs")
-                .trim_end_matches(".ts")
-                .trim_end_matches(".tsx")
-                .trim_end_matches(".dart")
-                .trim_end_matches(".sol")
-                .to_string();
-
-            // file-basename qualified: keychain::KeyChainErrors
-            if short_path != sym.name {
-                let file_qualified = format!("{}::{}", short_path, sym.name);
-                map.entry(file_qualified).or_insert(sym.id);
-            }
-
-            // directory-prefixed qualified: errors::keychain::KeyChainErrors
-            // Strip the project root prefix (and trailing slash) to get a relative path.
-            let rel = file_path
-                .strip_prefix(root)
-                .unwrap_or(file_path)
-                .trim_start_matches('/');
-            if let Some(slash) = rel.rfind('/') {
-                let dir_part = &rel[..slash];
-                let dir_comps: Vec<&str> = dir_part
-                    .split('/')
-                    .filter(|c| !c.is_empty() && !is_src_root_dir(c))
-                    .collect();
-                if !dir_comps.is_empty() {
-                    let dir_prefix = dir_comps.join("::");
-                    // Always emit the form without the file basename — covers
-                    // Solidity contracts (where the contract scope is already in
-                    // sym.qualified) and crate-root files (lib.rs/main.rs).
-                    let without_file = format!("{}::{}", dir_prefix, sym.qualified);
-                    map.entry(without_file).or_insert(sym.id);
-
-                    // Also emit the form with the file basename as a module
-                    // segment, unless the basename is a non-module root
-                    // (lib/main/mod/index).  This covers Rust files where the
-                    // file module is not part of sym.qualified.
-                    if !is_non_module_basename(&short_path) {
-                        let with_file =
-                            format!("{}::{}::{}", dir_prefix, short_path, sym.qualified);
-                        map.entry(with_file).or_insert(sym.id);
-                    }
-                }
+            for alias in symbol_lookup_aliases(sym, file, root) {
+                map.entry(alias).or_insert(sym.id);
             }
         }
 
@@ -533,6 +629,59 @@ mod tests {
         assert_eq!(map.get("a::parse"), Some(&0));
         assert_eq!(map.get("b::parse"), Some(&1));
         assert_eq!(map.get("c::parse"), Some(&2));
+    }
+
+    #[test]
+    fn search_dep_candidates_show_resolvable_aliases() {
+        let symbols = vec![
+            sym(0, "build_index", "build_index", 0),
+            sym(1, "build_index", "ChunksTable::build_index", 1),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-dsl/src/index.rs"),
+            file_entry(1, "/p/crates/zti-store/src/chunks_table.rs"),
+        ];
+        let qualified_map = build_qualified_map(&symbols, &files, "/p");
+        let index = ProjectIndex {
+            symbols,
+            edges: Vec::with_capacity(0),
+            files,
+            qualified_map,
+            reverse_edges: HashMap::with_capacity(0),
+            forward_edges: HashMap::with_capacity(0),
+            root: "/p".into(),
+            manifest_paths: Vec::with_capacity(0),
+        };
+
+        let rendered = crate::search_dep::render_candidates(&index, &[0, 1]);
+        assert!(rendered.contains("one of these exact names"));
+        assert!(rendered.contains("#0 : method index::build_index"));
+        assert!(rendered.contains("#1 : method ChunksTable::build_index"));
+        assert!(matches!(
+            crate::search_dep::resolve_name(&index, "index::build_index"),
+            crate::search_dep::NameMatch::Found(0)
+        ));
+    }
+
+    #[test]
+    fn qualified_map_adds_rust_workspace_crate_aliases() {
+        let symbols = vec![
+            sym(0, "build_index", "build_index", 0),
+            sym(1, "build_index", "ChunksTable::build_index", 1),
+            sym(2, "run", "run", 2),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-dsl/src/index.rs"),
+            file_entry(1, "/p/crates/zti-store/src/chunks_table.rs"),
+            file_entry(2, "/p/crates/foo-bar/src/lib.rs"),
+        ];
+        let map = build_qualified_map(&symbols, &files, "/p");
+        assert_eq!(map.get("zti_dsl::index::build_index"), Some(&0));
+        assert_eq!(
+            map.get("zti_store::chunks_table::ChunksTable::build_index"),
+            Some(&1)
+        );
+        assert_eq!(map.get("foo_bar::run"), Some(&2));
     }
 
     #[test]

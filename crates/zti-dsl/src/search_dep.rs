@@ -8,6 +8,7 @@ use crate::model::ProjectIndex;
 use crate::AsciiTreeRenderer;
 
 const BYTES_PER_TOKEN: usize = 4;
+const MAX_CANDIDATE_ALIASES: usize = 3;
 
 #[derive(Debug)]
 pub enum NameMatch {
@@ -105,9 +106,67 @@ pub fn render_symbol_overview(
     out
 }
 
+fn is_name_duplicated(index: &ProjectIndex, name: &str) -> bool {
+    index
+        .symbols
+        .iter()
+        .filter(|sym| sym.name == name)
+        .take(2)
+        .count()
+        > 1
+}
+
+fn alias_rank(sym: &Symbol, alias: &str) -> u8 {
+    if alias == sym.qualified && alias.contains("::") {
+        return 0;
+    }
+
+    let ends_with_name = alias
+        .rsplit_once("::")
+        .is_some_and(|(_, last)| last == sym.name);
+    if ends_with_name && alias.matches("::").count() == 1 {
+        return 1;
+    }
+
+    if ends_with_name && !alias.starts_with("crates::") && !alias.contains('-') {
+        return 2;
+    }
+
+    3
+}
+
+fn candidate_aliases<'a>(index: &'a ProjectIndex, sym: &'a Symbol) -> Vec<&'a str> {
+    let is_duplicated = is_name_duplicated(index, sym.name.as_str());
+    let mut aliases = Vec::with_capacity(MAX_CANDIDATE_ALIASES.saturating_mul(2));
+
+    if sym.qualified.contains("::")
+        && matches!(resolve_name(index, sym.qualified.as_str()), NameMatch::Found(id) if id == sym.id)
+    {
+        aliases.push(sym.qualified.as_str());
+    }
+
+    for (alias, id) in &index.qualified_map {
+        let alias = alias.as_str();
+        if *id == sym.id
+            && (!is_duplicated || alias.contains("::"))
+            && aliases.iter().all(|existing| existing != &alias)
+        {
+            aliases.push(alias);
+        }
+    }
+
+    aliases.sort_by(|left, right| {
+        alias_rank(sym, left)
+            .cmp(&alias_rank(sym, right))
+            .then_with(|| left.cmp(right))
+    });
+    aliases.truncate(MAX_CANDIDATE_ALIASES);
+    aliases
+}
+
 pub fn render_candidates(index: &ProjectIndex, ids: &[u32]) -> String {
-    let mut out = String::with_capacity(32 + ids.len() * 80);
-    out.push_str("Ambiguous name — call searchDep again with a qualified path:\n");
+    let mut out = String::with_capacity(64 + ids.len() * 112);
+    out.push_str("Ambiguous name — call searchDep again with one of these exact names:\n");
     for &id in ids {
         if let Some(s) = find_symbol(index, id) {
             let file = index
@@ -115,14 +174,18 @@ pub fn render_candidates(index: &ProjectIndex, ids: &[u32]) -> String {
                 .get(s.file_idx as usize)
                 .map(|f| f.path.as_str())
                 .unwrap_or("?");
-            let _ = writeln!(
-                out,
-                "  #{id} : {} {} ({file}:{}-{})",
-                s.kind.as_str(),
-                s.qualified,
-                s.line,
-                s.end_line,
-            );
+            let aliases = candidate_aliases(index, s);
+            let display_name = aliases.first().copied().unwrap_or(s.qualified.as_str());
+            let _ = write!(out, "  #{id} : {} {}", s.kind.as_str(), display_name);
+            let mut extra_aliases = aliases.iter().skip(1);
+            if let Some(first_alias) = extra_aliases.next() {
+                let _ = write!(out, " (aliases: {first_alias}");
+                for alias in extra_aliases {
+                    let _ = write!(out, ", {alias}");
+                }
+                out.push(')');
+            }
+            let _ = writeln!(out, " ({file}:{}-{})", s.line, s.end_line);
         }
     }
     out
