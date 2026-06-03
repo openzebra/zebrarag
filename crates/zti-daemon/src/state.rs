@@ -143,6 +143,11 @@ impl DaemonState {
             reg.insert(pid, Arc::clone(&project));
         }
 
+        // Lazily start watching this project now that it's loaded.
+        if let Some(manager) = self.watch.get() {
+            let _ = manager.watch(root, pid).await;
+        }
+
         Ok(project)
     }
 }

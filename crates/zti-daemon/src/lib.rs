@@ -101,7 +101,6 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
 
         match watch::WatchManager::start(Arc::clone(&state)) {
             Ok(manager) => {
-                attach_known_projects(&state, &manager).await;
                 let _ = state.watch.set(manager);
             }
             Err(e) => tracing::warn!("file watcher disabled: {e}"),
@@ -116,26 +115,3 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
     })
 }
 
-/// Load every previously-indexed project and start watching its root, skipping
-/// roots that no longer exist on disk.
-async fn attach_known_projects(state: &Arc<DaemonState>, manager: &Arc<watch::WatchManager>) {
-    let rows = match zti_store::list_projects().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("auto-reindex: cannot list projects: {e}");
-            return;
-        }
-    };
-    for row in &rows {
-        let Ok(root) = std::path::Path::new(&row.root_path).canonicalize() else {
-            continue;
-        };
-        if state.load_or_open(&row.root_path).await.is_err() {
-            continue;
-        }
-        let pid = zti_common::ids::project_id(&root);
-        if let Err(e) = manager.watch(root, pid).await {
-            tracing::warn!(root = %row.root_path, "watch failed: {e}");
-        }
-    }
-}
