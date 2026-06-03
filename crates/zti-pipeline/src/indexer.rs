@@ -735,19 +735,21 @@ pub async fn index_project(
             cursor = end;
         }
 
-        // Flush the tail batches accumulated below the per-flush threshold.
-        if !pending_batches.is_empty() {
-            chunks_table.append_batches(pending_batches).await?;
-            checkpoint_completed(
-                &files_table,
-                &snapshots,
-                &need_reindex,
-                &mut remaining,
-                &pending_file_idxs,
-            )
-            .await?;
-        }
     } // if !paused
+
+    // Flush pending batches regardless of pause — preserves embedded chunks
+    // and checkpoints completed files so a resumed run skips them.
+    if !pending_batches.is_empty() {
+        chunks_table.append_batches(std::mem::take(&mut pending_batches)).await?;
+        checkpoint_completed(
+            &files_table,
+            &snapshots,
+            &need_reindex,
+            &mut remaining,
+            &std::mem::take(&mut pending_file_idxs),
+        )
+        .await?;
+    }
 
     if !paused && total_chunks > 0 && total_embedded == 0 {
         anyhow::bail!("no embeddings produced from {total_chunks} chunks");
