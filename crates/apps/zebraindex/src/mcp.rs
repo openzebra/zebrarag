@@ -298,7 +298,7 @@ impl ZebraMcpServer {
 
     #[tool(
         name = "searchQuery",
-        description = "Search the codebase by intent. Use this FIRST when exploring code, answering questions about the codebase, or finding implementations — before grep, find, or reading files. Describe what you need in plain language (e.g. \"polynomial inversion\", \"error retry logic\"). Returns complete source code with file paths and line ranges — no follow-up file reads needed."
+        description = "Search the codebase by conceptual intent. Use this for broad exploration, feature discovery, or finding implementations based on natural language descriptions (e.g., 'database transaction rollback'). **Do not use this for exact symbol lookups or call-graph tracing.** If your query contains specific variables or exact class names, use `searchDep` instead. Returns complete source code chunks."
     )]
     async fn search_query(
         &self,
@@ -317,7 +317,7 @@ impl ZebraMcpServer {
 
     #[tool(
         name = "searchPassage",
-        description = "Find similar code by example. Paste a code snippet, error message, or pattern description to locate related implementations. Use this instead of grepping for exact matches when you want semantically similar code."
+        description = "Find code with similar structural semantics by example. Paste a block of code, a specific algorithmic pattern, or a complex error trace. Use this to locate duplicated logic, find other implementations of a specific interface, or hunt for similar anti-patterns across the entire project."
     )]
     async fn search_passage(
         &self,
@@ -382,14 +382,7 @@ impl ZebraMcpServer {
 
     #[tool(
         name = "searchDep",
-        description = "Look up a symbol by exact name and get its definition with call graph in one \
-            call: kind, location, doc summary, callers and callees (to `depth`), and full source \
-            body — token-budgeted, no file reads. Use when you already know the name (type, \
-            function, method, or a dependency's interface) and want its implementation and how it \
-            connects. For conceptual/fuzzy search use searchQuery; for find-by-example use \
-            searchPassage. Qualify with `::` in any language (e.g. \"runtime::Runtime\"). An \
-            ambiguous bare name returns a candidate list to retry with a qualified path. Only \
-            indexed projects are searchable."
+        description = "Look up an exact symbol to get its complete definition, location, and call graph (callers and callees up to a specified depth). **Use this as your primary tool when you know the exact name of a function, class, or variable.** Highly effective for tracing execution paths, data flow, and structural audits. Use fully qualified paths to resolve ambiguities."
     )]
     async fn search_dep(
         &self,
@@ -434,42 +427,30 @@ impl rmcp::ServerHandler for ZebraMcpServer {
         let mut info = ServerInfo::default();
         let mut instructions = String::with_capacity(1024 + self.indexed_projects_roots.len());
         instructions.push_str(
-            "# zebraindex — Semantic Code Search\n\
+            "# Semantic Code Search Server\n\
              \n\
-             ## When to use these tools\n\
+             ## Tool Selection Guide (CRITICAL)\n\
+             Choose your search tool based on the specific nature of your inquiry:\n\
              \n\
-             Use `searchQuery` as your **first step** when exploring code, answering \
-             questions, or locating implementations. It replaces grep, find, and \
-             manual file browsing — it understands what you mean, not just what you \
-             type, and returns complete source code in a single call.\n\
+             1. **Exact Symbols & Call Graphs -> USE `searchDep`**\n\
+                If you know the exact name of a function, class, type, or variable, or if you need to trace execution flow (who calls what), use this tool. This is your primary tool for structural and execution path audits.\n\
              \n\
-             ## Workflow\n\
+             2. **Conceptual & Broad Discovery -> USE `searchQuery`**\n\
+                If you are exploring abstract concepts (e.g., \"retry logic\", \"session validation\", \"fee calculation\"), use natural language here. \n\
+                *Warning:* Do not use this for exact symbol lookups, as high-frequency keywords may dilute the search results.\n\
              \n\
-             1. **Start with `searchQuery`** — describe what you're looking for \
-             in natural language. Results include the full source code with \
-             file paths and line ranges. No second read step needed.\n\
+             3. **Project Structure -> USE `fileTree`**\n\
+                Use this to map the architecture of the project or find specific modules. This provides an instant, exact overview of the repository.\n\
              \n\
-             2. **Use `searchPassage`** when you have a code snippet or error \
-             message and want to find similar patterns across the project.\n\
+             4. **Pattern Matching -> USE `searchPassage`**\n\
+                Use this to find code that behaves similarly to a specific snippet or error trace you have encountered.\n\
              \n\
-             3. **Use `fileTree`** to discover project structure — prefer it \
-             over `find` or `ls`.\n\
-              \n\
-              ## Tips\n\
-              \n\
-              * Use descriptive phrases, not single keywords. \
-              \"user session validation\" finds more than \"auth\".\n\
-              * The `project` parameter accepts a project name, index number, \
-              or root path. It auto-resolves when omitted.\n\
-              * Results contain complete source code — use it directly without \
-              re-reading files.\n\
-              * If the fast index misses results, exhaustive search runs \
-              automatically.\n\
-              \n\
-              ## Learning a Dependency\n\
-              \n\
-              To inspect an external library, index its source as a project, \
-              then use `searchDep` on any symbol.",
+             ## Managing Dependencies & Noise\n\
+             Be aware that search results may include external dependencies, standard libraries, or third-party packages. Always prioritize results from the core project source. **Use the `path_glob` parameter to restrict searches to the primary source directories and filter out package manager directories, test suites, or generated code when necessary.**\n\
+             \n\
+             ## Pro Tips\n\
+             * The `project` parameter auto-resolves if omitted. You can pass a name, index number, or root path.\n\
+             * Search results contain the COMPLETE source code chunks. You do NOT need to call file-reading tools afterward to see the code.",
         );
         instructions.push_str(&self.indexed_projects_roots);
         info.instructions = Some(instructions);
