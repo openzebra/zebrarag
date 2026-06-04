@@ -69,3 +69,9 @@ model_id = "thenlper/gte-large"
 parameters = "335M"
 technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
 description = "Top-tier retrieval for English. VRAM heavy."
+
+[[models]]
+model_id = "jinaai/jina-embeddings-v2-base-code"
+parameters = "137M"
+technologies = ["JinaBERT", "ALiBi", "Mean Pooling", "Code Retrieval"]
+description = "State-of-the-art for local code search. Supports 8192 context window and 30+ programming languages."
