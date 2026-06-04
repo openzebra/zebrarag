@@ -12,12 +12,13 @@ use arrow::array::{
     UInt8Array, UInt32Array, UInt32Builder, UInt64Array,
 };
 use rayon::prelude::*;
+use tokio::sync::oneshot;
 use tracing::info;
 
 use zti_common::ids::project_id;
 use zti_dsl::chunking::ChunkStrategy;
 use zti_dsl::{Chunk, DslChunker, EdgeKind, SourceFile, Target, build_index_from_sources};
-use zti_embed::EmbedEngine;
+use zti_embed::{EmbedEngine, Pooled};
 use zti_recursive_chunk;
 use zti_rerank::TurboReranker;
 use zti_store::Db;
@@ -533,37 +534,54 @@ pub async fn index_project(
     // (re)indexed file's prior chunks before this loop, so freshly-hashed
     // chunk_ids can't collide with surviving rows — append is duplicate-free.
     const CHUNK_FLUSH_ROWS: usize = 4096;
+    const PIPELINE_DEPTH: usize = 3;
+    type InFlight = (
+        Arc<[usize]>,
+        usize,
+        std::time::Instant,
+        oneshot::Receiver<Result<Pooled>>,
+    );
     let mut pending_batches: Vec<RecordBatch> = Vec::new();
     let mut pending_rows = 0usize;
     let mut pending_file_idxs: Vec<u32> = Vec::with_capacity(CHUNK_FLUSH_ROWS);
 
     if !paused {
         let mut cursor = 0usize;
-        while cursor < order.len() {
-            if cancel.load(Ordering::Relaxed) {
-                paused = true;
-                break;
-            }
-            let mut end = cursor;
-            let mut pad_len = 0usize;
-            while end < order.len() {
-                let l = effective_len(order[end]);
-                let new_pad = pad_len.max(l);
-                let count = end - cursor + 1;
-                if count > 1 && (count.saturating_mul(new_pad) > budget_tokens || count > max_items)
-                {
+        let mut inflight = VecDeque::<InFlight>::with_capacity(PIPELINE_DEPTH);
+        loop {
+            while inflight.len() < PIPELINE_DEPTH && cursor < order.len() && !paused {
+                if cancel.load(Ordering::Relaxed) {
+                    paused = true;
                     break;
                 }
-                pad_len = new_pad;
-                end += 1;
+                let mut end = cursor;
+                let mut pad_len = 0usize;
+                while end < order.len() {
+                    let l = effective_len(order[end]);
+                    let new_pad = pad_len.max(l);
+                    let count = end - cursor + 1;
+                    if count > 1
+                        && (count.saturating_mul(new_pad) > budget_tokens || count > max_items)
+                    {
+                        break;
+                    }
+                    pad_len = new_pad;
+                    end += 1;
+                }
+                let idxs = Arc::<[usize]>::from(&order[cursor..end]);
+                let batch_started = std::time::Instant::now();
+                let rx = engine.submit(Arc::clone(&encs), Arc::clone(&idxs))?;
+                inflight.push_back((idxs, pad_len, batch_started, rx));
+                cursor = end;
             }
-            let idxs = &order[cursor..end];
-            let n_batch = idxs.len();
 
-            let batch_started = std::time::Instant::now();
-            match engine
-                .embed_tokenized(Arc::clone(&encs), idxs.to_vec())
+            let Some((idxs, pad_len, batch_started, rx)) = inflight.pop_front() else {
+                break;
+            };
+            let n_batch = idxs.len();
+            match rx
                 .await
+                .map_err(|_| anyhow::anyhow!("embed worker dropped"))?
             {
                 Ok(embs) => {
                     let dim = engine.dim();
@@ -740,7 +758,6 @@ pub async fn index_project(
                 "embedded batch",
             );
             reporter.inc(n_batch as u64);
-            cursor = end;
         }
     } // if !paused
 

@@ -5,6 +5,8 @@
 //! the code embedding model uses different tensor names and adds Q/K layer
 //! normalization around self-attention.
 
+use std::cell::RefCell;
+
 use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{
     Activation, Embedding, LayerNorm, Linear, Module, VarBuilder, embedding, layer_norm, linear,
@@ -201,11 +203,34 @@ impl JinaLayer {
     }
 }
 
+#[derive(Debug, Default)]
+struct AlibiCache {
+    value: RefCell<Option<(usize, DType, Tensor)>>,
+}
+
+impl AlibiCache {
+    fn get(&self, n_heads: usize, seq_len: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+        // Keep the immutable borrow confined to this `if` expression; the miss
+        // path below must be able to take `borrow_mut()` without a live borrow.
+        if let Some((cached_seq, cached_dtype, cached_bias)) = self.value.borrow().as_ref()
+            && *cached_seq == seq_len
+            && *cached_dtype == dtype
+        {
+            return Ok(cached_bias.clone());
+        }
+
+        let bias = alibi_bias(n_heads, seq_len, device)?.to_dtype(dtype)?;
+        *self.value.borrow_mut() = Some((seq_len, dtype, bias.clone()));
+        Ok(bias)
+    }
+}
+
 #[derive(Debug)]
 pub struct JinaBertModel {
     embeddings: JinaEmbeddings,
     layers: Vec<JinaLayer>,
     n_heads: usize,
+    alibi_cache: AlibiCache,
 }
 
 impl JinaBertModel {
@@ -223,6 +248,7 @@ impl JinaBertModel {
             embeddings,
             layers,
             n_heads: cfg.num_attention_heads,
+            alibi_cache: AlibiCache::default(),
         })
     }
 
@@ -245,7 +271,9 @@ impl JinaBertModel {
             }
         };
         let extended_mask = extended_attention_mask(mask, dtype)?;
-        let bias = alibi_bias(self.n_heads, seq_len, hidden.device())?.to_dtype(dtype)?;
+        let bias = self
+            .alibi_cache
+            .get(self.n_heads, seq_len, dtype, hidden.device())?;
         self.layers.iter().try_fold(hidden, |state, layer| {
             layer.forward(&state, &bias, &extended_mask)
         })
@@ -295,4 +323,40 @@ fn alibi_bias(n_heads: usize, seq_len: usize, device: &Device) -> Result<Tensor>
         .to_dtype(DType::F32)?
         .broadcast_mul(&slopes)?
         .to_device(device)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
+        tensor
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()
+    }
+
+    #[test]
+    fn alibi_cache_matches_fresh_bias_for_miss_and_hit() -> Result<()> {
+        let device = Device::Cpu;
+        let cache = AlibiCache::default();
+        let n_heads = 12;
+
+        for seq_len in [8, 13] {
+            let fresh = alibi_bias(n_heads, seq_len, &device)?.to_dtype(DType::F32)?;
+            let fresh_values = tensor_values(&fresh)?;
+            let cached = cache.get(n_heads, seq_len, DType::F32, &device)?;
+            if fresh_values != tensor_values(&cached)? {
+                candle_core::bail!("cached ALiBi bias differs from fresh bias for seq {seq_len}");
+            }
+
+            let hit = cache.get(n_heads, seq_len, DType::F32, &device)?;
+            if fresh_values != tensor_values(&hit)? {
+                candle_core::bail!("ALiBi cache hit differs from fresh bias for seq {seq_len}");
+            }
+        }
+
+        Ok(())
+    }
 }

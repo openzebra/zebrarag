@@ -156,7 +156,7 @@ struct WorkerCfg {
 /// and a one-shot channel to return the pooled result.
 struct EmbedRequest {
     encs: Arc<Vec<Tokenized>>,
-    idxs: Vec<usize>,
+    idxs: Arc<[usize]>,
     reply: oneshot::Sender<Result<Pooled>>,
 }
 
@@ -332,22 +332,32 @@ impl EmbedEngine {
         self.tokenizer.truncation_max_length().is_some()
     }
 
+    /// Queue a tokenized batch on the embedding worker and return immediately.
+    /// Await the returned receiver to collect the pooled result. `idxs` selects
+    /// rows of `encs`; the heavy token buffers stay shared via `Arc`, and only
+    /// the small index list is owned per request.
+    pub fn submit(
+        &self,
+        encs: Arc<Vec<Tokenized>>,
+        idxs: Arc<[usize]>,
+    ) -> Result<oneshot::Receiver<Result<Pooled>>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EmbedRequest { encs, idxs, reply })
+            .map_err(|_| anyhow!("embed worker thread is gone"))?;
+        Ok(rx)
+    }
+
     /// Submit a tokenized batch to the embedding worker and await the pooled
-    /// result. `idxs` selects which rows of `encs` to embed (the indexer sorts
-    /// by length and slices, so the indices are not contiguous). The heavy
-    /// token buffers are shared via `Arc` — only the small index list is owned
-    /// per call. The reactor never blocks: the GPU forward runs on the worker
+    /// result. The reactor never blocks: the GPU forward runs on the worker
     /// thread while this task is parked on the one-shot.
     pub async fn embed_tokenized(
         &self,
         encs: Arc<Vec<Tokenized>>,
         idxs: Vec<usize>,
     ) -> Result<Pooled> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EmbedRequest { encs, idxs, reply })
-            .map_err(|_| anyhow!("embed worker thread is gone"))?;
-        rx.await
+        self.submit(encs, idxs.into())?
+            .await
             .map_err(|_| anyhow!("embed worker dropped without replying"))?
     }
 
