@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use crate::response::{SearchHit, SearchResults};
+use crate::response::{Confidence, SearchHit, SearchResults};
 
 const DEFAULT_CHAR_BUDGET: usize = 80_000;
 
@@ -35,6 +35,16 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
             .sum::<usize>(),
     );
     let mut out = String::with_capacity(est);
+
+    match results.confidence {
+        Confidence::High => {}
+        Confidence::Medium => out.push_str(
+            "⚠ medium confidence — try searchDep for exact symbols, or refine the query\n\n",
+        ),
+        Confidence::Low => out.push_str(
+            "⚠ low confidence — try searchDep for exact symbols, or refine the query\n\n",
+        ),
+    }
 
     let _ = writeln!(
         out,
@@ -153,6 +163,7 @@ mod tests {
                 "pub fn i16_negative_mask(x: i16) -> i16 { -(x as i16) }",
             )],
             total: 1,
+            confidence: Confidence::High,
         };
         let out = format_search_results(&r);
         assert!(out.contains("(1 hits, 1 related)"), "header: {}", out);
@@ -177,6 +188,7 @@ mod tests {
             hits: Vec::new(),
             appendix: Vec::new(),
             total: 0,
+            confidence: Confidence::High,
         };
         let out = format_search_results(&r);
         assert!(out.contains("no results"), "{}", out);
@@ -191,6 +203,7 @@ mod tests {
             hits,
             appendix: Vec::with_capacity(0),
             total: 50,
+            confidence: Confidence::High,
         };
         let out = format_search_results_budgeted(&r, 500);
         assert!(out.len() <= 500, "budget overshoot: {}", out.len());

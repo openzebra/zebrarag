@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -7,6 +6,7 @@ use anyhow::{Result, anyhow};
 
 use zti_ann::{AnnCache, AnnHandle, AnnIndexBuilder, SearchMethod, SearchParams};
 use zti_embed::EmbedEngine;
+use zti_protocol::response::Confidence;
 use zti_rerank::TurboReranker;
 use zti_rerank::gpu::{
     BATCH_SIZE, GpuTurboScratch, TurboCodeBatch, TurboScorerCache, parse_turbo_code_into,
@@ -19,40 +19,6 @@ use zti_common::chunk_strategy::ChunkStrategy;
 
 const KNN_OVERFETCH_MULT: usize = 12;
 const DIVERSITY_PENALTY: f32 = 0.04;
-const KEYWORD_NAME_BOOST: f32 = 0.5;
-const KEYWORD_CONTENT_BOOST: f32 = 0.3;
-const MIN_WORD_LEN: usize = 3;
-
-/// Collect query word slices from an already-lowercased buffer. Splits on any
-/// non-alphanumeric byte (so `_` becomes a boundary too — keeps SQL `LIKE`
-/// patterns trivially safe without an `ESCAPE` clause). Words shorter than
-/// [`MIN_WORD_LEN`] are filtered out so noise tokens like `in`, `a`, `of`
-/// don't pollute the boost. Borrows from `lc` — caller keeps the buffer
-/// alive for the lifetime of the returned slices.
-fn split_query_words(lc: &str) -> Vec<&str> {
-    lc.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| w.len() >= MIN_WORD_LEN)
-        .collect()
-}
-
-#[inline]
-fn apply_keyword_boost(words: &[&str], candidates: &mut [ChunkHit]) {
-    if words.is_empty() {
-        return;
-    }
-    for c in candidates {
-        let name_lc = lowercase_borrowed(&c.symbol_qualified);
-        let content_lc = lowercase_borrowed(&c.content);
-        for w in words {
-            if name_lc.contains(*w) {
-                c.score += KEYWORD_NAME_BOOST;
-            } else if content_lc.contains(*w) {
-                c.score += KEYWORD_CONTENT_BOOST;
-            }
-        }
-    }
-}
-
 #[inline]
 fn push_scored(
     heap: &mut BinaryHeap<Reverse<ScoredEntry>>,
@@ -67,62 +33,11 @@ fn push_scored(
     }
 }
 
-/// `Cow::Borrowed` when `s` is already ASCII-lowercase (no allocation, the hot
-/// path for snake_case code identifiers); `Cow::Owned` when there is an
-/// uppercase byte we have to fold. We only ever lowercase once per candidate,
-/// not once per (candidate × word).
-#[inline]
-fn lowercase_borrowed(s: &str) -> Cow<'_, str> {
-    if s.bytes().any(|b| b.is_ascii_uppercase()) {
-        Cow::Owned(s.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(s)
-    }
-}
-
-/// Union lexical hits into the kNN candidate pool. Dedup by the 16-byte
-/// `chunk_id` prefix held on the stack (no `Vec` allocation per id). Moves
-/// `ChunkHit`s out of `additions` instead of cloning. Used by both `search`
-/// and `search_exhaustive` so the union logic lives in one place.
-fn merge_unique_by_chunk_id(candidates: &mut Vec<ChunkHit>, additions: Vec<ChunkHit>) {
-    if additions.is_empty() {
-        return;
-    }
-    let mut seen: HashSet<[u8; 16]> = HashSet::with_capacity(candidates.len() + additions.len());
-    for c in candidates.iter() {
-        seen.insert(c.chunk_id);
-    }
-    candidates.reserve(additions.len());
-    for a in additions {
-        if seen.insert(a.chunk_id) {
-            candidates.push(a);
-        }
-    }
-}
-
-/// Run the lexical leg of hybrid retrieval and merge it into the kNN pool.
-/// Shared by `search` and `search_exhaustive`. No-op when `words` is empty.
-async fn extend_with_lexical(
-    chunks_table: &ChunksTable,
-    candidates: &mut Vec<ChunkHit>,
-    words: &[&str],
-    opts: &SearchOpts<'_>,
-    k: usize,
-) -> Result<()> {
-    if words.is_empty() {
-        return Ok(());
-    }
-    let lex = chunks_table
-        .lexical_match(words, opts.languages, opts.path_glob, k)
-        .await?;
-    merge_unique_by_chunk_id(candidates, lex);
-    Ok(())
-}
-
 pub struct SearchOpts<'a> {
     pub limit: usize,
     pub languages: Option<&'a [String]>,
     pub path_glob: Option<&'a str>,
+    pub include_tests: bool,
 }
 
 pub struct Hit {
@@ -130,57 +45,25 @@ pub struct Hit {
     pub score: f32,
 }
 
+pub struct SearchOutcome {
+    pub hits: Vec<Hit>,
+    pub confidence: Confidence,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn search(
-    query: &str,
-    query_emb: &[f32],
+async fn run_vector_leg(
+    chunks_table: &ChunksTable,
     engine: &EmbedEngine,
-    db: &zti_store::Db,
     reranker: &TurboReranker,
     ann_cache: &AnnCache,
     turbo_cache: &TurboScorerCache,
     pid: &[u8; 32],
+    params: &SearchParams,
+    query_emb: &[f32],
+    raw_k: usize,
     opts: &SearchOpts<'_>,
-) -> Result<Vec<Hit>> {
-    let projects = db.projects_table().await?;
-    let project = projects
-        .get(pid)
-        .await?
-        .ok_or_else(|| anyhow!("project not indexed"))?;
-
-    let previous: Option<SearchParams> = project
-        .search_params
-        .as_deref()
-        .and_then(|s| toml::from_str(s).ok());
-
-    let params: SearchParams = match previous {
-        Some(p) => p,
-        None => zti_ann::choose_method(
-            project.total_chunks as usize,
-            engine.dim(),
-            &zti_hw::probe(),
-            None,
-        ),
-    };
-
-    let chunks_table = db.chunks_table(engine.dim()).await?;
-    // No `optimize()` here: compaction is a *write* (rewrites fragments +
-    // manifest) and belongs to the indexing path (`index_project` runs it once
-    // after embedding). The read path must stay read-only.
-    let total_chunks = project.total_chunks as usize;
-    let overfetch = if total_chunks > 100_000 {
-        6
-    } else if total_chunks > 20_000 {
-        8
-    } else {
-        KNN_OVERFETCH_MULT
-    };
-    let raw_k = opts.limit.saturating_mul(overfetch);
-
-    let query_lc = query.to_ascii_lowercase();
-    let words = split_query_words(&query_lc);
-
-    let mut candidates: Vec<ChunkHit> = match params.method {
+) -> Result<Vec<ChunkHit>> {
+    match params.method {
         SearchMethod::TurboQuant => {
             let core = turbo_cache.get_or_build(reranker, &engine.device()?)?;
             let mut scratch =
@@ -196,19 +79,23 @@ pub async fn search(
             let mut heap: BinaryHeap<Reverse<ScoredEntry>> = BinaryHeap::with_capacity(raw_k + 1);
 
             chunks_table
-                .iter_turbo_codes(opts.languages, opts.path_glob, |id, code| {
-                    parse_turbo_code_into(code, &mut batch, id);
-                    if batch.len() >= BATCH_SIZE {
-                        // CPU + GPU work — keep it off the reactor.
-                        let scored = tokio::task::block_in_place(|| {
-                            score_batch(&core, &mut scratch, &batch, &rotated_query)
-                                .map_err(|e| anyhow!("GPU score batch: {e}"))
-                        })?;
-                        push_scored(&mut heap, scored, raw_k);
-                        batch.clear();
-                    }
-                    Ok(true)
-                })
+                .iter_turbo_codes(
+                    opts.languages,
+                    opts.path_glob,
+                    opts.include_tests,
+                    |id, code| {
+                        parse_turbo_code_into(code, &mut batch, id);
+                        if batch.len() >= BATCH_SIZE {
+                            let scored = tokio::task::block_in_place(|| {
+                                score_batch(&core, &mut scratch, &batch, &rotated_query)
+                                    .map_err(|e| anyhow!("GPU score batch: {e}"))
+                            })?;
+                            push_scored(&mut heap, scored, raw_k);
+                            batch.clear();
+                        }
+                        Ok(true)
+                    },
+                )
                 .await?;
             if !batch.is_empty() {
                 let scored = tokio::task::block_in_place(|| {
@@ -225,58 +112,161 @@ pub async fn search(
             scores.reverse();
 
             let top_ids: Vec<[u8; 16]> = scores.iter().map(|(_, id)| *id).collect();
-            let score_by_id: HashMap<[u8; 16], f32> =
-                scores.iter().map(|(s, id)| (*id, *s)).collect();
+            let mut score_by_id: HashMap<[u8; 16], f32> = HashMap::with_capacity(scores.len());
+            for (score, id) in &scores {
+                score_by_id.insert(*id, *score);
+            }
 
             let mut hits = chunks_table
-                .fetch_by_chunk_ids(&top_ids, opts.languages, opts.path_glob)
+                .fetch_by_chunk_ids(&top_ids, opts.languages, opts.path_glob, opts.include_tests)
                 .await?;
             for hit in &mut hits {
-                if let Some(s) = score_by_id.get(&hit.chunk_id) {
-                    hit.score = *s;
+                if let Some(score) = score_by_id.get(&hit.chunk_id) {
+                    hit.score = *score;
                 }
             }
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-
-            hits
+            Ok(hits)
         }
         SearchMethod::Usearch => {
             let graph: AnnHandle = ann_cache
-                .get_or_build(*pid, || rebuild(&chunks_table, engine.dim(), &params))
+                .get_or_build(*pid, || rebuild(chunks_table, engine.dim(), params))
                 .await
                 .map_err(|e: anyhow::Error| e)?;
 
             let mut topn: Vec<([u8; 16], f32)> = Vec::with_capacity(raw_k);
             graph.search(query_emb, raw_k, &mut topn);
 
-            let score_by_id: std::collections::HashMap<[u8; 16], f32> =
-                topn.iter().map(|(id, score)| (*id, *score)).collect();
+            let mut score_by_id: HashMap<[u8; 16], f32> = HashMap::with_capacity(topn.len());
+            for (id, score) in &topn {
+                score_by_id.insert(*id, *score);
+            }
 
             let ids: Vec<[u8; 16]> = topn.iter().map(|(id, _)| *id).collect();
             let mut fetched = chunks_table
-                .fetch_by_chunk_ids(&ids, opts.languages, opts.path_glob)
+                .fetch_by_chunk_ids(&ids, opts.languages, opts.path_glob, opts.include_tests)
                 .await?;
 
             for hit in &mut fetched {
-                if let Some(s) = score_by_id.get(&hit.chunk_id) {
-                    hit.score = *s;
+                if let Some(score) = score_by_id.get(&hit.chunk_id) {
+                    hit.score = *score;
                 }
             }
-            fetched
+            Ok(fetched)
         }
         _ => {
             chunks_table
-                .knn(query_emb, raw_k, &params, opts.languages, opts.path_glob)
-                .await?
+                .knn(
+                    query_emb,
+                    raw_k,
+                    params,
+                    opts.languages,
+                    opts.path_glob,
+                    opts.include_tests,
+                )
+                .await
         }
+    }
+}
+
+fn materialize_fused_hits(
+    vec_hits: Vec<ChunkHit>,
+    lex_hits: Vec<ChunkHit>,
+    raw_k: usize,
+) -> Vec<ChunkHit> {
+    let vec_ids: Vec<[u8; 16]> = vec_hits.iter().map(|hit| hit.chunk_id).collect();
+    let lex_ids: Vec<[u8; 16]> = lex_hits.iter().map(|hit| hit.chunk_id).collect();
+    let fused = crate::fusion::rrf(&[&vec_ids, &lex_ids], raw_k);
+
+    let mut by_id: HashMap<[u8; 16], ChunkHit> =
+        HashMap::with_capacity(vec_hits.len() + lex_hits.len());
+    vec_hits.into_iter().chain(lex_hits).for_each(|hit| {
+        by_id.entry(hit.chunk_id).or_insert(hit);
+    });
+
+    let mut candidates = Vec::with_capacity(fused.len());
+    for (id, rrf_score) in fused {
+        if let Some(mut hit) = by_id.remove(&id) {
+            hit.score = rrf_score;
+            candidates.push(hit);
+        }
+    }
+    candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn search(
+    query: &str,
+    query_emb: &[f32],
+    engine: &EmbedEngine,
+    db: &zti_store::Db,
+    reranker: &TurboReranker,
+    ann_cache: &AnnCache,
+    turbo_cache: &TurboScorerCache,
+    pid: &[u8; 32],
+    opts: &SearchOpts<'_>,
+) -> Result<SearchOutcome> {
+    let projects = db.projects_table().await?;
+    let project = projects
+        .get(pid)
+        .await?
+        .ok_or_else(|| anyhow!("project not indexed"))?;
+
+    let previous: Option<SearchParams> = project
+        .search_params
+        .as_deref()
+        .and_then(|params| toml::from_str(params).ok());
+
+    let params: SearchParams = match previous {
+        Some(params) => params,
+        None => zti_ann::choose_method(
+            project.total_chunks as usize,
+            engine.dim(),
+            &zti_hw::probe(),
+            None,
+        ),
     };
 
-    extend_with_lexical(&chunks_table, &mut candidates, &words, opts, raw_k).await?;
-    apply_keyword_boost(&words, &mut candidates);
+    let chunks_table = db.chunks_table(engine.dim()).await?;
+    let total_chunks = project.total_chunks as usize;
+    let overfetch = if total_chunks > 100_000 {
+        6
+    } else if total_chunks > 20_000 {
+        8
+    } else {
+        KNN_OVERFETCH_MULT
+    };
+    let raw_k = opts.limit.saturating_mul(overfetch);
+
+    let (vec_res, lex_res) = tokio::join!(
+        run_vector_leg(
+            &chunks_table,
+            engine,
+            reranker,
+            ann_cache,
+            turbo_cache,
+            pid,
+            &params,
+            query_emb,
+            raw_k,
+            opts,
+        ),
+        chunks_table.lexical_match(
+            query,
+            opts.languages,
+            opts.path_glob,
+            opts.include_tests,
+            raw_k,
+        ),
+    );
+    let vec_hits = vec_res?;
+    let top_cosine = vec_hits.first().map_or(0.0, |hit| hit.score);
+    let lex_hits = lex_res?;
+    let mut candidates = materialize_fused_hits(vec_hits, lex_hits, raw_k);
 
     let rerank_input: Vec<(&[u8], f32)> = candidates
         .iter()
-        .map(|c| (c.turbo_code.as_slice(), c.score))
+        .map(|candidate| (candidate.turbo_code.as_slice(), candidate.score))
         .collect();
     let mut ranked = tokio::task::block_in_place(|| reranker.rerank(&rerank_input, query_emb));
 
@@ -288,11 +278,14 @@ pub async fn search(
     let mut slots: Vec<Option<ChunkHit>> = candidates.drain(..).map(Some).collect();
     let mut hits: Vec<Hit> = Vec::with_capacity(ranked.len());
     for (idx, score) in ranked {
-        if let Some(c) = slots.get_mut(idx).and_then(Option::take) {
-            hits.push(Hit { chunk: c, score });
+        if let Some(chunk) = slots.get_mut(idx).and_then(Option::take) {
+            hits.push(Hit { chunk, score });
         }
     }
-    Ok(hits)
+    Ok(SearchOutcome {
+        hits,
+        confidence: Confidence::from_top_cosine(top_cosine),
+    })
 }
 
 #[inline]
@@ -317,7 +310,7 @@ pub async fn search_exhaustive(
     db: &zti_store::Db,
     pid: &[u8; 32],
     opts: &SearchOpts<'_>,
-) -> Result<Vec<Hit>> {
+) -> Result<SearchOutcome> {
     let projects = db.projects_table().await?;
     let _project = projects
         .get(pid)
@@ -325,30 +318,37 @@ pub async fn search_exhaustive(
         .ok_or_else(|| anyhow!("project not indexed"))?;
 
     let raw_k = opts.limit.saturating_mul(KNN_OVERFETCH_MULT);
-
     let chunks_table = db.chunks_table(engine.dim()).await?;
-    let query_lc = query.to_ascii_lowercase();
-    let words = split_query_words(&query_lc);
 
-    let mut candidates = chunks_table
-        .knn_exhaustive(query_emb, raw_k, opts.languages, opts.path_glob)
-        .await?;
+    let (vec_res, lex_res) = tokio::join!(
+        chunks_table.knn_exhaustive(
+            query_emb,
+            raw_k,
+            opts.languages,
+            opts.path_glob,
+            opts.include_tests,
+        ),
+        chunks_table.lexical_match(
+            query,
+            opts.languages,
+            opts.path_glob,
+            opts.include_tests,
+            raw_k,
+        ),
+    );
+    let vec_hits = vec_res?;
+    let top_cosine = vec_hits.first().map_or(0.0, |hit| hit.score);
+    let candidates = materialize_fused_hits(vec_hits, lex_res?, raw_k);
 
-    extend_with_lexical(&chunks_table, &mut candidates, &words, opts, raw_k).await?;
-    apply_keyword_boost(&words, &mut candidates);
-
-    // Sort by the boosted score so lexical hits surface — the previous
-    // implementation iterated in raw-cosine order and silently dropped the
-    // boost on output.
-    candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-    candidates.truncate(opts.limit);
-
-    let mut hits: Vec<Hit> = Vec::with_capacity(candidates.len());
-    for c in candidates {
-        let score = c.score;
-        hits.push(Hit { chunk: c, score });
-    }
-    Ok(hits)
+    let mut hits: Vec<Hit> = Vec::with_capacity(candidates.len().min(opts.limit));
+    candidates.into_iter().take(opts.limit).for_each(|chunk| {
+        let score = chunk.score;
+        hits.push(Hit { chunk, score });
+    });
+    Ok(SearchOutcome {
+        hits,
+        confidence: Confidence::from_top_cosine(top_cosine),
+    })
 }
 
 async fn rebuild(
@@ -399,119 +399,9 @@ impl Ord for ScoredEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::alloc_counting;
     use arrow::array::Float32Array;
     use std::sync::Mutex;
-
-    fn mk_chunk(chunk_id: [u8; 16], qualified: &str, content: &str) -> ChunkHit {
-        ChunkHit {
-            chunk_id,
-            file_path: "src/poly/rq.rs".into(),
-            symbol_qualified: qualified.into(),
-            symbol_kind: "method".into(),
-            sym_id: 0,
-            sub_chunk_idx: 0,
-            total_sub_chunks: 1,
-            chunk_strategy: ChunkStrategy::Symbol,
-            parent_sym_id: None,
-            appendix_sym_ids: Vec::with_capacity(0),
-            start_line: 1,
-            end_line: 1,
-            content: content.into(),
-            turbo_code: Vec::with_capacity(0),
-            score: 0.0,
-        }
-    }
-
-    #[test]
-    fn split_query_words_strips_short_words_and_punct() {
-        let lc = "invert poly in rq".to_ascii_lowercase();
-        let words = split_query_words(&lc);
-        // "in" is below MIN_WORD_LEN(3), "rq" is below too, only "invert"+"poly" survive.
-        assert_eq!(words, vec!["invert", "poly"]);
-    }
-
-    #[test]
-    fn split_query_words_splits_on_underscore_and_colon() {
-        let lc = "rq::mult_int".to_ascii_lowercase();
-        let words = split_query_words(&lc);
-        // `_` and `:` are both non-alphanumeric → boundaries. Tokens >=3 chars.
-        assert_eq!(words, vec!["mult", "int"]);
-    }
-
-    #[test]
-    fn keyword_boost_accumulates_per_word_on_name() {
-        let mut hits = vec![mk_chunk(
-            [1u8; 16],
-            "Rq::recip",
-            "let x = fq::recip(RATIO);",
-        )];
-        apply_keyword_boost(&["recip", "rq"], &mut hits);
-        // "recip" matches symbol_qualified → +0.5
-        // "rq"    matches symbol_qualified → +0.5
-        assert!((hits[0].score - 1.0).abs() < 1e-6, "got {}", hits[0].score);
-    }
-
-    #[test]
-    fn keyword_boost_falls_back_to_content_when_name_misses() {
-        let mut hits = vec![mk_chunk(
-            [1u8; 16],
-            "PolyErrors",
-            "let scale = recip(f[0]);",
-        )];
-        apply_keyword_boost(&["recip"], &mut hits);
-        // Not in name → use content boost (0.3), not name (0.5).
-        assert!(
-            (hits[0].score - KEYWORD_CONTENT_BOOST).abs() < 1e-6,
-            "got {}",
-            hits[0].score
-        );
-    }
-
-    #[test]
-    fn keyword_boost_empty_words_is_noop() {
-        let mut hits = vec![mk_chunk([1u8; 16], "Anything", "anywhere")];
-        apply_keyword_boost(&[], &mut hits);
-        assert_eq!(hits[0].score, 0.0);
-    }
-
-    #[test]
-    fn lowercase_borrowed_avoids_alloc_when_already_lowercase() {
-        let s = "rq_recip_inverse";
-        let cow = lowercase_borrowed(s);
-        // No upper-case byte → must return Borrowed (zero allocation).
-        assert!(matches!(cow, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn lowercase_borrowed_owns_when_uppercase_present() {
-        let s = "Rq::Recip";
-        let cow = lowercase_borrowed(s);
-        assert!(matches!(cow, Cow::Owned(_)));
-        assert_eq!(&*cow, "rq::recip");
-    }
-
-    #[test]
-    fn merge_unique_by_chunk_id_dedups_and_moves() {
-        let mut existing = vec![mk_chunk([1u8; 16], "a", ""), mk_chunk([2u8; 16], "b", "")];
-        let lex = vec![
-            mk_chunk([2u8; 16], "b-dup", ""), // dup by chunk_id
-            mk_chunk([3u8; 16], "c", ""),     // new
-        ];
-        merge_unique_by_chunk_id(&mut existing, lex);
-        assert_eq!(existing.len(), 3);
-        assert_eq!(existing[0].symbol_qualified, "a");
-        assert_eq!(existing[1].symbol_qualified, "b");
-        assert_eq!(existing[2].symbol_qualified, "c");
-    }
-
-    #[test]
-    fn merge_unique_by_chunk_id_empty_additions_is_noop() {
-        let mut existing = vec![mk_chunk([1u8; 16], "a", "")];
-        merge_unique_by_chunk_id(&mut existing, Vec::new());
-        assert_eq!(existing.len(), 1);
-    }
 
     // The `#[cfg(test)] #[global_allocator]` counter in `crate::alloc_counting`
     // is process-wide. The default `cargo test` harness runs the tests in this
@@ -620,6 +510,7 @@ mod tq_tests {
         ChunkHit {
             chunk_id: [0u8; 16],
             file_path: String::new(),
+            file_type: zti_common::file_type::FileType::Source,
             symbol_qualified: String::new(),
             symbol_kind: String::new(),
             sym_id: 0,

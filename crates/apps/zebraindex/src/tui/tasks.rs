@@ -376,6 +376,7 @@ pub async fn do_search(
                 path_glob: None,
                 refresh_index: false,
                 exhaustive: false,
+                include_tests: false,
                 mode,
             }))
             .await?;

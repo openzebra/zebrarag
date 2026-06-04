@@ -1,3 +1,4 @@
+pub mod fusion;
 pub mod indexer;
 pub mod manifest;
 pub mod progress;

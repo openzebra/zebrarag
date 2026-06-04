@@ -114,4 +114,3 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         Ok(())
     })
 }
-

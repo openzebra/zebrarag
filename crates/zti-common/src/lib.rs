@@ -1,5 +1,6 @@
 pub mod chunk_strategy;
 pub mod dsl;
+pub mod file_type;
 pub mod format;
 pub mod ids;
 pub mod paths;

@@ -1,8 +1,9 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use ignore::WalkBuilder;
 
+use zti_common::file_type::FileType;
 use zti_store::FileRow;
 use zti_tree_sitter::{Language, detect_from_path};
 
@@ -52,6 +53,20 @@ const PIPELINE_SKIP_DIRS: &[&str] = &[
     "deps",
 ];
 
+/// Foundry dependency/build dirs, excluded only relative to a Foundry root.
+const FOUNDRY_DEP_DIRS: [&str; 3] = ["lib", "cache", "out"];
+
+const TEST_DIR_SEGMENTS: [&str; 6] = [
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "e2e",
+    "integration_test",
+];
+const DOC_EXTS: [&str; 4] = ["md", "mdx", "rst", "txt"];
+const CONFIG_EXTS: [&str; 7] = ["toml", "yaml", "yml", "json", "ini", "cfg", "env"];
+
 /// Basename-only ignore test shared by the walker and the watcher. Mirrors the
 /// files the walker drops: hidden, manifests, lockfiles, license boilerplate,
 /// non-code assets, generated code.
@@ -64,25 +79,73 @@ fn is_ignored_basename(name: &str) -> bool {
         || is_generated_file(name)
 }
 
-/// Coarse path filter for the filesystem watcher: `true` when `path` could be an
-/// indexable source file under `root`. The walker still applies gitignore on top;
-/// this only drops obvious build-artifact noise (`target/`, `node_modules/`,
-/// `.git/`, lockfiles, generated code) so churn there never schedules a reindex.
-pub fn is_index_candidate(root: &Path, path: &Path) -> bool {
-    let Ok(rel) = path.strip_prefix(root) else {
-        return false;
-    };
-    let mut comps = rel.components();
-    // Any hidden or skip-dir component disqualifies (matches the walker's
-    // `.hidden(true)` + skip-dir `filter_entry`).
-    let dir_blocked = comps.any(|c| match c {
-        std::path::Component::Normal(os) => {
+/// Relative directories containing a `foundry.toml` manifest.
+#[must_use]
+pub fn foundry_roots(root: &Path) -> HashSet<PathBuf> {
+    let mut roots = HashSet::with_capacity(4);
+    WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == "foundry.toml")
+        .filter_map(|entry| {
+            entry
+                .path()
+                .parent()
+                .and_then(|dir| dir.strip_prefix(root).ok())
+                .map(Path::to_path_buf)
+        })
+        .for_each(|rel| {
+            roots.insert(rel);
+        });
+    roots
+}
+
+/// True when `rel` sits under `<foundry_root>/{lib,cache,out}/…` for any Foundry
+/// root that is an ancestor of `rel`. Pure: prefix-strip + first-component match.
+fn is_dependency_path<S: std::hash::BuildHasher>(
+    foundry_roots: &HashSet<PathBuf, S>,
+    rel: &Path,
+) -> bool {
+    foundry_roots.iter().any(|foundry_root| {
+        rel.strip_prefix(foundry_root)
+            .ok()
+            .and_then(|tail| tail.components().next())
+            .and_then(|component| match component {
+                Component::Normal(os) => os.to_str(),
+                _ => None,
+            })
+            .is_some_and(|segment| FOUNDRY_DEP_DIRS.contains(&segment))
+    })
+}
+
+fn has_ignored_component(rel: &Path) -> bool {
+    rel.components().any(|component| match component {
+        Component::Normal(os) => {
             let name = os.to_string_lossy();
             name.starts_with('.') || PIPELINE_SKIP_DIRS.contains(&name.as_ref())
         }
-        _ => false,
-    });
-    if dir_blocked {
+        Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => {
+            false
+        }
+    })
+}
+
+/// True when `path` could be an indexable source file under `root`.
+///
+/// The walker still applies gitignore on top; this drops obvious build artifacts
+/// so churn there never schedules a reindex.
+#[must_use]
+pub fn is_index_candidate<S: std::hash::BuildHasher>(
+    root: &Path,
+    path: &Path,
+    roots: &HashSet<PathBuf, S>,
+) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    if has_ignored_component(rel) || is_dependency_path(roots, rel) {
         return false;
     }
     path.file_name()
@@ -166,6 +229,7 @@ pub struct FileSnapshot {
     pub size_bytes: u64,
     pub contents: String,
     pub kind: SourceKind,
+    pub file_type: FileType,
 }
 
 pub struct Changes {
@@ -187,16 +251,45 @@ fn is_platform_scaffolding(rel_path: &str, has_lib_or_src: bool) -> bool {
         || rel_path.starts_with("web/")
         || rel_path.starts_with("rust_builder/")
         || rel_path.starts_with("fastlane/")
-        || rel_path.starts_with("test/")
-        || rel_path.starts_with("tests/")
-        || rel_path.starts_with("integration_test/")
-        || rel_path.starts_with("__tests__/")
-        || rel_path.starts_with("spec/")
-        || rel_path.starts_with("e2e/")
+}
+
+#[must_use]
+pub fn classify_file_type(rel_path: &str, kind: SourceKind) -> FileType {
+    if is_test_path(rel_path) {
+        return FileType::Test;
+    }
+    match kind {
+        SourceKind::Code(_) => FileType::Source,
+        SourceKind::Tsv | SourceKind::Psv => FileType::Doc,
+        SourceKind::Text => classify_text(rel_path),
+    }
+}
+
+fn is_test_path(rel: &str) -> bool {
+    rel.split('/').any(|seg| TEST_DIR_SEGMENTS.contains(&seg)) || is_test_basename(rel)
+}
+
+fn is_test_basename(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.ends_with(".t.sol")
+        || name.ends_with("_test.go")
+        || name.ends_with("_test.rs")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.starts_with("test_")
+}
+
+fn classify_text(rel: &str) -> FileType {
+    match rel.rsplit('.').next().filter(|ext| !ext.contains('/')) {
+        Some(ext) if DOC_EXTS.contains(&ext) => FileType::Doc,
+        Some(ext) if CONFIG_EXTS.contains(&ext) => FileType::Config,
+        _ => FileType::Doc,
+    }
 }
 
 pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
-    let mut map = HashMap::new();
+    let roots = foundry_roots(root);
+    let mut map = HashMap::with_capacity(1024);
 
     let walker = WalkBuilder::new(root)
         .hidden(true)
@@ -239,9 +332,13 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
             .display()
             .to_string();
 
-        if is_platform_scaffolding(&rel, has_lib_or_src) {
+        if is_platform_scaffolding(&rel, has_lib_or_src)
+            || is_dependency_path(&roots, Path::new(&rel))
+        {
             continue;
         }
+
+        let file_type = classify_file_type(&rel, kind);
 
         let contents = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -271,6 +368,7 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
                 size_bytes: metadata.len(),
                 contents,
                 kind,
+                file_type,
             },
         );
     }
@@ -320,8 +418,10 @@ pub fn detect_changes(current: &HashMap<String, FileSnapshot>, previous: &[FileR
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceKind, classify_kind};
-    use std::path::Path;
+    use super::{SourceKind, classify_file_type, classify_kind, is_dependency_path};
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use zti_common::file_type::FileType;
     use zti_tree_sitter::Language;
 
     #[test]
@@ -350,5 +450,39 @@ mod tests {
     fn docs_remain_plain_text() {
         assert_eq!(classify_kind(Path::new("README.md")), SourceKind::Text);
         assert_eq!(classify_kind(Path::new("data.csv")), SourceKind::Text);
+    }
+
+    #[test]
+    fn classify_file_type_tags_tests_docs_and_config() {
+        assert_eq!(
+            classify_file_type("src/lib.rs", SourceKind::Code(Language::Rust)),
+            FileType::Source,
+        );
+        assert_eq!(
+            classify_file_type("test/Foo.t.sol", SourceKind::Code(Language::Solidity)),
+            FileType::Test,
+        );
+        assert_eq!(
+            classify_file_type("README.md", SourceKind::Text),
+            FileType::Doc
+        );
+        assert_eq!(
+            classify_file_type("config/settings.toml", SourceKind::Text),
+            FileType::Config,
+        );
+    }
+
+    #[test]
+    fn foundry_dependency_path_is_root_relative() {
+        let roots = HashSet::from([PathBuf::new(), PathBuf::from("contracts")]);
+        assert!(is_dependency_path(
+            &roots,
+            Path::new("lib/forge-std/Vm.sol")
+        ));
+        assert!(is_dependency_path(
+            &roots,
+            Path::new("contracts/lib/forge-std/Vm.sol"),
+        ));
+        assert!(!is_dependency_path(&roots, Path::new("src/lib.rs")));
     }
 }

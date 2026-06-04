@@ -69,6 +69,7 @@ mod tests {
             path_glob: Some("src/**".to_string()),
             refresh_index: false,
             exhaustive: false,
+            include_tests: false,
             mode: SearchMode::default(),
         });
         let got: Request = roundtrip(req.clone()).await;

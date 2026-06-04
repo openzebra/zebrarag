@@ -60,6 +60,8 @@ pub struct SearchReq {
     #[serde(default)]
     pub exhaustive: bool,
     #[serde(default)]
+    pub include_tests: bool,
+    #[serde(default)]
     pub mode: SearchMode,
 }
 

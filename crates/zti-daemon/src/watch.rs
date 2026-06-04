@@ -8,7 +8,7 @@ use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
 use tokio::sync::{Mutex, mpsc};
 
-use zti_pipeline::manifest::is_index_candidate;
+use zti_pipeline::manifest::{foundry_roots, is_index_candidate};
 use zti_pipeline::progress::{Reporter, SilentReporter};
 
 use crate::state::DaemonState;
@@ -23,6 +23,7 @@ type FsDebouncer = Debouncer<RecommendedWatcher, RecommendedCache>;
 struct Watched {
     root: PathBuf,
     pid: [u8; 32],
+    foundry_roots: std::collections::HashSet<PathBuf>,
 }
 
 pub struct WatchManager {
@@ -61,7 +62,12 @@ impl WatchManager {
             .lock()
             .await
             .watch(&root, RecursiveMode::Recursive)?;
-        self.watched.lock().await.push(Watched { root, pid });
+        let roots = foundry_roots(&root);
+        self.watched.lock().await.push(Watched {
+            root,
+            pid,
+            foundry_roots: roots,
+        });
         Ok(())
     }
 
@@ -101,10 +107,9 @@ async fn event_loop(
         let watched = manager.watched.lock().await;
         let mut dirty: Vec<([u8; 32], PathBuf)> = Vec::with_capacity(watched.len());
         for w in watched.iter() {
-            let hit = events
-                .iter()
-                .flat_map(|e| e.paths.iter())
-                .any(|p| p.starts_with(&w.root) && is_index_candidate(&w.root, p));
+            let hit = events.iter().flat_map(|e| e.paths.iter()).any(|p| {
+                p.starts_with(&w.root) && is_index_candidate(&w.root, p, &w.foundry_roots)
+            });
             if hit && !dirty.iter().any(|(p, _)| p == &w.pid) {
                 dirty.push((w.pid, w.root.clone()));
             }

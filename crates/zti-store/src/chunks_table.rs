@@ -1,14 +1,16 @@
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use arrow::array::{
     Array, BinaryArray, FixedSizeBinaryArray, FixedSizeListArray, Float32Array, ListArray,
-    RecordBatch, StringArray, UInt32Array,
+    RecordBatch, StringArray, UInt8Array, UInt32Array,
 };
 use arrow::datatypes::DataType;
 use futures::StreamExt;
 use lancedb::index::Index;
+use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::vector::{
     IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder, IvfPqIndexBuilder, IvfRqIndexBuilder,
     IvfSqIndexBuilder,
@@ -17,6 +19,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::Table;
 
 use zti_common::chunk_strategy::ChunkStrategy;
+use zti_common::file_type::FileType;
 
 use crate::schema;
 
@@ -26,6 +29,7 @@ use crate::schema;
 const CHUNK_HIT_COLS_WITH_DISTANCE: &[&str] = &[
     "chunk_id",
     "file_path",
+    "file_type",
     "symbol_qualified",
     "symbol_kind",
     "sym_id",
@@ -46,6 +50,7 @@ const CHUNK_HIT_COLS_WITH_DISTANCE: &[&str] = &[
 const CHUNK_HIT_COLS_NO_DISTANCE: &[&str] = &[
     "chunk_id",
     "file_path",
+    "file_type",
     "symbol_qualified",
     "symbol_kind",
     "sym_id",
@@ -80,7 +85,8 @@ impl ChunksTable {
                 })
                 .unwrap_or(0);
 
-            let has_new_cols = existing_schema.field_with_name("sub_chunk_idx").is_ok();
+            let has_new_cols = existing_schema.field_with_name("sub_chunk_idx").is_ok()
+                && existing_schema.field_with_name("file_type").is_ok();
 
             if existing_dim != dim || !has_new_cols {
                 tracing::warn!(
@@ -186,6 +192,27 @@ impl ChunksTable {
         Ok(())
     }
 
+    pub async fn ensure_fts_indexes(&self) -> Result<()> {
+        let params = || {
+            FtsIndexBuilder::default()
+                .base_tokenizer("simple".to_string())
+                .lower_case(true)
+                .ascii_folding(true)
+                .stem(false)
+                .remove_stop_words(false)
+                .with_position(false)
+        };
+        self.table
+            .create_index(&["content"], Index::FTS(params()))
+            .execute()
+            .await?;
+        self.table
+            .create_index(&["symbol_qualified"], Index::FTS(params()))
+            .execute()
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_for_files(&self, paths: &[&str]) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
@@ -206,6 +233,7 @@ impl ChunksTable {
         params: &zti_ann::SearchParams,
         languages: Option<&[String]>,
         path_glob: Option<&str>,
+        include_tests: bool,
     ) -> Result<Vec<ChunkHit>> {
         let mut q = self
             .table
@@ -229,7 +257,7 @@ impl ChunksTable {
             }
         }
 
-        if let Some(filter) = build_lang_path_filter(languages, path_glob) {
+        if let Some(filter) = build_lang_path_filter(languages, path_glob, include_tests) {
             q = q.only_if(filter);
         }
 
@@ -278,6 +306,7 @@ impl ChunksTable {
         ids: &[[u8; 16]],
         languages: Option<&[String]>,
         path_glob: Option<&str>,
+        include_tests: bool,
     ) -> Result<Vec<ChunkHit>> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -292,7 +321,7 @@ impl ChunksTable {
             .collect();
 
         let chunk_filter = format!("chunk_id IN ({})", hex_parts.join(","));
-        let filter = match build_lang_path_filter(languages, path_glob) {
+        let filter = match build_lang_path_filter(languages, path_glob, include_tests) {
             Some(lp) => format!("{} AND {}", chunk_filter, lp),
             None => chunk_filter,
         };
@@ -368,13 +397,14 @@ impl ChunksTable {
         &self,
         languages: Option<&[String]>,
         path_glob: Option<&str>,
+        include_tests: bool,
         mut on_row: F,
     ) -> Result<usize>
     where
         F: FnMut(&[u8; 16], &[u8]) -> Result<bool>,
     {
         let mut filter = String::from("turbo_code IS NOT NULL");
-        if let Some(lp) = build_lang_path_filter(languages, path_glob) {
+        if let Some(lp) = build_lang_path_filter(languages, path_glob, include_tests) {
             filter.push_str(" AND ");
             filter.push_str(&lp);
         }
@@ -428,6 +458,7 @@ impl ChunksTable {
         k: usize,
         languages: Option<&[String]>,
         path_glob: Option<&str>,
+        include_tests: bool,
     ) -> Result<Vec<ChunkHit>> {
         let mut q = self
             .table
@@ -440,7 +471,7 @@ impl ChunksTable {
                 CHUNK_HIT_COLS_WITH_DISTANCE,
             ));
 
-        if let Some(filter) = build_lang_path_filter(languages, path_glob) {
+        if let Some(filter) = build_lang_path_filter(languages, path_glob, include_tests) {
             q = q.only_if(filter);
         }
 
@@ -454,78 +485,36 @@ impl ChunksTable {
         Ok(hits)
     }
 
-    /// Lexical candidate fetch. For each entry in `words` (lowercased,
-    /// alphanumeric+`_`, len ≥ 3) OR-matches `LOWER(symbol_qualified) LIKE
-    /// '%w%'` and `LOWER(content) LIKE '%w%'`. Words that contain SQL
-    /// specials (`'`, `\`, `%`, `_`) are dropped — same policy as
-    /// [`glob_to_like`] — so no escape-handling code is duplicated here.
-    /// The language/path filter, if any, is AND-ed in via
-    /// [`build_lang_path_filter`].
-    ///
-    /// Used by `zti_pipeline::search::search` as the lexical leg of a hybrid
-    /// retrieval. Returns at most `k` rows. Score field on each `ChunkHit`
-    /// is set to `1.0` (no distance column on a non-vector query); the
-    /// keyword boost stage adds the per-word lift on top of that.
+    /// BM25 lexical candidate fetch using LanceDB full-text search. The stream
+    /// order is the BM25 rank order; RRF consumes only the ordinal rank.
     pub async fn lexical_match(
         &self,
-        words: &[&str],
+        query: &str,
         languages: Option<&[String]>,
         path_glob: Option<&str>,
+        include_tests: bool,
         k: usize,
     ) -> Result<Vec<ChunkHit>> {
-        if words.is_empty() || k == 0 {
+        if query.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
 
-        let mut clauses = String::with_capacity(words.len() * 80);
-        let mut emitted: usize = 0;
-        for w in words {
-            if !word_is_sql_safe(w) {
-                continue;
-            }
-            if emitted > 0 {
-                clauses.push_str(" OR ");
-            }
-            let _ = write!(
-                clauses,
-                "(LOWER(symbol_qualified) LIKE '%{w}%' OR LOWER(content) LIKE '%{w}%')",
-            );
-            emitted += 1;
-        }
-        if emitted == 0 {
-            return Ok(Vec::new());
-        }
-
-        let predicate = match build_lang_path_filter(languages, path_glob) {
-            Some(lp) => {
-                let mut s = String::with_capacity(lp.len() + clauses.len() + 16);
-                s.push_str(&lp);
-                s.push_str(" AND (");
-                s.push_str(&clauses);
-                s.push(')');
-                s
-            }
-            None => clauses,
-        };
-
-        let results = self
+        let fts_columns = ["content".to_string(), "symbol_qualified".to_string()];
+        let fts_query = FullTextSearchQuery::new(query.to_string()).with_columns(&fts_columns)?;
+        let mut q = self
             .table
             .query()
-            .only_if(predicate)
+            .full_text_search(fts_query)
             .limit(k)
-            .select(lancedb::query::Select::columns(CHUNK_HIT_COLS_NO_DISTANCE))
-            .execute()
-            .await?;
-
+            .select(lancedb::query::Select::columns(CHUNK_HIT_COLS_NO_DISTANCE));
+        if let Some(pred) = build_lang_path_filter(languages, path_glob, include_tests) {
+            q = q.only_if(pred);
+        }
         let mut hits = Vec::with_capacity(k);
-        let mut stream = std::pin::pin!(results);
+        let mut stream = std::pin::pin!(q.execute().await?);
         while let Some(batch) = stream.next().await {
             decode_batch(&batch?, false, &mut hits);
         }
-        // `decode_batch(.., has_distance=false, ..)` initialised `score = 1.0`
-        // for every row (1 - 0.0). That gives lexical-only hits a uniform
-        // baseline; the keyword boost stage lifts the ones whose query words
-        // actually hit name vs body.
         Ok(hits)
     }
 
@@ -541,28 +530,29 @@ impl ChunksTable {
     }
 }
 
-fn build_lang_path_filter(languages: Option<&[String]>, path_glob: Option<&str>) -> Option<String> {
-    let mut filters = Vec::with_capacity(2);
-    if let Some(langs) = languages
-        && !langs.is_empty()
-    {
+fn build_lang_path_filter(
+    languages: Option<&[String]>,
+    path_glob: Option<&str>,
+    include_tests: bool,
+) -> Option<String> {
+    let mut filters: Vec<Cow<'static, str>> = Vec::with_capacity(3);
+    if !include_tests {
+        // `FileType::Test` is persisted as `1`; keep this borrowed so default
+        // source searches do not allocate for the test-hiding predicate.
+        filters.push(Cow::Borrowed("file_type != 1"));
+    }
+    if let Some(langs) = languages.filter(|langs| !langs.is_empty()) {
         let list = langs
             .iter()
-            .map(|l| format!("'{}'", l))
+            .map(|lang| format!("'{lang}'"))
             .collect::<Vec<_>>()
             .join(",");
-        filters.push(format!("language IN ({})", list));
+        filters.push(Cow::Owned(format!("language IN ({list})")));
     }
-    if let Some(glob) = path_glob
-        && let Some(pattern) = glob_to_like(glob)
-    {
-        filters.push(format!("file_path LIKE '{}'", pattern));
+    if let Some(pattern) = path_glob.and_then(glob_to_like) {
+        filters.push(Cow::Owned(format!("file_path LIKE '{pattern}'")));
     }
-    if filters.is_empty() {
-        None
-    } else {
-        Some(filters.join(" AND "))
-    }
+    (!filters.is_empty()).then(|| filters.join(" AND "))
 }
 
 fn decode_batch(batch: &RecordBatch, has_distance: bool, out: &mut Vec<ChunkHit>) {
@@ -570,6 +560,9 @@ fn decode_batch(batch: &RecordBatch, has_distance: bool, out: &mut Vec<ChunkHit>
     let file_paths = batch
         .column_by_name("file_path")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let file_types = batch
+        .column_by_name("file_type")
+        .and_then(|c| c.as_any().downcast_ref::<UInt8Array>());
     let start_lines = batch
         .column_by_name("start_line")
         .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
@@ -642,11 +635,16 @@ fn decode_batch(batch: &RecordBatch, has_distance: bool, out: &mut Vec<ChunkHit>
         let cid: [u8; 16] = chunk_ids
             .and_then(|a| a.value(i).try_into().ok())
             .unwrap_or([0u8; 16]);
+        let file_type = file_types
+            .and_then(|array| array.is_valid(i).then(|| array.value(i)))
+            .and_then(|value| FileType::try_from(value).ok())
+            .unwrap_or_default();
         out.push(ChunkHit {
             chunk_id: cid,
             file_path: file_paths
                 .map(|a| a.value(i).to_string())
                 .unwrap_or_default(),
+            file_type,
             symbol_qualified: symbol_qualified
                 .map(|a| a.value(i).to_string())
                 .unwrap_or_default(),
@@ -671,7 +669,7 @@ fn decode_batch(batch: &RecordBatch, has_distance: bool, out: &mut Vec<ChunkHit>
 }
 
 fn glob_to_like(glob: &str) -> Option<String> {
-    let mut pattern = String::new();
+    let mut pattern = String::with_capacity(glob.len());
     for ch in glob.chars() {
         match ch {
             '*' => pattern.push('%'),
@@ -681,20 +679,6 @@ fn glob_to_like(glob: &str) -> Option<String> {
         }
     }
     Some(pattern)
-}
-
-/// `true` iff `word` is safe to embed inside a SQL `LIKE '%…%'` predicate
-/// without further escaping. Mirrors [`glob_to_like`]'s reject-set so the
-/// caller never has to think about SQL escaping. Callers tokenize on
-/// `!c.is_alphanumeric() && c != '_'` upstream, so this is a defence-in-depth
-/// check rather than the primary filter.
-fn word_is_sql_safe(word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    !word
-        .bytes()
-        .any(|b| matches!(b, b'\'' | b'\\' | b'%' | b'_'))
 }
 
 #[cfg(test)]
@@ -719,19 +703,21 @@ mod tests {
     }
 
     #[test]
-    fn word_is_sql_safe_accepts_plain_alphanumeric() {
-        assert!(word_is_sql_safe("recip"));
-        assert!(word_is_sql_safe("rq"));
-        assert!(word_is_sql_safe("R3"));
+    fn build_filter_hides_tests_by_default() {
+        assert_eq!(
+            build_lang_path_filter(None, None, false).as_deref(),
+            Some("file_type != 1"),
+        );
+        assert_eq!(build_lang_path_filter(None, None, true), None);
     }
 
     #[test]
-    fn word_is_sql_safe_rejects_sql_specials() {
-        assert!(!word_is_sql_safe("' OR 1=1"));
-        assert!(!word_is_sql_safe(r"back\slash"));
-        assert!(!word_is_sql_safe("with_underscore"));
-        assert!(!word_is_sql_safe("with%percent"));
-        assert!(!word_is_sql_safe(""));
+    fn build_filter_combines_scope_predicates() {
+        let languages = vec!["rust".to_string(), "solidity".to_string()];
+        assert_eq!(
+            build_lang_path_filter(Some(&languages), Some("src/**"), false).as_deref(),
+            Some("file_type != 1 AND language IN ('rust','solidity') AND file_path LIKE 'src/%%'"),
+        );
     }
 
     #[test]
@@ -785,6 +771,7 @@ mod tests {
 pub struct ChunkHit {
     pub chunk_id: [u8; 16],
     pub file_path: String,
+    pub file_type: FileType,
     pub symbol_qualified: String,
     pub symbol_kind: String,
     pub sym_id: u32,

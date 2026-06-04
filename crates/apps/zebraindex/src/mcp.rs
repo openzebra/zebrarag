@@ -7,7 +7,7 @@ use anyhow::Result;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
-use rmcp::{tool, ErrorData, ServiceExt};
+use rmcp::{ErrorData, ServiceExt, tool};
 use tokio::sync::Mutex;
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
@@ -44,6 +44,8 @@ pub struct SearchQueryParams {
     pub path_glob: Option<String>,
     #[schemars(description = "Language filter, e.g. [\"rust\", \"dart\"].")]
     pub languages: Option<Vec<String>>,
+    #[schemars(description = "Include test files in results (default: false).")]
+    pub include_tests: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -63,6 +65,8 @@ pub struct SearchPassageParams {
     pub path_glob: Option<String>,
     #[schemars(description = "Language filter, e.g. [\"rust\", \"dart\"].")]
     pub languages: Option<Vec<String>>,
+    #[schemars(description = "Include test files in results (default: false).")]
+    pub include_tests: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -95,6 +99,16 @@ pub struct DoctorParams {
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectListParams {}
+
+struct SearchCall<'a> {
+    text: String,
+    project: Option<&'a str>,
+    limit: Option<usize>,
+    path_glob: Option<String>,
+    languages: Option<Vec<String>>,
+    include_tests: Option<bool>,
+    mode: SearchMode,
+}
 
 #[derive(Clone)]
 struct ZebraMcpServer {
@@ -144,30 +158,23 @@ impl ZebraMcpServer {
         }
     }
 
-    async fn do_search(
-        &self,
-        text: String,
-        project: Option<&str>,
-        limit: Option<usize>,
-        path_glob: Option<String>,
-        languages: Option<Vec<String>>,
-        mode: SearchMode,
-    ) -> Result<CallToolResult, ErrorData> {
-        let project_root = zti_store::resolve_project(project)
+    async fn do_search(&self, call: SearchCall<'_>) -> Result<CallToolResult, ErrorData> {
+        let project_root = zti_store::resolve_project(call.project)
             .await
             .map_err(|e| internal_err(format!("{e}")))?;
-        let limit = limit.unwrap_or(5);
+        let limit = call.limit.unwrap_or(5);
 
         let mut req = SearchReq {
             project_root,
-            query: text,
+            query: call.text,
             limit,
             offset: None,
-            languages,
-            path_glob,
+            languages: call.languages,
+            path_glob: call.path_glob,
             refresh_index: false,
             exhaustive: false,
-            mode,
+            include_tests: call.include_tests.unwrap_or(false),
+            mode: call.mode,
         };
 
         let results = self.send_search(req.clone()).await?;
@@ -301,14 +308,15 @@ impl ZebraMcpServer {
         &self,
         Parameters(params): Parameters<SearchQueryParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_search(
-            params.text,
-            params.project.as_deref(),
-            params.limit,
-            params.path_glob,
-            params.languages,
-            SearchMode::Query,
-        )
+        self.do_search(SearchCall {
+            text: params.text,
+            project: params.project.as_deref(),
+            limit: params.limit,
+            path_glob: params.path_glob,
+            languages: params.languages,
+            include_tests: params.include_tests,
+            mode: SearchMode::Query,
+        })
         .await
     }
 
@@ -320,14 +328,15 @@ impl ZebraMcpServer {
         &self,
         Parameters(params): Parameters<SearchPassageParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_search(
-            params.text,
-            params.project.as_deref(),
-            params.limit,
-            params.path_glob,
-            params.languages,
-            SearchMode::Passage,
-        )
+        self.do_search(SearchCall {
+            text: params.text,
+            project: params.project.as_deref(),
+            limit: params.limit,
+            path_glob: params.path_glob,
+            languages: params.languages,
+            include_tests: params.include_tests,
+            mode: SearchMode::Passage,
+        })
         .await
     }
 
@@ -443,7 +452,7 @@ impl rmcp::ServerHandler for ZebraMcpServer {
                 Use this to find code that behaves similarly to a specific snippet or error trace you have encountered.\n\
              \n\
              ## Managing Dependencies & Noise\n\
-             Be aware that search results may include external dependencies, standard libraries, or third-party packages. Always prioritize results from the core project source. **Use the `path_glob` parameter to restrict searches to the primary source directories and filter out package manager directories, test suites, or generated code when necessary.**\n\
+             External dependency directories are excluded at index time. Test files are indexed but hidden by default; set `include_tests: true` only when you explicitly need test code. Use `path_glob` to restrict searches to a specific source area when necessary.\n\
              \n\
              ## Pro Tips\n\
              * The `project` parameter auto-resolves if omitted. You can pass a name, index number, or root path.\n\

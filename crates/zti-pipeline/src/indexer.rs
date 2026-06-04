@@ -592,6 +592,7 @@ pub async fn index_project(
                     let mut chunk_id_builder = FixedSizeBinaryBuilder::new(16);
                     let mut file_path_builder = StringBuilder::with_capacity(n, n * 64);
                     let mut language_builder = StringBuilder::with_capacity(n, n * 8);
+                    let mut file_type_builder = UInt8Array::builder(n);
                     let mut symbol_qualified_builder = StringBuilder::with_capacity(n, n * 64);
                     let mut symbol_kind_builder = StringBuilder::with_capacity(n, n * 16);
                     let mut sym_id_builder = UInt32Array::builder(n);
@@ -609,6 +610,11 @@ pub async fn index_project(
                     for (i, &idx) in idxs.iter().enumerate() {
                         let (chunk, lang, fidx) = &all_pending[idx];
                         pending_file_idxs.push(*fidx);
+                        let file_type = need_reindex
+                            .get(*fidx as usize)
+                            .and_then(|rel| snapshots.get(rel))
+                            .map(|snap| snap.file_type)
+                            .unwrap_or_default();
                         let emb = embs.row(i);
 
                         if emb.iter().any(|v| v.is_nan()) {
@@ -647,6 +653,7 @@ pub async fn index_project(
                         chunk_id_builder.append_value(chunk_id)?;
                         file_path_builder.append_value(&chunk.file);
                         language_builder.append_value(lang);
+                        file_type_builder.append_value(file_type.into());
                         symbol_qualified_builder.append_value(&chunk.qualified);
                         symbol_kind_builder.append_value(chunk.kind.as_str());
                         sym_id_builder.append_value(chunk.sym_id);
@@ -686,6 +693,7 @@ pub async fn index_project(
                                 std::sync::Arc::new(chunk_id_builder.finish()),
                                 std::sync::Arc::new(file_path_builder.finish()),
                                 std::sync::Arc::new(language_builder.finish()),
+                                std::sync::Arc::new(file_type_builder.finish()),
                                 std::sync::Arc::new(symbol_qualified_builder.finish()),
                                 std::sync::Arc::new(symbol_kind_builder.finish()),
                                 std::sync::Arc::new(sym_id_builder.finish()),
@@ -734,13 +742,14 @@ pub async fn index_project(
             reporter.inc(n_batch as u64);
             cursor = end;
         }
-
     } // if !paused
 
     // Flush pending batches regardless of pause — preserves embedded chunks
     // and checkpoints completed files so a resumed run skips them.
     if !pending_batches.is_empty() {
-        chunks_table.append_batches(std::mem::take(&mut pending_batches)).await?;
+        chunks_table
+            .append_batches(std::mem::take(&mut pending_batches))
+            .await?;
         checkpoint_completed(
             &files_table,
             &snapshots,
@@ -783,6 +792,7 @@ pub async fn index_project(
             "building search index",
         );
         chunks_table.optimize().await?;
+        chunks_table.ensure_fts_indexes().await?;
         chunks_table.build_index(&params).await?;
     }
 

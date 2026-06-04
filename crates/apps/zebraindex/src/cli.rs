@@ -199,6 +199,7 @@ pub async fn run(
                     path_glob: glob,
                     refresh_index: false,
                     exhaustive,
+                    include_tests: false,
                     mode,
                 }))
                 .await?;
@@ -243,6 +244,7 @@ pub async fn run(
                         path_glob: None,
                         refresh_index: false,
                         exhaustive: false,
+                        include_tests: false,
                         mode: SearchMode::default(),
                     }))
                     .await?;

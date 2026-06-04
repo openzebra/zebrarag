@@ -38,6 +38,7 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             limit: req.limit,
             languages: req.languages.as_deref(),
             path_glob: req.path_glob.as_deref(),
+            include_tests: req.include_tests,
         };
 
         let query_emb = match req.mode {
@@ -45,7 +46,7 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             SearchMode::Passage => engine.embed_passage_async(&req.query).await?,
         };
 
-        let hits = if req.exhaustive {
+        let outcome = if req.exhaustive {
             zti_pipeline::search::search_exhaustive(
                 &req.query,
                 &query_emb,
@@ -70,6 +71,8 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             )
             .await?
         };
+        let hits = outcome.hits;
+        let confidence = outcome.confidence;
 
         let chunks_table = project.db.chunks_table(engine.dim()).await?;
 
@@ -126,6 +129,7 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             hits: search_hits,
             appendix,
             total,
+            confidence,
         })
     })
     .await;
