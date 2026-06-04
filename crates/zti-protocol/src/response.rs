@@ -67,33 +67,6 @@ pub struct IndexingProgress {
     pub message: String,
 }
 
-/// How much to trust this result set, from the vector leg's top similarity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Confidence {
-    #[default]
-    High,
-    Medium,
-    Low,
-}
-
-const CONF_HIGH: f32 = 0.80;
-const CONF_LOW: f32 = 0.60;
-
-impl Confidence {
-    /// Bucket from the top cosine similarity (≈[0,1]). Pure, total, no panic.
-    #[must_use]
-    pub fn from_top_cosine(top: f32) -> Self {
-        if top >= CONF_HIGH {
-            Self::High
-        } else if top >= CONF_LOW {
-            Self::Medium
-        } else {
-            Self::Low
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub chunk_id: [u8; 16],
@@ -112,8 +85,6 @@ pub struct SearchResults {
     pub hits: Vec<SearchHit>,
     pub appendix: Vec<SearchHit>,
     pub total: usize,
-    #[serde(default)]
-    pub confidence: Confidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

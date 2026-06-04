@@ -22,16 +22,40 @@ impl LanguageFrontend for JavaScriptFrontend {
     }
 }
 
+fn import_module_stem(import_stmt: Node, source: &str) -> Option<String> {
+    const EXTENSIONS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+
+    let src = import_stmt.child_by_field_name("source")?;
+    let raw = src.utf8_text(source.as_bytes()).ok()?;
+    let spec = raw.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    let last = match spec.rsplit('/').next() {
+        Some(segment) => segment,
+        None => spec,
+    };
+    let stem = match EXTENSIONS
+        .iter()
+        .find_map(|extension| last.strip_suffix(extension))
+    {
+        Some(stripped) => stripped,
+        None => last,
+    };
+
+    (!stem.is_empty() && stem != "." && stem != "..").then(|| stem.to_string())
+}
+
 fn collect_js_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
-    if node.kind() == "import_statement" {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("");
+    if node.kind() == "import_statement"
+        && let Some(module) = import_module_stem(node, source)
+    {
         for child in node.children(&mut node.walk()) {
             if child.kind() == "import_clause" {
                 for cc in child.children(&mut child.walk()) {
                     match cc.kind() {
                         "identifier" => {
                             if let Ok(name) = cc.utf8_text(source.as_bytes()) {
-                                imports.entry(name.to_string()).or_insert(text.to_string());
+                                imports
+                                    .entry(name.to_string())
+                                    .or_insert_with(|| module.clone());
                             }
                         }
                         "named_imports" => {
@@ -43,7 +67,9 @@ fn collect_js_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                                     if let Some(kn) = key
                                         && let Ok(name) = kn.utf8_text(source.as_bytes())
                                     {
-                                        imports.entry(name.to_string()).or_insert(text.to_string());
+                                        imports
+                                            .entry(name.to_string())
+                                            .or_insert_with(|| module.clone());
                                     }
                                 }
                             }
@@ -56,7 +82,9 @@ fn collect_js_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                             if let Some(id) = ns_name
                                 && let Ok(name) = id.utf8_text(source.as_bytes())
                             {
-                                imports.entry(name.to_string()).or_insert(text.to_string());
+                                imports
+                                    .entry(name.to_string())
+                                    .or_insert_with(|| module.clone());
                             }
                         }
                         _ => {}
@@ -163,28 +191,28 @@ mod tests {
     fn javascript_import_default() {
         let source = "import React from 'react';";
         let (_, _, imports) = parse_js(source);
-        assert_eq!(imports.get("React"), Some(&source.to_string()));
+        assert_eq!(imports.get("React"), Some(&"react".to_string()));
     }
 
     #[test]
     fn javascript_import_named() {
         let source = "import { Foo, Bar } from './mod';";
         let (_, _, imports) = parse_js(source);
-        assert!(imports.contains_key("Foo"));
-        assert!(imports.contains_key("Bar"));
+        assert_eq!(imports.get("Foo"), Some(&"mod".to_string()));
+        assert_eq!(imports.get("Bar"), Some(&"mod".to_string()));
     }
 
     #[test]
     fn javascript_import_namespace() {
         let source = "import * as fs from 'fs';";
         let (_, _, imports) = parse_js(source);
-        assert_eq!(imports.get("fs"), Some(&source.to_string()));
+        assert_eq!(imports.get("fs"), Some(&"fs".to_string()));
     }
 
     #[test]
     fn javascript_import_aliased() {
         let source = "import { Foo as Bar } from './mod';";
         let (_, _, imports) = parse_js(source);
-        assert_eq!(imports.get("Bar"), Some(&source.to_string()));
+        assert_eq!(imports.get("Bar"), Some(&"mod".to_string()));
     }
 }

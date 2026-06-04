@@ -1,8 +1,9 @@
 use std::fmt::Write as _;
 
-use crate::response::{Confidence, SearchHit, SearchResults};
+use crate::response::{SearchHit, SearchResults};
 
-const DEFAULT_CHAR_BUDGET: usize = 80_000;
+const DEFAULT_CHAR_BUDGET: usize = 12_000;
+const MAX_LINES_PER_HIT: usize = 40;
 
 fn count_digits(n: usize) -> usize {
     if n == 0 {
@@ -36,23 +37,6 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
     );
     let mut out = String::with_capacity(est);
 
-    match results.confidence {
-        Confidence::High => {}
-        Confidence::Medium => out.push_str(
-            "⚠ medium confidence — try searchDep for exact symbols, or refine the query\n\n",
-        ),
-        Confidence::Low => out.push_str(
-            "⚠ low confidence — try searchDep for exact symbols, or refine the query\n\n",
-        ),
-    }
-
-    let _ = writeln!(
-        out,
-        "({} hits, {} related):\n",
-        results.hits.len(),
-        results.appendix.len()
-    );
-
     let mut omitted = 0usize;
 
     for (i, hit) in results.hits.iter().enumerate() {
@@ -72,7 +56,7 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
     }
 
     if !results.appendix.is_empty() && out.len() < budget {
-        out.push_str("-- deps:\n");
+        out.push_str("-- related:\n");
         for hit in &results.appendix {
             let hdr_len = hit.file_path.len()
                 + 1
@@ -116,7 +100,11 @@ fn write_hit_budgeted_inner(out: &mut String, hit: &SearchHit, hdr_len: usize, b
         return;
     }
     let mut written = 0usize;
-    for line in hit.content.lines() {
+    for (n, line) in hit.content.lines().enumerate() {
+        if n >= MAX_LINES_PER_HIT {
+            out.push_str("    …\n");
+            return;
+        }
         let cost = 4 + line.len() + 1;
         if written + cost > remaining {
             out.push_str("    ...\n");
@@ -163,10 +151,8 @@ mod tests {
                 "pub fn i16_negative_mask(x: i16) -> i16 { -(x as i16) }",
             )],
             total: 1,
-            confidence: Confidence::High,
         };
         let out = format_search_results(&r);
-        assert!(out.contains("(1 hits, 1 related)"), "header: {}", out);
         assert!(out.contains("#1 0.7407\n"), "hit rank line: {}", out);
         assert!(
             out.contains("src/poly/rq.rs:127-203\n"),
@@ -174,7 +160,7 @@ mod tests {
             out
         );
         assert!(out.contains("    pub fn recip"), "body indent: {}", out);
-        assert!(out.contains("-- deps:\n"), "appendix marker: {}", out);
+        assert!(out.contains("-- related:\n"), "appendix marker: {}", out);
         assert!(
             out.contains("    pub fn i16_negative_mask"),
             "appendix body indent: {}",
@@ -188,7 +174,6 @@ mod tests {
             hits: Vec::new(),
             appendix: Vec::new(),
             total: 0,
-            confidence: Confidence::High,
         };
         let out = format_search_results(&r);
         assert!(out.contains("no results"), "{}", out);
@@ -203,7 +188,6 @@ mod tests {
             hits,
             appendix: Vec::with_capacity(0),
             total: 50,
-            confidence: Confidence::High,
         };
         let out = format_search_results_budgeted(&r, 500);
         assert!(out.len() <= 500, "budget overshoot: {}", out.len());

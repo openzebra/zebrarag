@@ -8,7 +8,7 @@ use zti_store::chunks_table::ChunkHit;
 use crate::handlers::with_project;
 use crate::state::DaemonState;
 
-const APPENDIX_CAP: usize = 8;
+const APPENDIX_CAP: usize = 3;
 
 pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
     let result = with_project(state, &req.project_root, |project| async move {
@@ -72,7 +72,6 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             .await?
         };
         let hits = outcome.hits;
-        let confidence = outcome.confidence;
 
         let chunks_table = project.db.chunks_table(engine.dim()).await?;
 
@@ -129,7 +128,6 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             hits: search_hits,
             appendix,
             total,
-            confidence,
         })
     })
     .await;

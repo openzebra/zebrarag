@@ -5,8 +5,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use anyhow::{Result, anyhow};
 
 use zti_ann::{AnnCache, AnnHandle, AnnIndexBuilder, SearchMethod, SearchParams};
+use zti_common::file_type::FileType;
 use zti_embed::EmbedEngine;
-use zti_protocol::response::Confidence;
 use zti_rerank::TurboReranker;
 use zti_rerank::gpu::{
     BATCH_SIZE, GpuTurboScratch, TurboCodeBatch, TurboScorerCache, parse_turbo_code_into,
@@ -19,6 +19,17 @@ use zti_common::chunk_strategy::ChunkStrategy;
 
 const KNN_OVERFETCH_MULT: usize = 12;
 const DIVERSITY_PENALTY: f32 = 0.04;
+
+#[inline]
+const fn file_type_rank(ft: FileType) -> u8 {
+    match ft {
+        FileType::Source => 0,
+        FileType::Config => 1,
+        FileType::Doc => 2,
+        FileType::Test => 3,
+    }
+}
+
 #[inline]
 fn push_scored(
     heap: &mut BinaryHeap<Reverse<ScoredEntry>>,
@@ -47,7 +58,6 @@ pub struct Hit {
 
 pub struct SearchOutcome {
     pub hits: Vec<Hit>,
-    pub confidence: Confidence,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -260,7 +270,6 @@ pub async fn search(
         ),
     );
     let vec_hits = vec_res?;
-    let top_cosine = vec_hits.first().map_or(0.0, |hit| hit.score);
     let lex_hits = lex_res?;
     let mut candidates = materialize_fused_hits(vec_hits, lex_hits, raw_k);
 
@@ -282,10 +291,7 @@ pub async fn search(
             hits.push(Hit { chunk, score });
         }
     }
-    Ok(SearchOutcome {
-        hits,
-        confidence: Confidence::from_top_cosine(top_cosine),
-    })
+    Ok(SearchOutcome { hits })
 }
 
 #[inline]
@@ -299,7 +305,16 @@ fn diversify_by_parent_in_place(ranked: &mut Vec<(usize, f32)>, candidates: &[Ch
             *n += 1;
         }
     }
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        let ta = candidates
+            .get(a.0)
+            .map_or(0, |c| file_type_rank(c.file_type));
+        let tb = candidates
+            .get(b.0)
+            .map_or(0, |c| file_type_rank(c.file_type));
+        ta.cmp(&tb)
+            .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+    });
     ranked.truncate(k);
 }
 
@@ -337,18 +352,19 @@ pub async fn search_exhaustive(
         ),
     );
     let vec_hits = vec_res?;
-    let top_cosine = vec_hits.first().map_or(0.0, |hit| hit.score);
-    let candidates = materialize_fused_hits(vec_hits, lex_res?, raw_k);
+    let mut candidates = materialize_fused_hits(vec_hits, lex_res?, raw_k);
+    candidates.sort_by(|a, b| {
+        file_type_rank(a.file_type)
+            .cmp(&file_type_rank(b.file_type))
+            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal))
+    });
 
     let mut hits: Vec<Hit> = Vec::with_capacity(candidates.len().min(opts.limit));
     candidates.into_iter().take(opts.limit).for_each(|chunk| {
         let score = chunk.score;
         hits.push(Hit { chunk, score });
     });
-    Ok(SearchOutcome {
-        hits,
-        confidence: Confidence::from_top_cosine(top_cosine),
-    })
+    Ok(SearchOutcome { hits })
 }
 
 async fn rebuild(
@@ -507,10 +523,14 @@ mod tq_tests {
     use super::*;
 
     fn make_candidate(parent_sym_id: Option<u32>) -> ChunkHit {
+        make_candidate_with_file_type(parent_sym_id, FileType::Source)
+    }
+
+    fn make_candidate_with_file_type(parent_sym_id: Option<u32>, file_type: FileType) -> ChunkHit {
         ChunkHit {
             chunk_id: [0u8; 16],
             file_path: String::new(),
-            file_type: zti_common::file_type::FileType::Source,
+            file_type,
             symbol_qualified: String::new(),
             symbol_kind: String::new(),
             sym_id: 0,
@@ -579,5 +599,16 @@ mod tq_tests {
         let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(0);
         diversify_by_parent_in_place(&mut ranked, &candidates, 5);
         assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn diversify_orders_source_before_doc_for_equal_scores() {
+        let candidates = vec![
+            make_candidate_with_file_type(None, FileType::Doc),
+            make_candidate_with_file_type(None, FileType::Source),
+        ];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 1.0), (1, 1.0)];
+        diversify_by_parent_in_place(&mut ranked, &candidates, 2);
+        assert_eq!(ranked.first().map(|entry| entry.0), Some(1));
     }
 }

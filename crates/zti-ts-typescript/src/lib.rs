@@ -22,9 +22,31 @@ impl LanguageFrontend for TypeScriptFrontend {
     }
 }
 
+fn import_module_stem(import_stmt: Node, source: &str) -> Option<String> {
+    const EXTENSIONS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+
+    let src = import_stmt.child_by_field_name("source")?;
+    let raw = src.utf8_text(source.as_bytes()).ok()?;
+    let spec = raw.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    let last = match spec.rsplit('/').next() {
+        Some(segment) => segment,
+        None => spec,
+    };
+    let stem = match EXTENSIONS
+        .iter()
+        .find_map(|extension| last.strip_suffix(extension))
+    {
+        Some(stripped) => stripped,
+        None => last,
+    };
+
+    (!stem.is_empty() && stem != "." && stem != "..").then(|| stem.to_string())
+}
+
 fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, String>) {
-    if node.kind() == "import_statement" {
-        let text = node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+    if node.kind() == "import_statement"
+        && let Some(module) = import_module_stem(node, source)
+    {
         for child in node.children(&mut node.walk()) {
             if child.kind() == "import_clause" {
                 for cc in child.children(&mut child.walk()) {
@@ -33,7 +55,7 @@ fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                     {
                         imports
                             .entry(name.to_string())
-                            .or_insert_with(|| text.clone());
+                            .or_insert_with(|| module.clone());
                     }
                     if cc.kind() == "named_imports" || cc.kind() == "import_list" {
                         for specifier in cc.children(&mut cc.walk()) {
@@ -46,7 +68,7 @@ fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                                 {
                                     imports
                                         .entry(name.to_string())
-                                        .or_insert_with(|| text.clone());
+                                        .or_insert_with(|| module.clone());
                                 }
                             }
                         }
@@ -56,7 +78,7 @@ fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                             if let Ok(name) = id.utf8_text(source.as_bytes()) {
                                 imports
                                     .entry(name.to_string())
-                                    .or_insert_with(|| text.clone());
+                                    .or_insert_with(|| module.clone());
                             }
                         } else {
                             let mut saw_star = false;
@@ -69,7 +91,7 @@ fn collect_ts_imports(node: Node, source: &str, imports: &mut HashMap<String, St
                                 {
                                     imports
                                         .entry(name.to_string())
-                                        .or_insert_with(|| text.clone());
+                                        .or_insert_with(|| module.clone());
                                 }
                             }
                         }
@@ -279,62 +301,38 @@ mod tests {
     fn named_imports() {
         let source = "import { Foo, Bar } from './module';";
         let (_, _, imports) = parse_ts(source);
-        assert_eq!(
-            imports.get("Foo"),
-            Some(&"import { Foo, Bar } from './module';".to_string())
-        );
-        assert_eq!(
-            imports.get("Bar"),
-            Some(&"import { Foo, Bar } from './module';".to_string())
-        );
+        assert_eq!(imports.get("Foo"), Some(&"module".to_string()));
+        assert_eq!(imports.get("Bar"), Some(&"module".to_string()));
     }
 
     #[test]
     fn default_import() {
         let source = "import React from 'react';";
         let (_, _, imports) = parse_ts(source);
-        assert_eq!(
-            imports.get("React"),
-            Some(&"import React from 'react';".to_string())
-        );
+        assert_eq!(imports.get("React"), Some(&"react".to_string()));
     }
 
     #[test]
     fn namespace_import() {
         let source = "import * as fs from 'fs';";
         let (_, _, imports) = parse_ts(source);
-        assert_eq!(
-            imports.get("fs"),
-            Some(&"import * as fs from 'fs';".to_string())
-        );
+        assert_eq!(imports.get("fs"), Some(&"fs".to_string()));
     }
 
     #[test]
     fn mixed_import() {
         let source = "import React, { useState, useEffect } from 'react';";
         let (_, _, imports) = parse_ts(source);
-        assert_eq!(
-            imports.get("React"),
-            Some(&"import React, { useState, useEffect } from 'react';".to_string())
-        );
-        assert_eq!(
-            imports.get("useState"),
-            Some(&"import React, { useState, useEffect } from 'react';".to_string())
-        );
-        assert_eq!(
-            imports.get("useEffect"),
-            Some(&"import React, { useState, useEffect } from 'react';".to_string())
-        );
+        assert_eq!(imports.get("React"), Some(&"react".to_string()));
+        assert_eq!(imports.get("useState"), Some(&"react".to_string()));
+        assert_eq!(imports.get("useEffect"), Some(&"react".to_string()));
     }
 
     #[test]
     fn aliased_import() {
         let source = "import { Foo as Bar } from './utils';";
         let (_, _, imports) = parse_ts(source);
-        assert_eq!(
-            imports.get("Bar"),
-            Some(&"import { Foo as Bar } from './utils';".to_string())
-        );
+        assert_eq!(imports.get("Bar"), Some(&"utils".to_string()));
     }
 
     #[test]
