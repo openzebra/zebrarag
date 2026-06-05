@@ -13,6 +13,8 @@ pub fn detect_from_path(path: &Path) -> Option<Language> {
         "py" => Some(Language::Python),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         "go" => Some(Language::Go),
+        "ml" => Some(Language::OCaml),
+        "mli" => Some(Language::OCamlInterface),
         _ => None,
     }
 }

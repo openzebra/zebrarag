@@ -7,6 +7,7 @@ use zti_ts_core::walker::LanguageFrontend;
 use zti_ts_dart::DartFrontend;
 use zti_ts_go::GoFrontend;
 use zti_ts_javascript::JavaScriptFrontend;
+use zti_ts_ocaml::OCamlFrontend;
 use zti_ts_python::PythonFrontend;
 use zti_ts_rust::RustFrontend;
 use zti_ts_solidity::SolidityFrontend;
@@ -22,6 +23,8 @@ pub enum Language {
     Python,
     JavaScript,
     Go,
+    OCaml,
+    OCamlInterface,
 }
 
 impl Language {
@@ -35,6 +38,8 @@ impl Language {
             Language::Python => "python",
             Language::JavaScript => "javascript",
             Language::Go => "go",
+            Language::OCaml => "ocaml",
+            Language::OCamlInterface => "ocaml_interface",
         }
     }
 }
@@ -47,6 +52,7 @@ pub enum Frontend {
     Python(PythonFrontend),
     JavaScript(JavaScriptFrontend),
     Go(GoFrontend),
+    OCaml(OCamlFrontend),
 }
 
 impl LanguageFrontend for Frontend {
@@ -59,6 +65,7 @@ impl LanguageFrontend for Frontend {
             Frontend::Python(f) => f.language(),
             Frontend::JavaScript(f) => f.language(),
             Frontend::Go(f) => f.language(),
+            Frontend::OCaml(f) => f.language(),
         }
     }
 
@@ -71,6 +78,7 @@ impl LanguageFrontend for Frontend {
             Frontend::Python(f) => f.config(),
             Frontend::JavaScript(f) => f.config(),
             Frontend::Go(f) => f.config(),
+            Frontend::OCaml(f) => f.config(),
         }
     }
 
@@ -83,6 +91,7 @@ impl LanguageFrontend for Frontend {
             Frontend::Python(f) => f.extract_imports(root, source),
             Frontend::JavaScript(f) => f.extract_imports(root, source),
             Frontend::Go(f) => f.extract_imports(root, source),
+            Frontend::OCaml(f) => f.extract_imports(root, source),
         }
     }
 
@@ -95,6 +104,7 @@ impl LanguageFrontend for Frontend {
             Frontend::Python(f) => f.parse(source, file_idx, id_start),
             Frontend::JavaScript(f) => f.parse(source, file_idx, id_start),
             Frontend::Go(f) => f.parse(source, file_idx, id_start),
+            Frontend::OCaml(f) => f.parse(source, file_idx, id_start),
         }
     }
 }
@@ -108,5 +118,7 @@ pub fn frontend_for(lang: Language) -> Frontend {
         Language::Python => Frontend::Python(PythonFrontend),
         Language::JavaScript => Frontend::JavaScript(JavaScriptFrontend),
         Language::Go => Frontend::Go(GoFrontend),
+        Language::OCaml => Frontend::OCaml(OCamlFrontend { interface: false }),
+        Language::OCamlInterface => Frontend::OCaml(OCamlFrontend { interface: true }),
     }
 }

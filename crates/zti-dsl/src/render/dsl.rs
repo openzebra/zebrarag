@@ -67,6 +67,7 @@ pub(crate) fn lang_label(lang: Language) -> &'static str {
         Language::Python => "Python",
         Language::JavaScript => "JavaScript",
         Language::Go => "Go",
+        Language::OCaml | Language::OCamlInterface => "OCaml",
     }
 }
 
@@ -178,6 +179,8 @@ static TS_PREFIXES: &[&str] = &[
 
 static GO_PREFIXES: &[&str] = &["func ", "type "];
 
+static OCAML_PREFIXES: &[&str] = &["let ", "rec ", "val ", "type ", "module ", "external "];
+
 static PYTHON_PREFIXES: &[&str] = &["async ", "def ", "class "];
 
 // Deliberately omits return types ("void ", "String ", "Future<…> ", …):
@@ -248,6 +251,7 @@ fn format_signature(sig: &str, lang: Language) -> &str {
         Language::Python => PYTHON_PREFIXES,
         Language::JavaScript => TS_PREFIXES,
         Language::Go => GO_PREFIXES,
+        Language::OCaml | Language::OCamlInterface => OCAML_PREFIXES,
     };
     strip_prefixes_loop(trimmed, prefixes).trim_end_matches(SIG_TAIL_TRIM)
 }

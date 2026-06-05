@@ -33,6 +33,7 @@ pub struct LangConfig {
     pub impl_node: Option<&'static str>,
     pub symbol_name_skip: &'static [&'static str],
     pub symbol_name_skip_prefix: &'static [&'static str],
+    pub skip_paramless_functions_inside_fn: bool,
     pub terminal_node_kinds: &'static [&'static str],
 }
 
@@ -68,6 +69,12 @@ fn first_named_identifier(node: &Node, source: &str) -> Option<String> {
                 | "field_identifier"
                 | "property_identifier"
                 | "private_property_identifier"
+                | "value_name"
+                | "module_name"
+                | "module_type_name"
+                | "type_constructor"
+                | "class_name"
+                | "method_name"
         ) && let Ok(text) = child.utf8_text(source.as_bytes())
             && !text.is_empty()
         {
@@ -271,6 +278,7 @@ pub static RUST_CONFIG: LangConfig = LangConfig {
     impl_node: Some("impl_item"),
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &[
         "line_comment",
         "block_comment",
@@ -359,6 +367,7 @@ pub static TYPESCRIPT_CONFIG: LangConfig = LangConfig {
     impl_node: None,
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &["comment", "string", "template_string"],
 };
 
@@ -475,6 +484,7 @@ pub static DART_CONFIG: LangConfig = LangConfig {
     // root file; the prefix sweep below handles every per-locale subclass.
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &["AppLocalizations"],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &[
         "comment",
         "block_comment",
@@ -522,6 +532,7 @@ pub static GO_CONFIG: LangConfig = LangConfig {
     impl_node: None,
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &[
         "comment",
         "interpreted_string_literal",
@@ -573,6 +584,7 @@ pub static JAVASCRIPT_CONFIG: LangConfig = LangConfig {
     impl_node: None,
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &["comment", "string", "template_string"],
 };
 
@@ -617,7 +629,130 @@ pub static PYTHON_CONFIG: LangConfig = LangConfig {
     impl_node: None,
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &["comment", "string"],
+};
+
+pub static OCAML_CONFIG: LangConfig = LangConfig {
+    scope_nodes: &[
+        "let_binding",
+        "type_binding",
+        "module_binding",
+        "module_type_definition",
+        "class_binding",
+        "method_definition",
+        "external",
+    ],
+    name_fields: &[
+        NameField {
+            node_kind: "let_binding",
+            field: "pattern",
+        },
+        NameField {
+            node_kind: "type_binding",
+            field: "name",
+        },
+        NameField {
+            node_kind: "module_binding",
+            field: "name",
+        },
+        NameField {
+            node_kind: "module_type_definition",
+            field: "name",
+        },
+        NameField {
+            node_kind: "class_binding",
+            field: "name",
+        },
+        NameField {
+            node_kind: "method_definition",
+            field: "name",
+        },
+        NameField {
+            node_kind: "external",
+            field: "name",
+        },
+    ],
+    kind_map: &[
+        ("let_binding", Kind::Function),
+        ("type_binding", Kind::TypeAlias),
+        ("module_binding", Kind::Module),
+        ("module_type_definition", Kind::Interface),
+        ("class_binding", Kind::Class),
+        ("method_definition", Kind::Method),
+        ("external", Kind::Function),
+    ],
+    container_kinds: &[Kind::Class, Kind::Interface, Kind::Module],
+    call_nodes: &["application_expression"],
+    call_field: "",
+    ref_node: "value_name",
+    ref_field: "",
+    import_node: "open_module",
+    extra_skip_dirs: &["_build"],
+    transparent_scope_kinds: &[],
+    extract_docs: false,
+    instance_field_kinds: &[],
+    no_retag_kinds: &[],
+    impl_node: None,
+    symbol_name_skip: &[],
+    symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: true,
+    terminal_node_kinds: &["comment", "string", "quoted_string", "character"],
+};
+
+pub static OCAML_INTERFACE_CONFIG: LangConfig = LangConfig {
+    scope_nodes: &[
+        "value_specification",
+        "method_specification",
+        "type_binding",
+        "module_binding",
+        "module_type_definition",
+    ],
+    name_fields: &[
+        NameField {
+            node_kind: "value_specification",
+            field: "name",
+        },
+        NameField {
+            node_kind: "method_specification",
+            field: "name",
+        },
+        NameField {
+            node_kind: "type_binding",
+            field: "name",
+        },
+        NameField {
+            node_kind: "module_binding",
+            field: "name",
+        },
+        NameField {
+            node_kind: "module_type_definition",
+            field: "name",
+        },
+    ],
+    kind_map: &[
+        ("value_specification", Kind::Function),
+        ("method_specification", Kind::Method),
+        ("type_binding", Kind::TypeAlias),
+        ("module_binding", Kind::Module),
+        ("module_type_definition", Kind::Interface),
+    ],
+    container_kinds: &[Kind::Class, Kind::Interface, Kind::Module],
+    call_nodes: &[],
+    call_field: "",
+    ref_node: "value_name",
+    ref_field: "",
+    import_node: "open_module",
+    extra_skip_dirs: &["_build"],
+    transparent_scope_kinds: &[],
+    extract_docs: false,
+    instance_field_kinds: &[],
+    no_retag_kinds: &[],
+    impl_node: None,
+    symbol_name_skip: &[],
+    symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
+    terminal_node_kinds: &["comment", "string", "quoted_string", "character"],
 };
 
 pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
@@ -728,6 +863,7 @@ pub static SOLIDITY_CONFIG: LangConfig = LangConfig {
     impl_node: None,
     symbol_name_skip: &[],
     symbol_name_skip_prefix: &[],
+    skip_paramless_functions_inside_fn: false,
     terminal_node_kinds: &[
         "comment",
         "string",

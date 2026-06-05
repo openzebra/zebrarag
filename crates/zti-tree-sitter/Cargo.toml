@@ -17,6 +17,7 @@ zti-ts-solidity.workspace = true
 zti-ts-python.workspace = true
 zti-ts-javascript.workspace = true
 zti-ts-go.workspace = true
+zti-ts-ocaml.workspace = true
 globset.workspace = true
 
 [dev-dependencies]

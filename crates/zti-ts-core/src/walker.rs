@@ -263,6 +263,11 @@ fn walk_node(
             return;
         }
 
+        if should_skip_paramless_function_inside_fn(&node, state, kind) {
+            walk_children(cursor, symbols, name_map, state);
+            return;
+        }
+
         if state.config.instance_field_kinds.contains(&node.kind())
             && !state.is_inside_fn()
             && state.is_inside_container()
@@ -362,6 +367,19 @@ fn walk_node(
     }
 
     walk_children(cursor, symbols, name_map, state);
+}
+
+fn should_skip_paramless_function_inside_fn(node: &Node, state: &WalkState, kind: Kind) -> bool {
+    state.config.skip_paramless_functions_inside_fn
+        && kind == Kind::Function
+        && state.is_inside_fn()
+        && !has_child_kind(node, "parameter")
+}
+
+fn has_child_kind(node: &Node, child_kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| child.kind() == child_kind)
 }
 
 fn lines_of(node: &Node) -> (u32, u32) {
