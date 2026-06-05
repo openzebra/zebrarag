@@ -259,6 +259,7 @@ Each language gets a dedicated tree-sitter parser that extracts symbols and call
 | **Dart** | `.dart` | functions, classes, methods, constructors, getters/setters |
 | **Go** | `.go` | functions, methods, structs, interfaces, type aliases |
 | **Solidity** | `.sol` | contracts, functions, events, modifiers, structs, enums |
+| **OCaml** | `.ml`, `.mli` | functions (let/value), types, modules, classes, methods, module types |
 
 ---
 
@@ -352,8 +353,8 @@ When running as an MCP server, Zebra exposes these tools to agents:
 | Layer | Technology |
 |-------|-----------|
 | **Language** | Rust (edition 2024) |
-| **Build** | Cargo workspace (23 crates) |
-| **Parsing** | tree-sitter (7 language grammars) |
+| **Build** | Cargo workspace (24 crates) |
+| **Parsing** | tree-sitter (9 language grammars) |
 | **Embedding** | Candle (HuggingFace transformers on-device) |
 | **Vector DB** | LanceDB (columnar, zero-copy reads) |
 | **ANN Search** | usearch (HNSW graph) |
