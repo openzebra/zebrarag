@@ -1,0 +1,88 @@
+---
+import "../styles/global.css";
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <title>zebra.sh - zebra_tree_indexer</title>
+  <meta name="description" content="zebra_tree_indexer: local semantic code index for AI agents." />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">zebra.sh</a>
+    <nav aria-label="links">
+      <a href="https://github.com/hicaru/zebra_tree_indexer" target="_blank" rel="noopener">git</a>
+      <a href="https://t.me/+MLRSdmyS6CM4YzAy" target="_blank" rel="noopener">tg</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section class="intro" aria-labelledby="title">
+      <p class="path">~/src/zebra_tree_indexer</p>
+      <h1 id="title">semantic code search, local first</h1>
+      <p>
+        Zebra parses your repository with tree-sitter, chunks code by structure,
+        embeds it on your machine, and exposes fast MCP tools for AI agents.
+      </p>
+      <div class="terminal" aria-label="commands">
+        <div class="term-row">
+          <span class="prompt">$</span>
+          <code>cargo install --git https://github.com/hicaru/zebra_tree_indexer</code>
+          <button class="copy-cmd" type="button" data-copy="cargo install --git https://github.com/hicaru/zebra_tree_indexer">copy</button>
+        </div>
+        <div class="term-row">
+          <span class="prompt">$</span>
+          <code>zebraindex</code>
+          <button class="copy-cmd" type="button" data-copy="zebraindex">copy</button>
+        </div>
+        <div class="term-row">
+          <span class="prompt">$</span>
+          <code>zebraindex --mcp</code>
+          <button class="copy-cmd" type="button" data-copy="zebraindex --mcp">copy</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="scene" aria-label="3D tree index visualization">
+      <canvas id="canvas"></canvas>
+      <p class="scene-caption">drag rotate / wheel zoom / no cloud</p>
+    </section>
+
+    <aside class="features" aria-label="features">
+      <h2>pipeline</h2>
+      <ol>
+        <li><b>parse</b><span>tree-sitter AST</span></li>
+        <li><b>chunk</b><span>semantic units</span></li>
+        <li><b>embed</b><span>Candle, on-device</span></li>
+        <li><b>store</b><span>LanceDB + ANN</span></li>
+        <li><b>query</b><span>MCP-native tools</span></li>
+      </ol>
+    </aside>
+  </main>
+
+  <footer class="status">
+    <span>rust</span>
+    <span>tree-sitter</span>
+    <span>candle</span>
+    <span>lancedb</span>
+    <span>mcp</span>
+  </footer>
+
+  <script>
+    import '../scripts/scene.js';
+
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(button.getAttribute('data-copy'));
+        button.textContent = 'copied';
+        setTimeout(() => {
+          button.textContent = 'copy';
+        }, 1200);
+      });
+    });
+  </script>
+</body>
+</html>

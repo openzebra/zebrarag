@@ -4,3 +4,8 @@ Cargo.lock
 .rpiv/
 .claude/
 meta-prompt.md
+
+# Site
+site/node_modules/
+site/dist/
+site/.astro/
