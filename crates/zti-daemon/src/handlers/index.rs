@@ -88,6 +88,7 @@ where
 
     let terminal = match final_result {
         Ok(stats) => {
+            *project.search_params.write().await = None;
             if let Some(manager) = state.watch.get()
                 && let Ok(root) = std::path::Path::new(&req.project_root).canonicalize()
             {

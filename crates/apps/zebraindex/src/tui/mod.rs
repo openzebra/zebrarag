@@ -138,7 +138,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             tokio::spawn(async move {
                 let mut guard = client.lock().await;
                 if let Some(mut c) = guard.take() {
-                    let _ = c.request(zti_protocol::request::Request::Stop).await;
+                    let _ = c.request(&zti_protocol::request::Request::Stop).await;
                 }
             });
             app.should_run.store(true, Ordering::Relaxed);

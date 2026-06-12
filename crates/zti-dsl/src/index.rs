@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -142,7 +142,7 @@ where
     }
 
     let qualified_map = build_qualified_map(&all_symbols, &files, &root);
-    resolve_edges(&mut all_edges, &files, &qualified_map, &all_symbols);
+    resolve_edges(&mut all_edges, &files, &qualified_map, &all_symbols, &root);
 
     let reverse_edges = build_reverse_edges(&all_edges);
     let forward_edges = build_forward_edges(&all_edges);
@@ -281,6 +281,41 @@ fn root_crate_name(root: &str) -> Option<std::borrow::Cow<'_, str>> {
         .map(normalize_rust_path_segment)
 }
 
+fn rust_crate_of_path<'a>(
+    rel: &'a str,
+    root: &'a str,
+) -> Option<(std::borrow::Cow<'a, str>, Vec<std::borrow::Cow<'a, str>>)> {
+    let comp_count = rel.split('/').count();
+    let mut comps = Vec::with_capacity(comp_count);
+    rel.split('/')
+        .filter(|comp| !comp.is_empty())
+        .for_each(|comp| comps.push(comp));
+
+    match comps.as_slice() {
+        ["crates", "apps", crate_name, "src", rest @ ..]
+        | ["crates", crate_name, "src", rest @ ..] => Some((
+            normalize_rust_path_segment(crate_name),
+            rust_module_segments(rest),
+        )),
+        ["src", rest @ ..] => root_crate_name(root).map(|name| (name, rust_module_segments(rest))),
+        _ => None,
+    }
+}
+
+fn rust_module_segments<'a>(module_comps: &[&'a str]) -> Vec<std::borrow::Cow<'a, str>> {
+    let mut segments = Vec::with_capacity(module_comps.len().saturating_add(1));
+    module_comps
+        .iter()
+        .filter_map(|comp| {
+            let stem = file_stem(comp);
+            (!stem.is_empty() && !is_rust_non_module_basename(stem))
+                .then(|| normalize_rust_path_segment(stem))
+        })
+        .for_each(|segment| segments.push(segment));
+
+    segments
+}
+
 fn push_rust_crate_alias(
     aliases: &mut Vec<String>,
     rel: &str,
@@ -288,48 +323,19 @@ fn push_rust_crate_alias(
     short_path: &str,
     qualified: &str,
 ) {
-    let comp_count = rel.split('/').count();
-    let mut comps = Vec::with_capacity(comp_count);
-    rel.split('/')
-        .filter(|comp| !comp.is_empty())
-        .for_each(|comp| comps.push(comp));
-    let (crate_name, module_comps) = match comps.as_slice() {
-        ["crates", "apps", crate_name, "src", rest @ ..] => (*crate_name, rest),
-        ["crates", crate_name, "src", rest @ ..] => (*crate_name, rest),
-        ["src", rest @ ..] => match root_crate_name(root) {
-            Some(name) => {
-                let mut segments = Vec::with_capacity(rest.len().saturating_add(2));
-                segments.push(name.into_owned());
-                push_rust_module_segments(&mut segments, rest, short_path);
-                segments.push(qualified.to_string());
-                push_unique_alias(aliases, segments.join("::"));
-                return;
-            }
-            None => return,
-        },
-        _ => return,
+    let Some((crate_name, module_comps)) = rust_crate_of_path(rel, root) else {
+        return;
     };
-
-    let mut segments = Vec::with_capacity(comp_count.saturating_add(1));
-    segments.push(normalize_rust_path_segment(crate_name).into_owned());
-    push_rust_module_segments(&mut segments, module_comps, short_path);
-    segments.push(qualified.to_string());
-    push_unique_alias(aliases, segments.join("::"));
-}
-
-fn push_rust_module_segments(segments: &mut Vec<String>, module_comps: &[&str], short_path: &str) {
+    let mut segments = Vec::with_capacity(module_comps.len().saturating_add(2));
+    segments.push(crate_name.into_owned());
     module_comps
-        .iter()
-        .filter_map(|comp| {
-            let stem = file_stem(comp);
-            (!stem.is_empty() && !is_rust_non_module_basename(stem))
-                .then(|| normalize_rust_path_segment(stem).into_owned())
-        })
-        .for_each(|segment| segments.push(segment));
-
-    if module_comps.is_empty() && !is_rust_non_module_basename(short_path) {
+        .into_iter()
+        .for_each(|segment| segments.push(segment.into_owned()));
+    if segments.len() == 1 && !is_rust_non_module_basename(short_path) {
         segments.push(normalize_rust_path_segment(short_path).into_owned());
     }
+    segments.push(qualified.to_string());
+    push_unique_alias(aliases, segments.join("::"));
 }
 
 fn symbol_lookup_aliases(
@@ -423,27 +429,119 @@ fn resolve_edges(
     files: &[FileEntry],
     qualified_map: &HashMap<String, u32>,
     symbols: &[zti_ts_core::types::Symbol],
+    root: &str,
 ) {
+    let project_crates = project_crates(files, root);
+
     for edge in edges.iter_mut() {
-        if let zti_ts_core::types::Target::Unresolved(name) = &edge.to {
-            let name = name.clone();
+        let zti_ts_core::types::Target::Unresolved(name) = &edge.to else {
+            continue;
+        };
 
-            let resolved = if let Some(&id) = qualified_map.get(&name) {
-                Some(id)
-            } else if let Some(id) =
-                resolve_via_imports(&name, edge.from, files, symbols, qualified_map)
-            {
-                Some(id)
-            } else {
-                resolve_in_same_file(&name, edge.from, symbols)
-            };
+        let normalized = rewrite_relative_path(name, edge.from, files, symbols, root);
+        let lookup = normalized.as_deref().unwrap_or(name);
 
-            edge.to = match resolved {
-                Some(id) => zti_ts_core::types::Target::Resolved(id),
-                None => zti_ts_core::types::Target::External(format!("*{}", name)),
-            };
-        }
+        let resolved = qualified_map
+            .get(lookup)
+            .copied()
+            .or_else(|| resolve_via_imports(lookup, edge.from, files, symbols, qualified_map))
+            .or_else(|| resolve_in_same_file(lookup, edge.from, symbols))
+            .or_else(|| resolve_project_qualified_by_leaf(lookup, qualified_map, &project_crates));
+
+        edge.to = match resolved {
+            Some(id) => zti_ts_core::types::Target::Resolved(id),
+            None => zti_ts_core::types::Target::External(format!("*{lookup}")),
+        };
     }
+}
+
+fn project_crates(files: &[FileEntry], root: &str) -> HashSet<String> {
+    let mut crates = HashSet::with_capacity(files.len());
+    files
+        .iter()
+        .filter(|file| file.language == Language::Rust)
+        .filter_map(|file| {
+            let rel = file
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&file.path)
+                .trim_start_matches('/');
+            rust_crate_of_path(rel, root).map(|(crate_name, _)| crate_name.into_owned())
+        })
+        .for_each(|crate_name| {
+            crates.insert(crate_name);
+        });
+    crates
+}
+
+fn rewrite_relative_path(
+    name: &str,
+    from_id: u32,
+    files: &[FileEntry],
+    symbols: &[zti_ts_core::types::Symbol],
+    root: &str,
+) -> Option<String> {
+    let (prefix, rest) = name.split_once("::")?;
+    let from_sym = symbols.get(from_id as usize)?;
+    let file = files.get(from_sym.file_idx as usize)?;
+    if file.language != Language::Rust {
+        return None;
+    }
+    let rel = file
+        .path
+        .strip_prefix(root)
+        .unwrap_or(&file.path)
+        .trim_start_matches('/');
+    let (crate_name, modules) = rust_crate_of_path(rel, root)?;
+
+    match prefix {
+        "crate" => {
+            let mut out = String::with_capacity(crate_name.len().saturating_add(2 + rest.len()));
+            out.push_str(&crate_name);
+            out.push_str("::");
+            out.push_str(rest);
+            Some(out)
+        }
+        "self" => Some(join_module_path(&crate_name, modules.as_slice(), rest)),
+        // One `super::` level is enough for observed call edges; repeated
+        // `super::super::x` remains external rather than risking a false edge.
+        "super" => {
+            let parent_len = modules.len().saturating_sub(1);
+            Some(join_module_path(&crate_name, &modules[..parent_len], rest))
+        }
+        _ => None,
+    }
+}
+
+fn join_module_path(
+    crate_name: &str,
+    modules: &[std::borrow::Cow<'_, str>],
+    rest: &str,
+) -> String {
+    let modules_len = modules.iter().map(|module| module.len().saturating_add(2)).sum::<usize>();
+    let mut out = String::with_capacity(crate_name.len().saturating_add(2 + modules_len + rest.len()));
+    out.push_str(crate_name);
+    modules.iter().for_each(|module| {
+        out.push_str("::");
+        out.push_str(module);
+    });
+    out.push_str("::");
+    out.push_str(rest);
+    out
+}
+
+fn resolve_project_qualified_by_leaf(
+    lookup: &str,
+    qualified_map: &HashMap<String, u32>,
+    project_crates: &HashSet<String>,
+) -> Option<u32> {
+    let (first, last) = lookup
+        .split_once("::")
+        .and_then(|(head, _)| lookup.rsplit_once("::").map(|(_, leaf)| (head, leaf)))?;
+    project_crates
+        .contains(first)
+        .then(|| qualified_map.get(last).copied())
+        .flatten()
 }
 
 fn resolve_via_imports(
@@ -723,7 +821,7 @@ mod tests {
             line: 1,
         }];
         let map = build_qualified_map(&symbols, &files, "/p");
-        resolve_edges(&mut edges, &files, &map, &symbols);
+        resolve_edges(&mut edges, &files, &map, &symbols, "/p");
         match &edges[0].to {
             Target::Resolved(id) => assert_eq!(*id, 1, "should land on same-file parse"),
             other => panic!("expected Resolved(1), got {:?}", other),
@@ -749,12 +847,140 @@ mod tests {
             line: 1,
         }];
         let map = build_qualified_map(&symbols, &files, "/p");
-        resolve_edges(&mut edges, &files, &map, &symbols);
+        resolve_edges(&mut edges, &files, &map, &symbols, "/p");
         assert!(
             matches!(edges[0].to, Target::External(_)),
             "ambiguous, no same-file sibling -> External, got {:?}",
             edges[0].to
         );
+    }
+
+    #[test]
+    fn resolve_edges_rewrites_crate_relative_call() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "rrf", "rrf", 1),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-pipeline/src/search.rs"),
+            file_entry(1, "/p/crates/zti-pipeline/src/fusion.rs"),
+        ];
+        let mut edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("crate::fusion::rrf".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        let map = build_qualified_map(&symbols, &files, "/p");
+        resolve_edges(&mut edges, &files, &map, &symbols, "/p");
+        assert!(matches!(edges[0].to, Target::Resolved(1)));
+        let reverse = build_reverse_edges(&edges);
+        assert!(reverse.get(&1).is_some_and(|incoming| {
+            incoming
+                .iter()
+                .any(|edge| matches!(edge.to, Target::Resolved(0)))
+        }));
+    }
+
+    #[test]
+    fn resolve_edges_rewrites_self_and_super_calls() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "same", "same", 0),
+            sym(2, "parent", "parent", 1),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-pipeline/src/render/dsl.rs"),
+            file_entry(1, "/p/crates/zti-pipeline/src/render.rs"),
+        ];
+        let map = build_qualified_map(&symbols, &files, "/p");
+        let mut self_edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("self::same".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        resolve_edges(&mut self_edges, &files, &map, &symbols, "/p");
+        assert!(matches!(self_edges[0].to, Target::Resolved(1)));
+
+        let mut super_edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("super::parent".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        resolve_edges(&mut super_edges, &files, &map, &symbols, "/p");
+        assert!(matches!(super_edges[0].to, Target::Resolved(2)));
+    }
+
+    #[test]
+    fn external_qualified_call_does_not_use_bare_fallback() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "spawn", "spawn", 1),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-pipeline/src/search.rs"),
+            file_entry(1, "/p/crates/zti-pipeline/src/local.rs"),
+        ];
+        let mut edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("tokio::spawn".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        let map = build_qualified_map(&symbols, &files, "/p");
+        resolve_edges(&mut edges, &files, &map, &symbols, "/p");
+        assert!(matches!(edges[0].to, Target::External(_)));
+    }
+
+    #[test]
+    fn resolve_edges_method_call_uses_unique_bare_name() {
+        let symbols = vec![
+            sym(0, "caller", "caller", 0),
+            sym(1, "embed_tokenized", "EmbedEngine::embed_tokenized", 1),
+        ];
+        let files = vec![
+            file_entry(0, "/p/crates/zti-pipeline/src/search.rs"),
+            file_entry(1, "/p/crates/zti-embed/src/lib.rs"),
+        ];
+        let mut edges = vec![Edge {
+            from: 0,
+            to: Target::Unresolved("embed_tokenized".into()),
+            kind: EdgeKind::Call,
+            line: 1,
+        }];
+        let map = build_qualified_map(&symbols, &files, "/p");
+        resolve_edges(&mut edges, &files, &map, &symbols, "/p");
+        assert!(matches!(edges[0].to, Target::Resolved(1)));
+    }
+
+    #[test]
+    fn clean_renderer_keeps_external_call_leaf() {
+        let symbols = vec![sym(0, "caller", "caller", 0)];
+        let files = vec![file_entry(0, "/p/crates/zti-pipeline/src/search.rs")];
+        let mut forward_edges = HashMap::with_capacity(1);
+        forward_edges.insert(
+            0,
+            vec![Edge {
+                from: 0,
+                to: Target::External("*tokio::spawn".into()),
+                kind: EdgeKind::Call,
+                line: 1,
+            }],
+        );
+        let index = ProjectIndex {
+            qualified_map: build_qualified_map(&symbols, &files, "/p"),
+            symbols,
+            edges: Vec::with_capacity(0),
+            files,
+            reverse_edges: HashMap::with_capacity(0),
+            forward_edges,
+            root: "/p".into(),
+            manifest_paths: Vec::with_capacity(0),
+        };
+        let rendered = crate::render::tree::AsciiTreeRenderer::new(&index).render_callees_clean(0, 2);
+        assert!(rendered.contains("*tokio::spawn"));
     }
 
     #[test]

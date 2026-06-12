@@ -72,6 +72,7 @@ pub fn projects_schema() -> Schema {
         Field::new("total_files", DataType::UInt64, false),
         Field::new("last_indexed_ns", DataType::UInt64, false),
         Field::new("created_at_ns", DataType::UInt64, false),
+        Field::new("index_version", DataType::UInt32, false),
         Field::new("search_method", DataType::Utf8, true),
         Field::new("search_params", DataType::Utf8, true),
     ];

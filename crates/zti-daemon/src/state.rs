@@ -11,12 +11,43 @@ use zti_ann::AnnCache;
 use zti_common::ids;
 use zti_dsl::ProjectIndex;
 use zti_embed::{EmbedEngine, LoadOverrides};
+use zti_rerank::TurboReranker;
 use zti_rerank::gpu::TurboScorerCache;
 use zti_store::Db;
+
+pub struct RerankerCache {
+    by_dim: RwLock<HashMap<usize, Arc<TurboReranker>>>,
+}
+
+impl Default for RerankerCache {
+    fn default() -> Self {
+        Self {
+            by_dim: RwLock::new(HashMap::with_capacity(2)),
+        }
+    }
+}
+
+impl RerankerCache {
+    pub async fn get(&self, dim: usize) -> anyhow::Result<Arc<TurboReranker>> {
+        if let Some(reranker) = self.by_dim.read().await.get(&dim) {
+            return Ok(Arc::clone(reranker));
+        }
+
+        let mut cache = self.by_dim.write().await;
+        if let Some(reranker) = cache.get(&dim) {
+            return Ok(Arc::clone(reranker));
+        }
+
+        let reranker = Arc::new(TurboReranker::new(dim)?);
+        cache.insert(dim, Arc::clone(&reranker));
+        Ok(reranker)
+    }
+}
 
 pub struct LoadedProject {
     pub db: Db,
     pub dsl_index: RwLock<Option<Arc<ProjectIndex>>>,
+    pub search_params: RwLock<Option<Arc<zti_ann::SearchParams>>>,
     pub indexing_lock: Mutex<()>,
     pub cancel: AtomicBool,
     /// Set while an auto-reindex is queued or running, so overlapping FS events
@@ -34,6 +65,7 @@ pub struct DaemonState {
     pub registry: RwLock<HashMap<[u8; 32], Arc<LoadedProject>>>,
     pub ann: Arc<AnnCache>,
     pub turbo: Arc<TurboScorerCache>,
+    pub reranker: RerankerCache,
     pub started_at_ns: u64,
     pub started_at: Instant,
     pub shutdown_tx: watch::Sender<bool>,
@@ -71,6 +103,7 @@ impl DaemonState {
             registry: RwLock::new(HashMap::with_capacity(4)),
             ann: Arc::new(AnnCache::default()),
             turbo: Arc::new(TurboScorerCache::default()),
+            reranker: RerankerCache::default(),
             started_at_ns,
             started_at: Instant::now(),
             shutdown_tx,
@@ -133,6 +166,7 @@ impl DaemonState {
         let project = Arc::new(LoadedProject {
             db,
             dsl_index: RwLock::new(None),
+            search_params: RwLock::new(None),
             indexing_lock: Mutex::new(()),
             cancel: AtomicBool::new(false),
             reindex_scheduled: AtomicBool::new(false),

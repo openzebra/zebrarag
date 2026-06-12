@@ -303,7 +303,7 @@ pub async fn handle_action(
             tokio::spawn(async move {
                 let mut guard = client.lock().await;
                 if let Some(mut c) = guard.take() {
-                    let _ = c.request(zti_protocol::request::Request::Stop).await;
+                    let _ = c.request(&zti_protocol::request::Request::Stop).await;
                 }
             });
         }

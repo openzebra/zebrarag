@@ -63,8 +63,8 @@ impl Client {
         }
     }
 
-    pub async fn request(&mut self, req: Request) -> Result<Response> {
-        write_frame(&mut self.stream, &req).await?;
+    pub async fn request(&mut self, req: &Request) -> Result<Response> {
+        write_frame(&mut self.stream, req).await?;
         let resp: Response = read_frame(&mut self.stream).await?;
         Ok(resp)
     }

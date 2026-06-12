@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -8,7 +9,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServiceExt, tool};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use zti_ipc_client::Client;
 use zti_protocol::format_search_results;
 use zti_protocol::request::{DoctorReq, Request, SearchDepReq, SearchMode, SearchReq};
@@ -110,24 +111,50 @@ struct SearchCall<'a> {
     mode: SearchMode,
 }
 
-#[derive(Clone)]
-struct ZebraMcpServer {
-    daemon: Arc<Mutex<Option<Client>>>,
-    indexed_projects_roots: String,
+const POOL_SIZE: usize = 4;
+
+struct DaemonPool {
+    slots: [Mutex<Option<Client>>; POOL_SIZE],
+    next: AtomicUsize,
 }
 
-impl ZebraMcpServer {
-    fn new(indexed_projects_roots: String) -> Self {
+struct PoolGuard<'a> {
+    guard: MutexGuard<'a, Option<Client>>,
+}
+
+impl Default for DaemonPool {
+    fn default() -> Self {
         Self {
-            daemon: Arc::new(Mutex::new(None)),
-            indexed_projects_roots,
+            slots: std::array::from_fn(|_| Mutex::new(None)),
+            next: AtomicUsize::new(0),
         }
     }
+}
 
-    async fn ensure_daemon(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, ErrorData> {
-        let mut guard = self.daemon.lock().await;
+impl DaemonPool {
+    async fn lease(&self) -> Result<PoolGuard<'_>, ErrorData> {
+        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..POOL_SIZE {
+            let slot = (start + offset) % POOL_SIZE;
+            let Some(mutex) = self.slots.get(slot) else {
+                continue;
+            };
+            if let Ok(guard) = mutex.try_lock() {
+                return Self::connect_if_needed(guard).await;
+            }
+        }
+        let slot = start % POOL_SIZE;
+        let mutex = self
+            .slots
+            .get(slot)
+            .ok_or_else(|| internal_err("daemon pool slot missing".into()))?;
+        let guard = mutex.lock().await;
+        Self::connect_if_needed(guard).await
+    }
+
+    async fn connect_if_needed(
+        mut guard: MutexGuard<'_, Option<Client>>,
+    ) -> Result<PoolGuard<'_>, ErrorData> {
         if guard.is_none() {
             let mut client = Client::connect(Duration::from_secs(10), None, None, None, None)
                 .await
@@ -138,24 +165,58 @@ impl ZebraMcpServer {
                 .map_err(|e| internal_err(format!("handshake: {e}")))?;
             *guard = Some(client);
         }
-        Ok(guard)
+        Ok(PoolGuard { guard })
+    }
+}
+
+impl PoolGuard<'_> {
+    fn client_mut(&mut self) -> Result<&mut Client, ErrorData> {
+        self.guard
+            .as_mut()
+            .ok_or_else(|| internal_err("daemon not initialized".into()))
     }
 
-    async fn send_search(&self, req: SearchReq) -> Result<SearchResults, ErrorData> {
-        let mut guard = self.ensure_daemon().await?;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| internal_err("daemon not initialized".into()))?;
+    fn poison(&mut self) {
+        *self.guard = None;
+    }
+}
 
-        match client.request(Request::Search(req)).await {
-            Ok(Response::Search(Ok(results))) => Ok(results),
-            Ok(Response::Search(Err(e))) => Err(internal_err(e.message)),
-            Ok(other) => Err(internal_err(format!("unexpected response: {other:?}"))),
+#[derive(Clone)]
+struct ZebraMcpServer {
+    pool: Arc<DaemonPool>,
+    indexed_projects_roots: String,
+}
+
+impl ZebraMcpServer {
+    fn new(indexed_projects_roots: String) -> Self {
+        Self {
+            pool: Arc::new(DaemonPool::default()),
+            indexed_projects_roots,
+        }
+    }
+
+    async fn send<T>(
+        &self,
+        req: &Request,
+        extract: impl FnOnce(Response) -> Result<T, ErrorData>,
+    ) -> Result<T, ErrorData> {
+        let mut lease = self.pool.lease().await?;
+        match lease.client_mut()?.request(req).await {
+            Ok(resp) => extract(resp),
             Err(e) => {
-                *guard = None;
+                lease.poison();
                 Err(internal_err(format!("IPC lost, retry: {e}")))
             }
         }
+    }
+
+    async fn send_search(&self, req: &Request) -> Result<SearchResults, ErrorData> {
+        self.send(req, |resp| match resp {
+            Response::Search(Ok(results)) => Ok(results),
+            Response::Search(Err(e)) => Err(internal_err(e.message)),
+            other => Err(internal_err(format!("unexpected response: {other:?}"))),
+        })
+        .await
     }
 
     async fn do_search(&self, call: SearchCall<'_>) -> Result<CallToolResult, ErrorData> {
@@ -164,7 +225,7 @@ impl ZebraMcpServer {
             .map_err(|e| internal_err(format!("{e}")))?;
         let limit = call.limit.unwrap_or(5);
 
-        let mut req = SearchReq {
+        let req = SearchReq {
             project_root,
             query: call.text,
             limit,
@@ -177,32 +238,28 @@ impl ZebraMcpServer {
             mode: call.mode,
         };
 
-        let results = self.send_search(req.clone()).await?;
+        let mut wire_req = Request::Search(req);
+        let results = self.send_search(&wire_req).await?;
 
         if !results.hits.is_empty() {
             return Ok(ok_text(format_search_results(&results)));
         }
 
-        req.exhaustive = true;
-        let retry_results = self.send_search(req).await?;
+        if let Request::Search(search_req) = &mut wire_req {
+            search_req.exhaustive = true;
+        }
+        let retry_results = self.send_search(&wire_req).await?;
 
         Ok(ok_text(format_search_results(&retry_results)))
     }
 
     async fn send_search_dep(&self, req: SearchDepReq) -> Result<String, ErrorData> {
-        let mut guard = self.ensure_daemon().await?;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| internal_err("daemon not initialized".into()))?;
-        match client.request(Request::DslSearchDep(req)).await {
-            Ok(Response::DslSearchDep(Ok(body))) => Ok(body.text),
-            Ok(Response::DslSearchDep(Err(e))) => Err(internal_err(e.message)),
-            Ok(other) => Err(internal_err(format!("unexpected response: {other:?}"))),
-            Err(e) => {
-                *guard = None;
-                Err(internal_err(format!("IPC lost, retry: {e}")))
-            }
-        }
+        self.send(&Request::DslSearchDep(req), |resp| match resp {
+            Response::DslSearchDep(Ok(body)) => Ok(body.text),
+            Response::DslSearchDep(Err(e)) => Err(internal_err(e.message)),
+            other => Err(internal_err(format!("unexpected response: {other:?}"))),
+        })
+        .await
     }
 }
 
@@ -358,13 +415,8 @@ impl ZebraMcpServer {
         };
         let req = DoctorReq { project_root };
 
-        let mut guard = self.ensure_daemon().await?;
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| internal_err("daemon not initialized".into()))?;
-
-        match client.request(Request::Doctor(req)).await {
-            Ok(Response::Doctor(Ok(report))) => {
+        self.send(&Request::Doctor(req), |resp| match resp {
+            Response::Doctor(Ok(report)) => {
                 let mut out = String::with_capacity(256 + report.checks.len() * 64);
                 let _ = writeln!(out, "Device: {}", report.device);
                 for check in &report.checks {
@@ -377,13 +429,10 @@ impl ZebraMcpServer {
                 }
                 Ok(ok_text(out))
             }
-            Ok(Response::Doctor(Err(e))) => Err(internal_err(e.message)),
-            Ok(other) => Err(internal_err(format!("unexpected: {other:?}"))),
-            Err(e) => {
-                *guard = None;
-                Err(internal_err(format!("IPC lost, retry: {e}")))
-            }
-        }
+            Response::Doctor(Err(e)) => Err(internal_err(e.message)),
+            other => Err(internal_err(format!("unexpected: {other:?}"))),
+        })
+        .await
     }
 
     #[tool(

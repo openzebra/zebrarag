@@ -156,7 +156,10 @@ fn schedule_reindex(state: Arc<DaemonState>, pid: [u8; 32], root: PathBuf) {
         )
         .await
         {
-            Ok(stats) => tracing::info!(reindexed = stats.reindexed_files, "auto-reindex done"),
+            Ok(stats) => {
+                *project.search_params.write().await = None;
+                tracing::info!(reindexed = stats.reindexed_files, "auto-reindex done");
+            }
             Err(e) => tracing::warn!("auto-reindex failed: {e}"),
         }
     });

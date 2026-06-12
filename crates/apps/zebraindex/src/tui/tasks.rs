@@ -311,7 +311,7 @@ async fn daemon_monitor(
 async fn fetch_daemon_status(ctx: &ClientCtx) -> Option<app::DaemonStatus> {
     let mut guard = ctx.client.lock().await;
     match guard.as_mut() {
-        Some(c) => match c.request(Request::DaemonStatus).await {
+        Some(c) => match c.request(&Request::DaemonStatus).await {
             Ok(Response::DaemonStatus(info)) => Some(app::DaemonStatus::Running {
                 device: info.device,
                 uptime_secs: info.uptime_secs,
@@ -331,7 +331,7 @@ async fn fetch_daemon_status(ctx: &ClientCtx) -> Option<app::DaemonStatus> {
 async fn fetch_daemon_env(ctx: &ClientCtx) -> Option<zti_protocol::response::DaemonEnvInfo> {
     let mut guard = ctx.client.lock().await;
     match guard.as_mut() {
-        Some(c) => match c.request(Request::DaemonEnv).await {
+        Some(c) => match c.request(&Request::DaemonEnv).await {
             Ok(Response::DaemonEnv(info)) => Some(info),
             _ => None,
         },
@@ -367,7 +367,7 @@ pub async fn do_search(
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
 
         let resp = c
-            .request(Request::Search(zti_protocol::request::SearchReq {
+            .request(&Request::Search(zti_protocol::request::SearchReq {
                 project_root,
                 query,
                 limit: 10,
@@ -415,7 +415,7 @@ pub async fn do_remove_project(
             .ok_or_else(|| anyhow::anyhow!("client not initialized"))?;
 
         let resp = c
-            .request(Request::RemoveProject(
+            .request(&Request::RemoveProject(
                 zti_protocol::request::RemoveProjectReq { project_root },
             ))
             .await?;
@@ -526,6 +526,6 @@ pub async fn cancel_index(project_root: String, ctx: ClientCtx) {
         return;
     }
     let _ = client
-        .request(Request::CancelIndex(CancelIndexReq { project_root }))
+        .request(&Request::CancelIndex(CancelIndexReq { project_root }))
         .await;
 }

@@ -215,6 +215,7 @@ mod tests {
             total_files: 0,
             last_indexed_ns: 0,
             created_at_ns: 0,
+            index_version: crate::projects_table::INDEX_FORMAT_VERSION,
             search_method: None,
             search_params: None,
         }

@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use crate::schema;
 
+pub const INDEX_FORMAT_VERSION: u32 = 2;
+
 pub struct ProjectsTable {
     table: Table,
 }
@@ -21,7 +23,16 @@ impl ProjectsTable {
             .await?
             .contains(&name.to_string())
         {
-            db.open_table(name).execute().await?
+            let existing = db.open_table(name).execute().await?;
+            let schema = existing.schema().await?;
+            if schema.field_with_name("index_version").is_ok() {
+                existing
+            } else {
+                tracing::warn!("project schema changed, recreating projects table");
+                db.drop_table(name, &[]).await?;
+                let schema = Arc::new(schema::projects_schema());
+                db.create_empty_table(name, schema).execute().await?
+            }
         } else {
             let schema = Arc::new(schema::projects_schema());
             db.create_empty_table(name, schema).execute().await?
@@ -119,6 +130,9 @@ fn row_from_batch(batch: &RecordBatch, i: usize, project_id: &[u8]) -> ProjectRo
     let created_at = batch
         .column_by_name("created_at_ns")
         .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+    let index_versions = batch
+        .column_by_name("index_version")
+        .and_then(|c| c.as_any().downcast_ref::<UInt32Array>());
     let search_method = batch
         .column_by_name("search_method")
         .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -140,6 +154,7 @@ fn row_from_batch(batch: &RecordBatch, i: usize, project_id: &[u8]) -> ProjectRo
         total_files: total_files.map(|a| a.value(i)).unwrap_or(0),
         last_indexed_ns: last_indexed.map(|a| a.value(i)).unwrap_or(0),
         created_at_ns: created_at.map(|a| a.value(i)).unwrap_or(0),
+        index_version: index_versions.map(|a| a.value(i)).unwrap_or(0),
         search_method: search_method.and_then(|a| {
             if a.is_null(i) {
                 None
@@ -168,6 +183,7 @@ pub struct ProjectRow {
     pub total_files: u64,
     pub last_indexed_ns: u64,
     pub created_at_ns: u64,
+    pub index_version: u32,
     pub search_method: Option<String>,
     pub search_params: Option<String>,
 }

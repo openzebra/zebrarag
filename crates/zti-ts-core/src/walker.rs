@@ -566,11 +566,15 @@ fn collect_edges_recursive(
 }
 
 fn resolve_call_name(node: &Node, source: &str) -> String {
-    if node.kind() == "scoped_identifier"
-        || node.kind() == "field_expression"
-        || node.kind() == "member_expression"
-        || node.kind() == "selector_expression"
+    let kind = node.kind();
+    if matches!(
+        kind,
+        "field_expression" | "member_expression" | "selector_expression"
+    ) && let Some(field) = node.child_by_field_name("field")
     {
+        return resolve_call_name(&field, source);
+    }
+    if kind == "scoped_identifier" {
         return node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
     }
     if node.kind() == "identifier" || node.kind() == "property_identifier" {

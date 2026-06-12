@@ -272,7 +272,7 @@ impl ChunksTable {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut filter = String::with_capacity(16 + ids.len() * 6);
+        let mut filter = String::with_capacity(16 + ids.len() * 11);
         filter.push_str("sym_id IN (");
         for (i, id) in ids.iter().enumerate() {
             if i > 0 {
@@ -309,15 +309,15 @@ impl ChunksTable {
             return Ok(Vec::new());
         }
 
-        let hex_parts: Vec<String> = ids
-            .iter()
-            .map(|id| {
-                let hex: String = id.iter().map(|b| format!("{:02x}", b)).collect();
-                format!("X'{}'", hex)
-            })
-            .collect();
-
-        let chunk_filter = format!("chunk_id IN ({})", hex_parts.join(","));
+        let mut chunk_filter = String::with_capacity(14 + ids.len() * 36);
+        chunk_filter.push_str("chunk_id IN (");
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                chunk_filter.push(',');
+            }
+            push_hex_blob(&mut chunk_filter, id);
+        }
+        chunk_filter.push(')');
         let filter = match build_lang_path_filter(languages, path_glob, include_tests) {
             Some(lp) => format!("{} AND {}", chunk_filter, lp),
             None => chunk_filter,
@@ -525,6 +525,17 @@ impl ChunksTable {
         self.table.optimize(OptimizeAction::All).await?;
         Ok(())
     }
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+fn push_hex_blob(out: &mut String, id: &[u8; 16]) {
+    out.push_str("X'");
+    id.iter().for_each(|byte| {
+        out.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+        out.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
+    });
+    out.push('\'');
 }
 
 fn build_lang_path_filter(

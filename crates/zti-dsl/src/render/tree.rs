@@ -296,10 +296,14 @@ impl<'a> AsciiTreeRenderer<'a> {
                 .unwrap_or(&[]),
         };
 
+        let mut seen_external = HashSet::with_capacity(edges_for_id.len());
         let filtered: Vec<&Edge> = edges_for_id
             .iter()
             .filter(|e| e.kind == EdgeKind::Call)
-            .filter(|e| matches!(e.to, Target::Resolved(_)))
+            .filter(|e| match &e.to {
+                Target::External(name) => seen_external.insert(name.as_str()),
+                Target::Resolved(_) | Target::Unresolved(_) => true,
+            })
             .collect();
 
         let total = filtered.len();
@@ -315,39 +319,43 @@ impl<'a> AsciiTreeRenderer<'a> {
             out.push_str(prefix);
             out.push_str(branch);
 
-            if let Target::Resolved(to_id) = edge.to {
-                if self.index.symbols.get(to_id as usize).is_some() {
-                    let display = self.sym_display(to_id);
-                    let sym = &self.index.symbols[to_id as usize];
-                    let file = self
-                        .index
-                        .files
-                        .get(sym.file_idx as usize)
-                        .map(|f| {
-                            f.path
-                                .strip_prefix(&self.index.root)
-                                .unwrap_or(&f.path)
-                                .trim_start_matches('/')
-                        })
-                        .unwrap_or("?");
-                    let _ = writeln!(out, "{} ({}:{})", display, file, sym.line);
-                    let saved = prefix.len();
-                    prefix.push_str(child_segment);
-                    self.recurse_clean(
-                        to_id,
-                        max_depth,
-                        depth + 1,
-                        out,
-                        prefix,
-                        visited,
-                        direction,
-                    );
-                    prefix.truncate(saved);
-                } else {
+            match &edge.to {
+                Target::Resolved(to_id) => {
+                    if let Some(sym) = self.index.symbols.get(*to_id as usize) {
+                        let display = self.sym_display(*to_id);
+                        let file = self
+                            .index
+                            .files
+                            .get(sym.file_idx as usize)
+                            .map(|f| {
+                                f.path
+                                    .strip_prefix(&self.index.root)
+                                    .unwrap_or(&f.path)
+                                    .trim_start_matches('/')
+                            })
+                            .unwrap_or("?");
+                        let _ = writeln!(out, "{} ({}:{})", display, file, sym.line);
+                        let saved = prefix.len();
+                        prefix.push_str(child_segment);
+                        self.recurse_clean(
+                            *to_id,
+                            max_depth,
+                            depth + 1,
+                            out,
+                            prefix,
+                            visited,
+                            direction,
+                        );
+                        prefix.truncate(saved);
+                    } else {
+                        out.push('\n');
+                    }
+                }
+                Target::External(name) => {
+                    out.push_str(name);
                     out.push('\n');
                 }
-            } else {
-                out.push('\n');
+                Target::Unresolved(_) => out.push('\n'),
             }
         }
     }
@@ -427,6 +435,7 @@ impl<'a> AsciiTreeRenderer<'a> {
                 .unwrap_or(&[]),
         };
 
+        let mut seen_external = HashSet::with_capacity(edges_for_id.len());
         let filtered: Vec<&Edge> = edges_for_id
             .iter()
             .filter(|e| e.kind == EdgeKind::Call)
@@ -436,6 +445,10 @@ impl<'a> AsciiTreeRenderer<'a> {
                 } else {
                     true
                 }
+            })
+            .filter(|e| match &e.to {
+                Target::External(name) => seen_external.insert(name.as_str()),
+                Target::Resolved(_) | Target::Unresolved(_) => true,
             })
             .collect();
 
@@ -521,7 +534,7 @@ impl<'a> AsciiTreeRenderer<'a> {
                         }
                     }
                     Target::External(name) => {
-                        let _ = writeln!(out, "*{}", name);
+                        let _ = writeln!(out, "{}", name);
                     }
                     Target::Unresolved(name) => {
                         let _ = writeln!(out, "?{}", name);

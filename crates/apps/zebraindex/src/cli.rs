@@ -190,7 +190,7 @@ pub async fn run(
             let mut client = open().await?;
             let project_root = resolve_root(&root).await?;
             let resp = client
-                .request(Request::Search(SearchReq {
+                .request(&Request::Search(SearchReq {
                     project_root,
                     query,
                     limit,
@@ -235,7 +235,7 @@ pub async fn run(
                 let _ = rl.add_history_entry(trimmed);
 
                 let resp = client
-                    .request(Request::Search(SearchReq {
+                    .request(&Request::Search(SearchReq {
                         project_root: project_root.clone(),
                         query: trimmed.to_string(),
                         limit,
@@ -264,7 +264,7 @@ pub async fn run(
                 None => None,
             };
             let resp = client
-                .request(Request::ProjectStatus(ProjectStatusReq { project_root }))
+                .request(&Request::ProjectStatus(ProjectStatusReq { project_root }))
                 .await?;
             match resp {
                 Response::ProjectStatus(Ok(status)) => {
@@ -284,7 +284,7 @@ pub async fn run(
                 None => None,
             };
             let resp = client
-                .request(Request::Doctor(DoctorReq { project_root }))
+                .request(&Request::Doctor(DoctorReq { project_root }))
                 .await?;
             match resp {
                 Response::Doctor(Ok(report)) => {
@@ -304,7 +304,7 @@ pub async fn run(
         }
         CliCommand::Env => {
             let mut client = open().await?;
-            let resp = client.request(Request::DaemonEnv).await?;
+            let resp = client.request(&Request::DaemonEnv).await?;
             match resp {
                 Response::DaemonEnv(env) => {
                     println!("Data dir: {}", env.data_dir);
@@ -329,7 +329,7 @@ pub async fn run(
         }
         CliCommand::Stop => {
             let mut client = open().await?;
-            let resp = client.request(Request::Stop).await?;
+            let resp = client.request(&Request::Stop).await?;
             if matches!(resp, Response::Stop(())) {
                 println!("Daemon stopped.");
             }
@@ -338,7 +338,7 @@ pub async fn run(
             let mut client = open().await?;
             let project_root = resolve_root(&root).await?;
             let resp = client
-                .request(Request::RemoveProject(RemoveProjectReq { project_root }))
+                .request(&Request::RemoveProject(RemoveProjectReq { project_root }))
                 .await?;
             match resp {
                 Response::RemoveProject(Ok(())) => println!("Project removed."),

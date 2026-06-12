@@ -215,30 +215,49 @@ pub async fn search(
     turbo_cache: &TurboScorerCache,
     pid: &[u8; 32],
     opts: &SearchOpts<'_>,
+    params_override: Option<&SearchParams>,
+    total_chunks_override: Option<usize>,
 ) -> Result<SearchOutcome> {
-    let projects = db.projects_table().await?;
-    let project = projects
-        .get(pid)
-        .await?
-        .ok_or_else(|| anyhow!("project not indexed"))?;
+    let project = if params_override.is_some() && total_chunks_override.is_some() {
+        None
+    } else {
+        Some(
+            db.projects_table()
+                .await?
+                .get(pid)
+                .await?
+                .ok_or_else(|| anyhow!("project not indexed"))?,
+        )
+    };
 
-    let previous: Option<SearchParams> = project
-        .search_params
-        .as_deref()
-        .and_then(|params| toml::from_str(params).ok());
-
-    let params: SearchParams = match previous {
+    let parsed_params: Option<SearchParams> = if params_override.is_some() {
+        None
+    } else {
+        project
+            .as_ref()
+            .and_then(|row| row.search_params.as_deref())
+            .and_then(|params| toml::from_str(params).ok())
+    };
+    let fallback_params;
+    let params = match params_override.or(parsed_params.as_ref()) {
         Some(params) => params,
-        None => zti_ann::choose_method(
-            project.total_chunks as usize,
-            engine.dim(),
-            &zti_hw::probe(),
-            None,
-        ),
+        None => {
+            fallback_params = zti_ann::choose_method(
+                total_chunks_override
+                    .or_else(|| project.as_ref().map(|row| row.total_chunks as usize))
+                    .ok_or_else(|| anyhow!("project not indexed"))?,
+                engine.dim(),
+                &zti_hw::probe(),
+                None,
+            );
+            &fallback_params
+        }
     };
 
     let chunks_table = db.chunks_table(engine.dim()).await?;
-    let total_chunks = project.total_chunks as usize;
+    let total_chunks = total_chunks_override
+        .or_else(|| project.as_ref().map(|row| row.total_chunks as usize))
+        .ok_or_else(|| anyhow!("project not indexed"))?;
     let overfetch = if total_chunks > 100_000 {
         6
     } else if total_chunks > 20_000 {
@@ -256,7 +275,7 @@ pub async fn search(
             ann_cache,
             turbo_cache,
             pid,
-            &params,
+            params,
             query_emb,
             raw_k,
             opts,

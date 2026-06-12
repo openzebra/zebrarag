@@ -34,6 +34,18 @@ const MIN_CHUNK_FLOOR: usize = 512;
 use crate::manifest::{FileSnapshot, SourceKind, detect_changes, walk_source_files};
 use crate::progress::{ProgressReporter, Reporter};
 
+fn content_chunk_id(chunk: &Chunk<'_>) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(chunk.file.as_bytes());
+    hasher.update(chunk.qualified.as_bytes());
+    hasher.update(&chunk.sub_chunk_idx.to_le_bytes());
+    hasher.update(chunk.body.as_bytes());
+    let hash = hasher.finalize();
+    let mut chunk_id = [0u8; 16];
+    chunk_id.copy_from_slice(&hash.as_bytes()[..16]);
+    chunk_id
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AdaptiveChunkSizing {
     chunk_size: usize,
@@ -143,17 +155,24 @@ pub async fn index_project(
     );
 
     let mut chunks_table = db.chunks_table(engine.dim()).await?;
+    let chunks_len = chunks_table.len().await?;
+    let project_row = db.projects_table().await?.get(&pid).await?;
+    let stale_index_version = project_row
+        .as_ref()
+        .is_some_and(|row| row.index_version < zti_store::projects_table::INDEX_FORMAT_VERSION);
+    let missing_project_row_with_chunks = project_row.is_none() && chunks_len > 0;
 
-    let force_rebuild = if refresh {
-        true
-    } else if !previous.is_empty() {
-        chunks_table.len().await? == 0
-    } else {
-        false
-    };
+    let force_rebuild = refresh
+        || stale_index_version
+        || missing_project_row_with_chunks
+        || (!previous.is_empty() && chunks_len == 0);
 
     if force_rebuild && !refresh {
-        info!("self-heal: empty index detected, forcing full reindex");
+        if stale_index_version || missing_project_row_with_chunks {
+            info!("index format changed, forcing full reindex");
+        } else {
+            info!("self-heal: empty index detected, forcing full reindex");
+        }
     }
 
     let need_reindex: Vec<String>;
@@ -623,15 +642,7 @@ pub async fn index_project(
                             );
                         }
 
-                        let mut hasher = blake3::Hasher::new();
-                        hasher.update(chunk.file.as_bytes());
-                        hasher.update(&chunk.start_line.to_le_bytes());
-                        hasher.update(&chunk.end_line.to_le_bytes());
-                        hasher.update(chunk.qualified.as_bytes());
-                        hasher.update(&chunk.sub_chunk_idx.to_le_bytes());
-                        let hash = hasher.finalize();
-                        let mut chunk_id = [0u8; 16];
-                        chunk_id.copy_from_slice(&hash.as_bytes()[..16]);
+                        let chunk_id = content_chunk_id(chunk);
 
                         let parent_sym_id = if chunk.sym_id == u32::MAX {
                             None
@@ -972,6 +983,7 @@ async fn upsert_project(
             Arc::new(UInt64Array::from(vec![total_files as u64])),
             Arc::new(UInt64Array::from(vec![now_ns])),
             Arc::new(UInt64Array::from(vec![now_ns])),
+            Arc::new(UInt32Array::from(vec![zti_store::projects_table::INDEX_FORMAT_VERSION])),
             Arc::new(search_method),
             Arc::new(search_params),
         ],
@@ -983,7 +995,7 @@ async fn upsert_project(
 
 #[cfg(test)]
 mod tests_indexing {
-    use super::{MIN_CHUNK_FLOOR, sizing_for};
+    use super::{MIN_CHUNK_FLOOR, content_chunk_id, sizing_for};
     use std::borrow::Cow;
     use zti_dsl::chunking::{Chunk, ChunkStrategy};
     use zti_ts_core::types::Kind;
@@ -1031,6 +1043,29 @@ mod tests_indexing {
         assert!(sizing_for(10, usize::MAX, 4).is_none());
         assert!(sizing_for(usize::MAX, 512, usize::MAX).is_none());
         assert!(sizing_for(usize::MAX - 1, usize::MAX, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn content_chunk_id_ignores_line_shifts() {
+        let first = Chunk {
+            file: "/src/lib.rs".into(),
+            rel_file: "src/lib.rs".into(),
+            start_line: 10,
+            end_line: 20,
+            sym_id: 7,
+            sub_chunk_idx: 0,
+            total_sub_chunks: 1,
+            chunk_strategy: ChunkStrategy::Symbol,
+            body: Cow::Borrowed("fn top_k() { 1 }") ,
+            qualified: "top_k".into(),
+            kind: Kind::Function,
+        };
+        let shifted = Chunk {
+            start_line: 15,
+            end_line: 25,
+            ..first.clone()
+        };
+        assert_eq!(content_chunk_id(&first), content_chunk_id(&shifted));
     }
 
     #[test]

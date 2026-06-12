@@ -1,29 +1,27 @@
-const DELETE_FILTER_BATCH_SIZE: usize = 1;
+const DELETE_FILTER_MAX_BYTES: usize = 8 * 1024;
 
 pub(crate) fn file_path_delete_filters(paths: &[&str]) -> Vec<String> {
-    let mut filters = Vec::with_capacity(paths.len().div_ceil(DELETE_FILTER_BATCH_SIZE));
-    paths
-        .chunks(DELETE_FILTER_BATCH_SIZE)
-        .map(file_path_delete_filter)
-        .for_each(|filter| filters.push(filter));
-    filters
-}
-
-fn file_path_delete_filter(paths: &[&str]) -> String {
-    let estimated_len = paths
-        .iter()
-        .map(|path| "file_path = ''".len() + path.len() + " OR ".len())
-        .sum();
-    let mut filter = String::with_capacity(estimated_len);
-    paths.iter().enumerate().for_each(|(index, path)| {
-        if index > 0 {
-            filter.push_str(" OR ");
+    let mut filters = Vec::with_capacity(1);
+    let mut current = String::with_capacity(DELETE_FILTER_MAX_BYTES);
+    for path in paths {
+        let clause_len = "file_path = ''".len() + path.len() + " OR ".len();
+        if !current.is_empty()
+            && current.len().saturating_add(clause_len) > DELETE_FILTER_MAX_BYTES
+        {
+            filters.push(std::mem::take(&mut current));
+            current.reserve(DELETE_FILTER_MAX_BYTES);
         }
-        filter.push_str("file_path = '");
-        push_escaped_sql_string(path, &mut filter);
-        filter.push('\'');
-    });
-    filter
+        if !current.is_empty() {
+            current.push_str(" OR ");
+        }
+        current.push_str("file_path = '");
+        push_escaped_sql_string(path, &mut current);
+        current.push('\'');
+    }
+    if !current.is_empty() {
+        filters.push(current);
+    }
+    filters
 }
 
 fn push_escaped_sql_string(value: &str, out: &mut String) {
