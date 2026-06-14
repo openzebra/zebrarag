@@ -94,11 +94,18 @@ fn main() -> Result<()> {
             passage_prefix,
             model_dtype,
         }) => {
+            let env_openrouter_key = std::env::var("ZEBRA_OPENROUTER_KEY").ok();
+            let env_remote_dim_hint = std::env::var("ZEBRA_REMOTE_DIM_HINT")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok());
+            let remote_api_key = env_openrouter_key.as_deref();
             let config = zti_daemon::DaemonConfig {
                 model: Cow::Owned(model),
                 query_prefix: query_prefix.as_deref(),
                 passage_prefix: passage_prefix.as_deref(),
                 model_dtype: model_dtype.as_deref(),
+                remote_api_key,
+                remote_dim_hint: env_remote_dim_hint,
             };
             zti_daemon::run_daemon(&config)
         }

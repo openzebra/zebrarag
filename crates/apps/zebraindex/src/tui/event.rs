@@ -56,7 +56,9 @@ pub fn map_key(key: &event::KeyEvent, app: &App) -> Action {
 
 fn map_setup_key(key: &event::KeyEvent, phase: &SetupPhase) -> Action {
     match phase {
-        SetupPhase::ModelSelection { .. } | SetupPhase::DTypeSelection { .. } => match key.code {
+        SetupPhase::ModelSelection { .. }
+        | SetupPhase::DTypeSelection { .. }
+        | SetupPhase::RemoteModelSelection { .. } => match key.code {
             KeyCode::Char('j') | KeyCode::Down => Action::SetupNext,
             KeyCode::Char('k') | KeyCode::Up => Action::SetupPrev,
             KeyCode::Enter => Action::SetupConfirm,
@@ -69,6 +71,17 @@ fn map_setup_key(key: &event::KeyEvent, phase: &SetupPhase) -> Action {
             KeyCode::Enter => Action::SetupConfirm,
             KeyCode::Char('a') => Action::SetupAutoRecommend,
             KeyCode::Char('q') | KeyCode::Esc => Action::SetupBack,
+            _ => Action::None,
+        },
+        SetupPhase::ApiKeyEntry { .. } => match key.code {
+            KeyCode::Char(c) => Action::Input(c),
+            KeyCode::Backspace => Action::Backspace,
+            KeyCode::Enter => Action::SetupConfirm,
+            KeyCode::Esc => Action::SetupBack,
+            _ => Action::None,
+        },
+        SetupPhase::FetchingRemoteModels { .. } => match key.code {
+            KeyCode::Esc => Action::SetupBack,
             _ => Action::None,
         },
         SetupPhase::Error { can_retry, .. } => match key.code {

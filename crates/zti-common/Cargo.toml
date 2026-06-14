@@ -9,5 +9,15 @@ license.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 dirs.workspace = true
+keyring-core.workspace = true
 serde.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+dbus-secret-service-keyring-store.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true

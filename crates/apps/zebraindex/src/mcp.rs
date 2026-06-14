@@ -156,8 +156,16 @@ impl DaemonPool {
         mut guard: MutexGuard<'_, Option<Client>>,
     ) -> Result<PoolGuard<'_>, ErrorData> {
         if guard.is_none() {
-            let mut client = Client::connect(Duration::from_secs(10), None, None, None, None)
-                .await
+            let mut client = Client::connect(
+                Duration::from_secs(10),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
                 .map_err(|e| internal_err(format!("daemon connect: {e}")))?;
             client
                 .handshake()

@@ -78,6 +78,8 @@ async fn open_client(
         query_prefix,
         passage_prefix,
         model_dtype,
+        None,
+        None,
     )
     .await?;
     client.handshake().await?;

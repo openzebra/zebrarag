@@ -8,10 +8,18 @@ use zti_protocol::response::Response;
 
 use super::app::{self, DEFAULT_DIM};
 use super::config;
-use super::registry;
+use super::registry::{self, RemoteProvider};
 
 const REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/hicaru/zebra_tree_indexer/refs/heads/master/models.toml";
+
+type ClientOpts<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
 
 pub struct ClientCtx {
     pub client: Arc<Mutex<Option<zti_ipc_client::Client>>>,
@@ -19,6 +27,8 @@ pub struct ClientCtx {
     pub query_prefix: Option<Arc<str>>,
     pub passage_prefix: Option<Arc<str>>,
     pub model_dtype: Option<Arc<str>>,
+    pub remote_api_key: Option<Arc<str>>,
+    pub remote_dim_hint: Option<usize>,
     pub search_method: Option<zti_ann::SearchMethod>,
 }
 
@@ -30,16 +40,19 @@ impl ClientCtx {
             query_prefix: app.query_prefix.clone(),
             passage_prefix: app.passage_prefix.clone(),
             model_dtype: app.model_dtype.clone(),
+            remote_api_key: app.remote_api_key.clone(),
+            remote_dim_hint: app.remote_dim_hint,
             search_method: app.search_method,
         }
     }
 
-    pub fn deref_opts(&self) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+    pub fn deref_opts(&self) -> ClientOpts<'_> {
         (
             self.model.as_deref(),
             self.query_prefix.as_deref(),
             self.passage_prefix.as_deref(),
             self.model_dtype.as_deref(),
+            self.remote_api_key.as_deref(),
         )
     }
 }
@@ -77,17 +90,58 @@ pub fn build_change_method_modal(
 }
 
 pub async fn resolve_startup(tx: mpsc::Sender<app::AppMessage>) {
-    if let Ok(Some(cfg)) = config::load()
-        && registry::is_model_downloaded(&cfg.default_model)
-    {
-        let _ = tx
-            .send(app::AppMessage::ConfigResolved {
-                model: Some(cfg.default_model),
-                search_method: cfg.default_search_method,
-                model_dtype: cfg.default_dtype,
-            })
-            .await;
-        return;
+    if let Ok(Some(mut cfg)) = config::load() {
+        if cfg
+            .default_model
+            .starts_with(RemoteProvider::OpenRouter.model_prefix())
+        {
+            if cfg.remote_provider.as_deref() == Some(RemoteProvider::OpenRouter.as_str()) {
+                cfg.remote_api_key = std::env::var("ZEBRA_OPENROUTER_KEY")
+                    .ok()
+                    .or_else(|| zti_common::secrets::retrieve("openrouter"))
+                    .or(cfg.remote_api_key);
+            }
+            if cfg.remote_provider.as_deref() == Some("openrouter")
+                && cfg.remote_api_key.is_some()
+            {
+                let _ = tx
+                    .send(app::AppMessage::ConfigResolved {
+                        model: Some(cfg.default_model),
+                        search_method: cfg.default_search_method,
+                        model_dtype: cfg.default_dtype,
+                        remote_provider: cfg.remote_provider,
+                        remote_api_key: cfg.remote_api_key,
+                        remote_dim_hint: cfg.remote_dim_hint,
+                    })
+                    .await;
+                return;
+            }
+            let _ = tx
+                .send(app::AppMessage::ConfigResolved {
+                    model: None,
+                    search_method: None,
+                    model_dtype: None,
+                    remote_provider: None,
+                    remote_api_key: None,
+                    remote_dim_hint: None,
+                })
+                .await;
+            return;
+        }
+
+        if registry::is_model_downloaded(&cfg.default_model) {
+            let _ = tx
+                .send(app::AppMessage::ConfigResolved {
+                    model: Some(cfg.default_model),
+                    search_method: cfg.default_search_method,
+                    model_dtype: cfg.default_dtype,
+                    remote_provider: None,
+                    remote_api_key: None,
+                    remote_dim_hint: None,
+                })
+                .await;
+            return;
+        }
     }
 
     if let Ok(projects) = zti_store::list_projects().await
@@ -97,12 +151,24 @@ pub async fn resolve_startup(tx: mpsc::Sender<app::AppMessage>) {
             .max_by_key(|p| p.last_indexed_ns)
         && registry::is_model_downloaded(&p.model_id)
     {
-        let _ = config::save(&p.model_id, None, None);
+        let _ = config::save(
+            config::SaveConfig {
+                model: &p.model_id,
+                search_method: None,
+                dtype: None,
+                remote_provider: None,
+                remote_dim_hint: None,
+            },
+            None,
+        );
         let _ = tx
             .send(app::AppMessage::ConfigResolved {
                 model: Some(p.model_id),
                 search_method: None,
                 model_dtype: None,
+                remote_provider: None,
+                remote_api_key: None,
+                remote_dim_hint: None,
             })
             .await;
         return;
@@ -113,12 +179,16 @@ pub async fn resolve_startup(tx: mpsc::Sender<app::AppMessage>) {
             model: None,
             search_method: None,
             model_dtype: None,
+            remote_provider: None,
+            remote_api_key: None,
+            remote_dim_hint: None,
         })
         .await;
 }
 
 pub async fn fetch_registry(tx: mpsc::Sender<app::AppMessage>) {
-    if let Ok(Some(reg)) = registry::load() {
+    if let Ok(Some(mut reg)) = registry::load() {
+        reg.entries.insert(0, registry::openrouter_sentinel());
         let _ = tx.send(app::AppMessage::RegistryLoaded(reg.entries)).await;
         return;
     }
@@ -128,7 +198,8 @@ pub async fn fetch_registry(tx: mpsc::Sender<app::AppMessage>) {
         let body = resp.text().await?;
         let path = registry::registry_path()?;
         tokio::fs::write(&path, body.as_bytes()).await?;
-        let reg = registry::parse(&body)?;
+        let mut reg = registry::parse(&body)?;
+        reg.entries.insert(0, registry::openrouter_sentinel());
         Ok(reg.entries)
     }
     .await;
@@ -141,6 +212,32 @@ pub async fn fetch_registry(tx: mpsc::Sender<app::AppMessage>) {
             let _ = tx.send(app::AppMessage::RegistryError(e.to_string())).await;
         }
     }
+}
+
+pub fn spawn_fetch_remote_models(
+    provider: registry::RemoteProvider,
+    api_key: Arc<str>,
+    tx: mpsc::Sender<app::AppMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = zti_remote_embed::list_models(provider, &api_key).await;
+        match result {
+            Ok(models) => {
+                let _ = tx
+                    .send(app::AppMessage::RemoteModelsLoaded {
+                        provider,
+                        api_key,
+                        models,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(app::AppMessage::RemoteModelsError(e.to_string()))
+                    .await;
+            }
+        }
+    })
 }
 
 pub async fn download_model(model_id: Arc<str>, tx: mpsc::Sender<app::AppMessage>) {
@@ -194,6 +291,8 @@ async fn ensure_client(
     query_prefix: Option<&str>,
     passage_prefix: Option<&str>,
     model_dtype: Option<&str>,
+    remote_api_key: Option<&str>,
+    remote_dim_hint: Option<usize>,
 ) -> anyhow::Result<()> {
     let mut guard = client.lock().await;
     if guard.is_none() {
@@ -203,6 +302,8 @@ async fn ensure_client(
             query_prefix,
             passage_prefix,
             model_dtype,
+            remote_api_key,
+            remote_dim_hint,
         )
         .await?;
         c.handshake().await?;
@@ -227,8 +328,8 @@ fn read_daemon_log_tail(msg: &mut String) {
 }
 
 async fn try_connect(ctx: &ClientCtx, tx: &mpsc::Sender<app::AppMessage>) {
-    let (m, qp, pp, md) = ctx.deref_opts();
-    if let Err(e) = ensure_client(&ctx.client, m, qp, pp, md).await {
+    let (m, qp, pp, md, rk) = ctx.deref_opts();
+    if let Err(e) = ensure_client(&ctx.client, m, qp, pp, md, rk, ctx.remote_dim_hint).await {
         let mut msg = e.to_string();
         read_daemon_log_tail(&mut msg);
         let _ = tx
@@ -287,6 +388,7 @@ async fn daemon_monitor(
                     .send(app::AppMessage::DaemonEnvLoaded {
                         cpus: env_info.cpus,
                         mem_total_mb: env_info.mem_total_mb,
+                        model_dim: env_info.model_dim,
                     })
                     .await;
                 env_fetched = true;
@@ -347,8 +449,8 @@ pub async fn do_search(
     tx: mpsc::Sender<app::AppMessage>,
 ) {
     let result = async {
-        let (m, qp, pp, md) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp, md).await?;
+        let (m, qp, pp, md, rk) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md, rk, ctx.remote_dim_hint).await?;
 
         let project_root = match root {
             Some(r) => r,
@@ -406,8 +508,8 @@ pub async fn do_remove_project(
     tx: mpsc::Sender<app::AppMessage>,
 ) {
     let daemon_err = async {
-        let (m, qp, pp, md) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp, md).await?;
+        let (m, qp, pp, md, rk) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md, rk, ctx.remote_dim_hint).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard
@@ -457,8 +559,8 @@ pub async fn do_index(
     tx: mpsc::Sender<app::AppMessage>,
 ) {
     let result: Result<bool, anyhow::Error> = async {
-        let (m, qp, pp, md) = ctx.deref_opts();
-        ensure_client(&ctx.client, m, qp, pp, md).await?;
+        let (m, qp, pp, md, rk) = ctx.deref_opts();
+        ensure_client(&ctx.client, m, qp, pp, md, rk, ctx.remote_dim_hint).await?;
 
         let mut guard = ctx.client.lock().await;
         let c = guard
@@ -516,9 +618,19 @@ pub async fn do_index(
 }
 
 pub async fn cancel_index(project_root: String, ctx: ClientCtx) {
-    let (m, qp, pp, md) = ctx.deref_opts();
+    let (m, qp, pp, md, rk) = ctx.deref_opts();
     let mut client =
-        match zti_ipc_client::Client::connect(Duration::from_secs(10), m, qp, pp, md).await {
+        match zti_ipc_client::Client::connect(
+            Duration::from_secs(10),
+            m,
+            qp,
+            pp,
+            md,
+            rk,
+            ctx.remote_dim_hint,
+        )
+        .await
+        {
             Ok(c) => c,
             Err(_) => return,
         };

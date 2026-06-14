@@ -4,6 +4,7 @@ pub mod file_type;
 pub mod format;
 pub mod ids;
 pub mod paths;
+pub mod secrets;
 
 use std::ops::Range;
 

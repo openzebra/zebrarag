@@ -6,9 +6,10 @@ use tokio::sync::mpsc;
 use super::app::{self, DEFAULT_DIM};
 use super::config;
 use super::event;
+use super::registry::ModelSource;
 use super::tasks::{
     ClientCtx, IndexMode, build_change_method_modal, cancel_index, do_index, do_remove_project,
-    do_search, download_model, fetch_registry, spawn_daemon_monitor,
+    do_search, download_model, fetch_registry, spawn_daemon_monitor, spawn_fetch_remote_models,
 };
 
 fn spawn_reindex(app: &mut app::App, tx: &mpsc::Sender<app::AppMessage>, mode: IndexMode) {
@@ -65,6 +66,13 @@ pub async fn handle_action(
                 }) if *selected + 1 < methods.len() => {
                     *selected += 1;
                 }
+                app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
+                    models,
+                    selected,
+                    ..
+                }) if *selected + 1 < models.len() => {
+                    *selected += 1;
+                }
                 _ => {}
             }
             if let Some(app::Modal::ChangeIndexMethod {
@@ -80,7 +88,8 @@ pub async fn handle_action(
                 app::Screen::Setup(
                     app::SetupPhase::ModelSelection { selected, .. }
                     | app::SetupPhase::DTypeSelection { selected, .. }
-                    | app::SetupPhase::IndexMethodSelection { selected, .. },
+                    | app::SetupPhase::IndexMethodSelection { selected, .. }
+                    | app::SetupPhase::RemoteModelSelection { selected, .. },
                 ) if *selected > 0 => *selected -= 1,
                 _ => {}
             }
@@ -110,22 +119,51 @@ pub async fn handle_action(
         }
         event::Action::SetupConfirm => match &app.screen {
             app::Screen::Setup(app::SetupPhase::ModelSelection { entries, selected }) => {
-                let entry = &entries[*selected];
-                let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
-                if entry.is_downloaded() {
-                    let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device) {
-                        Some(zti_hw::Device::Cpu) => 0,
-                        _ => 1,
-                    };
-                    app.screen = app::Screen::Setup(app::SetupPhase::DTypeSelection {
-                        model_id,
-                        selected: pre_selected,
-                    });
-                } else {
-                    let id = Arc::clone(&model_id);
-                    app.screen = app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
-                    let tx_c = tx.clone();
-                    tokio::spawn(async move { download_model(id, tx_c).await });
+                let Some(entry) = entries.get(*selected) else {
+                    return;
+                };
+                match entry.source {
+                    ModelSource::Remote(provider) => {
+                        if let Ok(key) = std::env::var(provider.env_var()) {
+                            let api_key: Arc<str> = Arc::from(key.as_str());
+                            let handle = spawn_fetch_remote_models(
+                                provider,
+                                Arc::clone(&api_key),
+                                tx.clone(),
+                            );
+                            app.screen = app::Screen::Setup(
+                                app::SetupPhase::FetchingRemoteModels {
+                                    provider,
+                                    api_key,
+                                    cancel: Arc::new(handle.abort_handle()),
+                                },
+                            );
+                        } else {
+                            app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                                provider,
+                                input: String::with_capacity(128),
+                                error: None,
+                            });
+                        }
+                    }
+                    ModelSource::Local => {
+                        let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
+                        if entry.is_downloaded() {
+                            let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device) {
+                                Some(zti_hw::Device::Cpu) => 0,
+                                _ => 1,
+                            };
+                            app.screen = app::Screen::Setup(app::SetupPhase::DTypeSelection {
+                                model_id,
+                                selected: pre_selected,
+                            });
+                        } else {
+                            let id = Arc::clone(&model_id);
+                            app.screen = app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
+                            let tx_c = tx.clone();
+                            tokio::spawn(async move { download_model(id, tx_c).await });
+                        }
+                    }
                 }
             }
             app::Screen::Setup(app::SetupPhase::DTypeSelection { model_id, selected }) => {
@@ -162,9 +200,14 @@ pub async fn handle_action(
                 let complete_model = Arc::clone(model_id);
 
                 if let Err(e) = config::save(
-                    &save_model,
-                    Some(method.as_str()),
-                    app.model_dtype.as_deref(),
+                    config::SaveConfig {
+                        model: &save_model,
+                        search_method: Some(method.as_str()),
+                        dtype: app.model_dtype.as_deref(),
+                        remote_provider: None,
+                        remote_dim_hint: None,
+                    },
+                    None,
                 ) {
                     app.screen = app::Screen::Setup(app::SetupPhase::Error {
                         message: format!("Failed to save config: {e}"),
@@ -183,6 +226,63 @@ pub async fn handle_action(
                     })
                     .await;
             }
+            app::Screen::Setup(app::SetupPhase::ApiKeyEntry { provider, input, .. }) => {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    if let app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                        ref mut error, ..
+                    }) = app.screen
+                    {
+                        *error = Some(String::from("API key cannot be empty"));
+                    }
+                    return;
+                }
+                let api_key: Arc<str> = Arc::from(trimmed);
+                let provider = *provider;
+                let handle = spawn_fetch_remote_models(provider, Arc::clone(&api_key), tx.clone());
+                app.screen = app::Screen::Setup(app::SetupPhase::FetchingRemoteModels {
+                    provider,
+                    api_key,
+                    cancel: Arc::new(handle.abort_handle()),
+                });
+            }
+            app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
+                provider,
+                api_key,
+                models,
+                selected,
+            }) => {
+                let Some(model) = models.get(*selected) else {
+                    return;
+                };
+                let model_str = format!("{}{}", provider.model_prefix(), model.id);
+                let model_arc: Arc<str> = Arc::from(model_str.as_str());
+                if let Err(e) = config::save(
+                    config::SaveConfig {
+                        model: &model_str,
+                        search_method: None,
+                        dtype: None,
+                        remote_provider: Some(provider.as_str()),
+                        remote_dim_hint: None,
+                    },
+                    Some(api_key.as_ref()),
+                ) {
+                    app.screen = app::Screen::Setup(app::SetupPhase::Error {
+                        message: format!("Failed to save config: {e}"),
+                        can_retry: false,
+                    });
+                    return;
+                }
+                app.remote_provider = Some(*provider);
+                app.remote_api_key = Some(Arc::clone(api_key));
+                app.remote_dim_hint = None;
+                app.screen = app::Screen::Setup(app::SetupPhase::Launching {
+                    model_id: Arc::clone(&model_arc),
+                });
+                let _ = tx
+                    .send(app::AppMessage::SetupComplete { model: model_arc })
+                    .await;
+            }
             _ => {}
         },
         event::Action::SetupBack => match &app.screen {
@@ -195,11 +295,39 @@ pub async fn handle_action(
                     app.should_quit = true;
                 }
             }
-            app::Screen::Setup(app::SetupPhase::DTypeSelection { .. }) => {
-                let entries = app.setup_registry.clone().unwrap_or_default();
-                app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
-                    entries,
-                    selected: 0,
+            app::Screen::Setup(
+                app::SetupPhase::DTypeSelection { .. } | app::SetupPhase::ApiKeyEntry { .. },
+            ) => {
+                if let Some(entries) = app.setup_registry.clone() {
+                    app.screen = app::Screen::Setup(app::SetupPhase::ModelSelection {
+                        entries,
+                        selected: 0,
+                    });
+                } else {
+                    app.screen = app::Screen::Setup(app::SetupPhase::FetchingRegistry);
+                    let tx_c = tx.clone();
+                    tokio::spawn(async move { fetch_registry(tx_c).await });
+                }
+            }
+            app::Screen::Setup(app::SetupPhase::FetchingRemoteModels {
+                cancel,
+                provider,
+                api_key,
+            }) => {
+                cancel.abort();
+                app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                    provider: *provider,
+                    input: api_key.to_string(),
+                    error: None,
+                });
+            }
+            app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
+                provider, api_key, ..
+            }) => {
+                app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                    provider: *provider,
+                    input: api_key.to_string(),
+                    error: None,
                 });
             }
             _ => {}
@@ -260,7 +388,15 @@ pub async fn handle_action(
             app.results_scroll = (app.results_scroll + step).min(max);
         }
         event::Action::Input(c) => {
-            if let Some(app::Modal::AddProject {
+            if let app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                ref mut input,
+                ref mut error,
+                ..
+            }) = app.screen
+            {
+                input.push(c);
+                *error = None;
+            } else if let Some(app::Modal::AddProject {
                 ref mut path_input,
                 ref mut error,
                 ..
@@ -273,7 +409,11 @@ pub async fn handle_action(
             }
         }
         event::Action::Backspace => {
-            if let Some(app::Modal::AddProject {
+            if let app::Screen::Setup(app::SetupPhase::ApiKeyEntry { ref mut input, .. }) =
+                app.screen
+            {
+                input.pop();
+            } else if let Some(app::Modal::AddProject {
                 ref mut path_input, ..
             }) = app.modal
             {
@@ -409,11 +549,7 @@ pub async fn handle_action(
                 }
                 let (method, _) = methods[selected];
                 app.search_method = Some(method);
-                if let Err(e) = config::save(
-                    app.model.as_deref().unwrap_or(""),
-                    Some(method.as_str()),
-                    app.model_dtype.as_deref(),
-                ) {
+                if let Err(e) = config::update_search_method(method.as_str()) {
                     app.modal = Some(app::Modal::Error {
                         message: format!("Failed to save config: {e}"),
                     });

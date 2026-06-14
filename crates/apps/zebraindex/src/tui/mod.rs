@@ -93,9 +93,21 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             model: Some(m),
             search_method,
             model_dtype,
+            remote_provider,
+            remote_api_key,
+            remote_dim_hint,
         } => {
             if let Some(dt) = &model_dtype {
-                let _ = config::save(&m, search_method.as_deref(), Some(dt));
+                let _ = config::save(
+                    config::SaveConfig {
+                        model: &m,
+                        search_method: search_method.as_deref(),
+                        dtype: Some(dt),
+                        remote_provider: remote_provider.as_deref(),
+                        remote_dim_hint,
+                    },
+                    remote_api_key.as_deref(),
+                );
             }
             app.model = Some(Arc::from(m.as_str()));
             if let Some(s) = &search_method {
@@ -104,6 +116,11 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             if let Some(d) = model_dtype {
                 app.model_dtype = Some(Arc::from(d));
             }
+            app.remote_provider = remote_provider
+                .as_deref()
+                .and_then(|provider| zti_remote_embed::RemoteProvider::try_from(provider).ok());
+            app.remote_api_key = remote_api_key.map(Arc::from);
+            app.remote_dim_hint = remote_dim_hint;
             app.should_run.store(true, Ordering::Relaxed);
             app.screen = Screen::Main;
             spawn_daemon_monitor(app, tx);
@@ -130,6 +147,24 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             app.screen = Screen::Setup(SetupPhase::Error {
                 message: msg,
                 can_retry: false,
+            });
+        }
+        AppMessage::RemoteModelsLoaded {
+            provider,
+            api_key,
+            models,
+        } => {
+            app.screen = Screen::Setup(SetupPhase::RemoteModelSelection {
+                provider,
+                api_key,
+                models: Arc::from(models),
+                selected: 0,
+            });
+        }
+        AppMessage::RemoteModelsError(msg) => {
+            app.screen = Screen::Setup(SetupPhase::Error {
+                message: msg,
+                can_retry: true,
             });
         }
         AppMessage::SetupComplete { model } => {
@@ -207,6 +242,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
         AppMessage::DaemonEnvLoaded {
             cpus: env_cpus,
             mem_total_mb: env_mem,
+            model_dim,
         } => {
             if let DaemonStatus::Running {
                 ref mut cpus,
@@ -216,6 +252,18 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             {
                 *cpus = env_cpus;
                 *mem_total_mb = env_mem;
+            }
+            if app
+                .model
+                .as_deref()
+                .is_some_and(|model| {
+                    model.starts_with(zti_remote_embed::RemoteProvider::OpenRouter.model_prefix())
+                })
+                && model_dim > 0
+                && app.remote_dim_hint != Some(model_dim as usize)
+            {
+                app.remote_dim_hint = Some(model_dim as usize);
+                let _ = config::update_dim_hint(model_dim as usize);
             }
         }
         other => app.apply_message(other),

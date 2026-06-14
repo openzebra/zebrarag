@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 
 use ratatui::Frame;
@@ -7,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders};
 
 use super::super::app::{App, DaemonStatus};
+use super::super::registry::RemoteProvider;
 
 pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let color = match &app.daemon_status {
@@ -32,7 +34,22 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         DaemonStatus::Error(_) => "Error",
     };
 
-    let model = app.model.as_deref().unwrap_or("--");
+    let model_label: Cow<'_, str> = match app.model.as_deref() {
+        None => Cow::Borrowed("--"),
+        Some(model) => model
+            .strip_prefix(RemoteProvider::OpenRouter.model_prefix())
+            .map(|remote| Cow::Owned(format!("remote:{remote}")))
+            .unwrap_or(Cow::Borrowed(model)),
+    };
+    let model_style = if app
+        .model
+        .as_deref()
+        .is_some_and(|model| model.starts_with(RemoteProvider::OpenRouter.model_prefix()))
+    {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(color)
+    };
     let dtype = app.model_dtype.as_deref().unwrap_or("--");
 
     let uptime_str = match &app.daemon_status {
@@ -50,33 +67,37 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let (device, cpus, mem_total_mb) = app.effective_hardware();
 
-    let mut text = String::with_capacity(160);
+    let block = Block::default().title(" zebraindex ").borders(Borders::ALL);
     if let DaemonStatus::Error(err_msg) = &app.daemon_status {
         let first_line = err_msg.lines().next().unwrap_or(err_msg.as_str());
+        let mut text = String::with_capacity(160);
         write!(
             text,
             "{}  Error: {}  (see daemon.log)",
             indicator, first_line
         )
         .ok();
-    } else {
-        write!(
-            text,
-            "{}  {}  Model: {}  DType: {}  Device: {}  CPU: {}",
-            indicator, status_label, model, dtype, device, cpus,
-        )
-        .ok();
-
-        if mem_total_mb > 0 {
-            write!(text, "  RAM: {}M", mem_total_mb).ok();
-        }
-        if let Some(uptime) = &uptime_str {
-            write!(text, "  {}", uptime).ok();
-        }
+        let line = Line::from(vec![Span::styled(text, Style::default().fg(color))]);
+        f.render_widget(ratatui::widgets::Paragraph::new(line).block(block), area);
+        return;
     }
 
-    let line = Line::from(vec![Span::styled(text, Style::default().fg(color))]);
-    let block = Block::default().title(" zebraindex ").borders(Borders::ALL);
-    let para = ratatui::widgets::Paragraph::new(line).block(block);
-    f.render_widget(para, area);
+    let mut tail = String::with_capacity(96);
+    write!(tail, "  DType: {dtype}  Device: {device}  CPU: {cpus}").ok();
+    if mem_total_mb > 0 {
+        write!(tail, "  RAM: {mem_total_mb}M").ok();
+    }
+    if let Some(uptime) = &uptime_str {
+        write!(tail, "  {uptime}").ok();
+    }
+
+    let line = Line::from(vec![
+        Span::styled(
+            format!("{indicator}  {status_label}  Model: "),
+            Style::default().fg(color),
+        ),
+        Span::styled(model_label, model_style),
+        Span::styled(tail, Style::default().fg(color)),
+    ]);
+    f.render_widget(ratatui::widgets::Paragraph::new(line).block(block), area);
 }

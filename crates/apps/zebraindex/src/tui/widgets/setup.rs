@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::super::app::{IndexMethodButton, SetupPhase};
-use super::super::registry::ModelEntry;
+use super::super::registry::{ModelEntry, ModelSource, RemoteProvider};
 use super::common::{centered_rect, render_bar, render_button_row, spinner_ch};
 
 pub struct DTypeOption {
@@ -66,6 +66,20 @@ pub fn draw(f: &mut Frame, phase: &SetupPhase, tick: u16) {
             false,
             IndexMethodButton::default(),
         ),
+        SetupPhase::ApiKeyEntry {
+            provider,
+            input,
+            error,
+        } => draw_api_key_entry(f, *provider, input, error.as_deref()),
+        SetupPhase::FetchingRemoteModels { provider, .. } => {
+            draw_spinner(f, &format!("Fetching {} models...", provider.label()), tick);
+        }
+        SetupPhase::RemoteModelSelection {
+            provider,
+            models,
+            selected,
+            ..
+        } => draw_remote_model_selection(f, *provider, models, *selected),
         SetupPhase::Launching { model_id, .. } => draw_launching(f, model_id, tick),
         SetupPhase::Error {
             message, can_retry, ..
@@ -170,10 +184,12 @@ fn draw_model_selection(f: &mut Frame, entries: &[ModelEntry], selected: usize) 
 
     let mut items: Vec<ListItem> = Vec::with_capacity(entries.len());
     for entry in entries.iter() {
-        let tag = if entry.is_downloaded() {
-            Span::styled(" [downloaded]", Style::default().fg(Color::Green))
-        } else {
-            Span::raw("")
+        let tag = match entry.source {
+            ModelSource::Remote(_) => Span::styled(" [remote]", Style::default().fg(Color::Yellow)),
+            ModelSource::Local if entry.is_downloaded() => {
+                Span::styled(" [downloaded]", Style::default().fg(Color::Green))
+            }
+            ModelSource::Local => Span::raw(""),
         };
 
         let line1 = Line::from(vec![
@@ -533,4 +549,117 @@ fn draw_error(f: &mut Frame, message: &str, can_retry: bool) {
 
     let para = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     f.render_widget(para, area);
+}
+
+fn draw_api_key_entry(f: &mut Frame, provider: RemoteProvider, input: &str, error: Option<&str>) {
+    let area = centered_rect(60, 35, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(" {} — Enter API Key ", provider.label()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let masked = if input.len() > 4 {
+        let tail_start = input.len().saturating_sub(4);
+        format!("{}{}", "*".repeat(tail_start), &input[tail_start..])
+    } else {
+        "*".repeat(input.len())
+    };
+
+    let env_hint = format!("  Tip: set {} to skip this screen", provider.env_var());
+    let storage_hint = if zti_common::secrets::available() {
+        "  Key will be stored in your OS keyring."
+    } else {
+        "  ⚠ No OS keyring available; key will be stored as plaintext locally."
+    };
+    let storage_style = if zti_common::secrets::available() {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    let mut lines = Vec::with_capacity(10);
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Paste your API key:",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  > "),
+            Span::styled(
+                masked,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(storage_hint, storage_style)),
+        Line::from(Span::styled(env_hint, Style::default().fg(Color::DarkGray))),
+    ]);
+    if let Some(err) = error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ✗ {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+}
+
+fn draw_remote_model_selection(
+    f: &mut Frame,
+    provider: RemoteProvider,
+    models: &[zti_remote_embed::RemoteModelInfo],
+    selected: usize,
+) {
+    let area = centered_rect(80, 80, f.area());
+    f.render_widget(Clear, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(area);
+
+    let mut items: Vec<ListItem> = Vec::with_capacity(models.len());
+    for model in models {
+        let ctx = if model.context_length > 0 {
+            Span::styled(
+                format!("  ({} ctx)", model.context_length),
+                Style::default().fg(Color::DarkGray),
+            )
+        } else {
+            Span::raw("")
+        };
+        let line1 = Line::from(vec![Span::styled(&model.id, Style::default()), ctx]);
+        let line2 = Line::from(vec![
+            Span::raw("    "),
+            Span::styled(&model.description, Style::default().fg(Color::Gray)),
+        ]);
+        items.push(ListItem::new(vec![line1, line2]));
+    }
+
+    let block = Block::default()
+        .title(format!(" {} — Select Embedding Model ", provider.label()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let mut state = ListState::default().with_selected(Some(selected));
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_symbol("> ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        layout[0],
+        &mut state,
+    );
+
+    let help = Paragraph::new("  j/k: navigate   Enter: select   Esc: back")
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(help, layout[1]);
 }

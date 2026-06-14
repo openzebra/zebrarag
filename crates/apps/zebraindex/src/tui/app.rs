@@ -8,7 +8,7 @@ use zti_protocol::request::SearchMode;
 use zti_protocol::response::SearchResults;
 use zti_store::ProjectRow;
 
-use super::registry::ModelEntry;
+use super::registry::{ModelEntry, RemoteProvider};
 
 pub const DEFAULT_DIM: usize = 768;
 pub const PREVIEW_LINES: usize = 6;
@@ -43,6 +43,22 @@ pub enum SetupPhase {
     IndexMethodSelection {
         model_id: Arc<str>,
         methods: Arc<[(zti_ann::SearchMethod, bool)]>,
+        selected: usize,
+    },
+    ApiKeyEntry {
+        provider: RemoteProvider,
+        input: String,
+        error: Option<String>,
+    },
+    FetchingRemoteModels {
+        provider: RemoteProvider,
+        api_key: Arc<str>,
+        cancel: Arc<tokio::task::AbortHandle>,
+    },
+    RemoteModelSelection {
+        provider: RemoteProvider,
+        api_key: Arc<str>,
+        models: Arc<[zti_remote_embed::RemoteModelInfo]>,
         selected: usize,
     },
     Launching {
@@ -130,6 +146,7 @@ pub enum AppMessage {
     DaemonEnvLoaded {
         cpus: u32,
         mem_total_mb: u64,
+        model_dim: u32,
     },
     ProjectsLoaded(Vec<ProjectRow>),
     SearchDone(SearchResults),
@@ -138,11 +155,20 @@ pub enum AppMessage {
         model: Option<String>,
         search_method: Option<String>,
         model_dtype: Option<String>,
+        remote_provider: Option<String>,
+        remote_api_key: Option<String>,
+        remote_dim_hint: Option<usize>,
     },
     RegistryLoaded(Vec<ModelEntry>),
     RegistryError(String),
     ModelDownloaded(Arc<str>),
     ModelDownloadError(String),
+    RemoteModelsLoaded {
+        provider: RemoteProvider,
+        api_key: Arc<str>,
+        models: Vec<zti_remote_embed::RemoteModelInfo>,
+    },
+    RemoteModelsError(String),
     SetupComplete {
         model: Arc<str>,
     },
@@ -186,6 +212,9 @@ pub struct App {
     pub query_prefix: Option<Arc<str>>,
     pub passage_prefix: Option<Arc<str>>,
     pub model_dtype: Option<Arc<str>>,
+    pub remote_provider: Option<RemoteProvider>,
+    pub remote_api_key: Option<Arc<str>>,
+    pub remote_dim_hint: Option<usize>,
     pub search_method: Option<zti_ann::SearchMethod>,
     pub local_hardware: Option<zti_hw::Hardware>,
     pub env_cpus: u32,
@@ -220,6 +249,9 @@ impl Default for App {
             query_prefix: None,
             passage_prefix: None,
             model_dtype: None,
+            remote_provider: None,
+            remote_api_key: None,
+            remote_dim_hint: None,
             search_method: None,
             local_hardware: None,
             env_cpus: 0,
@@ -263,7 +295,11 @@ impl App {
     pub fn apply_message(&mut self, msg: AppMessage) {
         match msg {
             AppMessage::DaemonStatusUpdate(status) => self.daemon_status = status,
-            AppMessage::DaemonEnvLoaded { cpus, mem_total_mb } => {
+            AppMessage::DaemonEnvLoaded {
+                cpus,
+                mem_total_mb,
+                ..
+            } => {
                 self.env_cpus = cpus;
                 self.env_mem_total_mb = mem_total_mb;
             }
