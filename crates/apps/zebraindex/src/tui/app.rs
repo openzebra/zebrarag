@@ -49,6 +49,7 @@ pub enum SetupPhase {
         provider: RemoteProvider,
         input: String,
         error: Option<String>,
+        from_keyring: bool,
     },
     FetchingRemoteModels {
         provider: RemoteProvider,

@@ -124,13 +124,31 @@ pub async fn handle_action(
                 };
                 match entry.source {
                     ModelSource::Remote(provider) => {
-                        // The key is always entered here in the TUI (and then
-                        // persisted to the keyring) — never read from the env.
-                        app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
-                            provider,
-                            input: String::with_capacity(128),
-                            error: None,
-                        });
+                        // Check for a stored key before asking — the key may
+                        // already be in memory (from startup or a previous
+                        // provider selection) or in the OS keyring.
+                        let stored = app
+                            .remote_api_key
+                            .clone()
+                            .or_else(|| zti_common::secrets::retrieve(provider.as_str()).map(Arc::from));
+                        if let Some(key) = stored {
+                            // Key found: pre-fill the entry so the user sees it
+                            // masked and can press Enter to continue or type a
+                            // new key to override.
+                            app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                                provider,
+                                input: key.to_string(),
+                                error: None,
+                                from_keyring: true,
+                            });
+                        } else {
+                            app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                                provider,
+                                input: String::with_capacity(128),
+                                error: None,
+                                from_keyring: false,
+                            });
+                        }
                     }
                     ModelSource::Local => {
                         let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
@@ -305,6 +323,7 @@ pub async fn handle_action(
                     provider: *provider,
                     input: api_key.to_string(),
                     error: None,
+                    from_keyring: false,
                 });
             }
             app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
@@ -314,6 +333,7 @@ pub async fn handle_action(
                     provider: *provider,
                     input: api_key.to_string(),
                     error: None,
+                    from_keyring: false,
                 });
             }
             _ => {}

@@ -98,6 +98,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             remote_dim_hint,
         } => {
             if let Some(dt) = &model_dtype {
+                // Metadata-only save: the API key was already retrieved from the
+                // keyring by resolve_startup — re-saving it would trigger a
+                // redundant keychain write prompt on macOS.
                 let _ = config::save(
                     config::SaveConfig {
                         model: &m,
@@ -106,7 +109,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                         remote_provider: remote_provider.as_deref(),
                         remote_dim_hint,
                     },
-                    remote_api_key.as_deref(),
+                    None,
                 );
             }
             app.model = Some(Arc::from(m.as_str()));

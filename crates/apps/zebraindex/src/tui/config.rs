@@ -60,13 +60,38 @@ pub struct SaveConfig<'a> {
 /// OS keyring and only falls back to plaintext config when no keyring backend is
 /// available. This is the single writer of the secret, so no other call site can
 /// re-leak it. Returns where the key landed for UI messaging.
+///
+/// When `remote_key` is `None` this is a **metadata-only update** (model, dtype,
+/// search method) — the existing API key storage is preserved as-is, avoiding an
+/// unnecessary keychain write that would trigger a second OS prompt on macOS.
 pub fn save(args: SaveConfig<'_>, remote_key: Option<&str>) -> Result<RemoteKeyLocation> {
     let location = match (remote_key, args.remote_provider) {
         (Some(key), Some(provider)) if zti_common::secrets::store(provider, key) => {
             RemoteKeyLocation::Keyring
         }
         (Some(_), Some(_)) => RemoteKeyLocation::Config,
+        (None, _) => {
+            // Metadata-only update: preserve any key that lives in the existing
+            // config file (keyring-unavailable fallback).
+            if let Ok(Some(existing)) = load()
+                && existing.remote_api_key.is_some()
+            {
+                RemoteKeyLocation::Config
+            } else {
+                RemoteKeyLocation::None
+            }
+        }
         _ => RemoteKeyLocation::None,
+    };
+
+    let remote_api_key = match location {
+        RemoteKeyLocation::Config => remote_key.map(str::to_owned).or_else(|| {
+            load()
+                .ok()
+                .flatten()
+                .and_then(|existing| existing.remote_api_key)
+        }),
+        RemoteKeyLocation::Keyring | RemoteKeyLocation::None => None,
     };
 
     let cfg = TuiConfig {
@@ -74,10 +99,7 @@ pub fn save(args: SaveConfig<'_>, remote_key: Option<&str>) -> Result<RemoteKeyL
         default_search_method: args.search_method.map(str::to_owned),
         default_dtype: args.dtype.map(str::to_owned),
         remote_provider: args.remote_provider.map(str::to_owned),
-        remote_api_key: match location {
-            RemoteKeyLocation::Config => remote_key.map(str::to_owned),
-            RemoteKeyLocation::Keyring | RemoteKeyLocation::None => None,
-        },
+        remote_api_key,
         remote_dim_hint: args.remote_dim_hint,
     };
     write(&cfg)?;
