@@ -124,27 +124,13 @@ pub async fn handle_action(
                 };
                 match entry.source {
                     ModelSource::Remote(provider) => {
-                        if let Ok(key) = std::env::var(provider.env_var()) {
-                            let api_key: Arc<str> = Arc::from(key.as_str());
-                            let handle = spawn_fetch_remote_models(
-                                provider,
-                                Arc::clone(&api_key),
-                                tx.clone(),
-                            );
-                            app.screen = app::Screen::Setup(
-                                app::SetupPhase::FetchingRemoteModels {
-                                    provider,
-                                    api_key,
-                                    cancel: Arc::new(handle.abort_handle()),
-                                },
-                            );
-                        } else {
-                            app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
-                                provider,
-                                input: String::with_capacity(128),
-                                error: None,
-                            });
-                        }
+                        // The key is always entered here in the TUI (and then
+                        // persisted to the keyring) — never read from the env.
+                        app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                            provider,
+                            input: String::with_capacity(128),
+                            error: None,
+                        });
                     }
                     ModelSource::Local => {
                         let model_id: Arc<str> = Arc::from(entry.model_id.as_str());

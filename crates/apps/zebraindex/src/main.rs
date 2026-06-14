@@ -94,11 +94,12 @@ fn main() -> Result<()> {
             passage_prefix,
             model_dtype,
         }) => {
-            let env_openrouter_key = std::env::var("ZEBRA_OPENROUTER_KEY").ok();
+            let env_remote_key = zti_remote_embed::RemoteProvider::from_model_id(&model)
+                .and_then(|(provider, _)| std::env::var(provider.env_var()).ok());
             let env_remote_dim_hint = std::env::var("ZEBRA_REMOTE_DIM_HINT")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok());
-            let remote_api_key = env_openrouter_key.as_deref();
+            let remote_api_key = env_remote_key.as_deref();
             let config = zti_daemon::DaemonConfig {
                 model: Cow::Owned(model),
                 query_prefix: query_prefix.as_deref(),

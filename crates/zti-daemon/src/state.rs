@@ -138,8 +138,8 @@ impl DaemonState {
             return Ok(Arc::clone(engine));
         }
 
-        let result = if let Some(remote_model) =
-            model_id.strip_prefix(RemoteProvider::OpenRouter.model_prefix())
+        let result = if let Some((provider, remote_model)) =
+            RemoteProvider::from_model_id(model_id)
         {
             let api_key = self
                 .remote_api_key
@@ -153,14 +153,9 @@ impl DaemonState {
                 context_length: 0,
                 pricing: None,
             };
-            RemoteEmbedEngine::connect(
-                RemoteProvider::OpenRouter,
-                api_key,
-                &info,
-                self.remote_dim_hint,
-            )
-            .await
-            .map(AnyEmbedEngine::Remote)
+            RemoteEmbedEngine::connect(provider, api_key, &info, self.remote_dim_hint)
+                .await
+                .map(AnyEmbedEngine::Remote)
         } else {
             let hw = Arc::clone(&self.hardware);
             let owned = model_id.to_owned();

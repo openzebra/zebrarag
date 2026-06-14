@@ -74,8 +74,8 @@ candle-core        = { version = "0.10.2", default-features = false }
 candle-nn          = { version = "0.10.2", default-features = false }
 candle-transformers = { version = "0.10.2", default-features = false }
 tokenizers  = { version = "0.23", default-features = false, features = ["fancy-regex"] }
-hf-hub      = { version = "1.0.0-rc.1", default-features = false, features = ["blocking","rustls-tls"] }
-time        = "=0.3.47"
+hf-hub      = { version = "0.4", default-features = false, features = ["ureq"] }
+time        = "0.3"
 
 bitpolar = { version = "0.3", features = ["parallel", "simd", "serde-support"] }
 

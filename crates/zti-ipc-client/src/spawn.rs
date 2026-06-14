@@ -134,8 +134,10 @@ fn spawn_daemon(
     if let Some(d) = model_dtype {
         cmd.args(["--model-dtype", d]);
     }
-    if let Some(key) = remote_api_key {
-        cmd.env("ZEBRA_OPENROUTER_KEY", key);
+    if let Some(key) = remote_api_key
+        && let Some((provider, _)) = model.and_then(zti_remote_embed::RemoteProvider::from_model_id)
+    {
+        cmd.env(provider.env_var(), key);
     }
     if let Some(dim) = remote_dim_hint {
         cmd.env("ZEBRA_REMOTE_DIM_HINT", dim.to_string());

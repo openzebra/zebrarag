@@ -76,10 +76,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         passage_prefix: config.passage_prefix,
         model_dtype: config.model_dtype.and_then(zti_embed::parse_model_dtype),
     };
-    let is_remote_model = config
-        .model
-        .as_ref()
-        .starts_with(RemoteProvider::OpenRouter.model_prefix());
+    let is_remote_model = RemoteProvider::from_model_id(config.model.as_ref()).is_some();
     let preloaded_engine = if is_remote_model {
         None
     } else {
@@ -109,15 +106,12 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         let model_id: Arc<str> = Arc::from(config.model.as_ref());
         let engine = if let Some(engine) = preloaded_engine {
             engine
-        } else if let Some(remote_model) = config
-            .model
-            .as_ref()
-            .strip_prefix(RemoteProvider::OpenRouter.model_prefix())
+        } else if let Some((provider, remote_model)) =
+            RemoteProvider::from_model_id(config.model.as_ref())
         {
-            let api_key = remote_api_key
-                .as_ref()
-                .map(Arc::clone)
-                .ok_or_else(|| anyhow::anyhow!("remote API key is required for OpenRouter"))?;
+            let api_key = remote_api_key.as_ref().map(Arc::clone).ok_or_else(|| {
+                anyhow::anyhow!("remote API key is required for {}", provider.label())
+            })?;
             let info = RemoteModelInfo {
                 id: remote_model.to_string(),
                 name: remote_model.to_string(),
@@ -126,7 +120,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
                 pricing: None,
             };
             let remote = RemoteEmbedEngine::connect(
-                RemoteProvider::OpenRouter,
+                provider,
                 Arc::clone(&api_key),
                 &info,
                 remote_dim_hint,

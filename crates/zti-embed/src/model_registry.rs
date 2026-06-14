@@ -394,91 +394,56 @@ fn split_model_id(model_id: &str) -> Result<(&str, &str)> {
     }
 }
 
+/// Whether `model_id`'s files are already present in the local HF cache, so it
+/// can be loaded without a network download.
+pub fn is_model_cached(model_id: &str) -> bool {
+    zti_common::paths::models_dir().is_ok_and(|cache_dir| {
+        hf_hub::Cache::new(cache_dir)
+            .model(model_id.to_string())
+            .get("config.json")
+            .is_some()
+    })
+}
+
 fn resolve_hf(model_id: &str) -> Result<ResolvedModel> {
-    let (owner, name) = split_model_id(model_id)?;
+    // Validate the "owner/name" shape up front for a clear early error.
+    split_model_id(model_id)?;
 
-    let model_dir = zti_common::paths::models_dir()?.join(model_id.replace('/', "_"));
-    std::fs::create_dir_all(&model_dir)?;
+    let cache_dir = zti_common::paths::models_dir()?;
+    std::fs::create_dir_all(&cache_dir)?;
 
-    let marker = model_dir.join(".zti_clone_complete");
+    let api = hf_hub::api::sync::ApiBuilder::new()
+        .with_cache_dir(cache_dir.clone())
+        .build()
+        .context("building HF API client")?;
+    let repo = api.model(model_id.to_string());
 
-    let need_clone = if marker.exists() {
-        let local_sha = std::fs::read_to_string(&marker)
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        match local_sha {
-            Some(local_sha) => {
-                let client = hf_hub::HFClientSync::new()?;
-                let repo = client.model(owner, name);
-                match repo.info().send() {
-                    Ok(info) => match info.sha {
-                        Some(ref remote_sha) if remote_sha != &local_sha => {
-                            tracing::info!(
-                                local = %local_sha,
-                                remote = %remote_sha,
-                                "HF revision changed, re-cloning"
-                            );
-                            true
-                        }
-                        _ => false,
-                    },
-                    Err(e) => {
-                        tracing::debug!(error = %e, "skip SHA check (offline?)");
-                        false
-                    }
-                }
+    // List the repo and fetch every file into the managed cache. hf-hub skips
+    // files already present for the current revision, so repeat runs are cheap
+    // and incremental. A network failure here is non-fatal: fall through to the
+    // cache lookup so an already-downloaded model still resolves offline.
+    match repo.info() {
+        Ok(info) => {
+            tracing::info!(model = model_id, sha = %info.sha, "syncing HF repo");
+            for sibling in &info.siblings {
+                repo.get(&sibling.rfilename).with_context(|| {
+                    format!("downloading {} for {model_id}", sibling.rfilename)
+                })?;
             }
-            None => false,
         }
-    } else {
-        !(model_dir.join("config.json").exists()
-            && find_tokenizer_in(&model_dir).is_ok()
-            && find_safetensors_in(&model_dir).is_ok())
-    };
-
-    if need_clone {
-        let client = hf_hub::HFClientSync::new()?;
-        let repo = client.model(owner, name);
-
-        let info = repo
-            .info()
-            .send()
-            .with_context(|| format!("fetching HF repo info for {}", model_id))?;
-        let sha = info.sha.clone().unwrap_or_default();
-
-        tracing::info!(model = model_id, sha = %sha, "cloning HF repo (full)");
-
-        let sha_opt = if sha.is_empty() {
-            None
-        } else {
-            Some(sha.clone())
-        };
-        repo.snapshot_download()
-            .maybe_revision(sha_opt)
-            .local_dir(model_dir.clone())
-            .send()
-            .with_context(|| format!("downloading HF repo for {}", model_id))?;
-
-        let bytes: u64 = walkdir::WalkDir::new(&model_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum();
-        tracing::info!(
-            model = model_id,
-            size_mb = bytes >> 20,
-            dir = %model_dir.display(),
-            "HF repo cloned",
-        );
-
-        let marker_content = if sha.is_empty() { "unknown" } else { &sha };
-        std::fs::write(&marker, marker_content.as_bytes())
-            .with_context(|| format!("writing {}", marker.display()))?;
-    } else {
-        tracing::debug!(model = model_id, "HF repo already cloned, skipping");
+        Err(e) => tracing::debug!(error = %e, "HF repo info failed (offline?); using cache"),
     }
 
-    resolve_local(&model_dir)
+    // Resolve the snapshot directory from the local cache (no network).
+    let config_path = hf_hub::Cache::new(cache_dir)
+        .model(model_id.to_string())
+        .get("config.json")
+        .ok_or_else(|| {
+            anyhow::anyhow!("model '{model_id}' is not cached and could not be downloaded")
+        })?;
+    let snapshot_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no parent dir for {}", config_path.display()))?;
+
+    resolve_local(snapshot_dir)
 }

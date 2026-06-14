@@ -91,25 +91,19 @@ pub fn build_change_method_modal(
 
 pub async fn resolve_startup(tx: mpsc::Sender<app::AppMessage>) {
     if let Ok(Some(mut cfg)) = config::load() {
-        if cfg
-            .default_model
-            .starts_with(RemoteProvider::OpenRouter.model_prefix())
-        {
-            if cfg.remote_provider.as_deref() == Some(RemoteProvider::OpenRouter.as_str()) {
-                cfg.remote_api_key = std::env::var("ZEBRA_OPENROUTER_KEY")
-                    .ok()
-                    .or_else(|| zti_common::secrets::retrieve("openrouter"))
-                    .or(cfg.remote_api_key);
-            }
-            if cfg.remote_provider.as_deref() == Some("openrouter")
-                && cfg.remote_api_key.is_some()
-            {
+        if let Some((provider, _)) = RemoteProvider::from_model_id(&cfg.default_model) {
+            // The key was entered at setup and saved to the OS keyring (keyed by
+            // provider name); fall back to a plaintext config value only on
+            // platforms without a keyring backend.
+            cfg.remote_api_key =
+                zti_common::secrets::retrieve(provider.as_str()).or(cfg.remote_api_key);
+            if cfg.remote_api_key.is_some() {
                 let _ = tx
                     .send(app::AppMessage::ConfigResolved {
                         model: Some(cfg.default_model),
                         search_method: cfg.default_search_method,
                         model_dtype: cfg.default_dtype,
-                        remote_provider: cfg.remote_provider,
+                        remote_provider: Some(provider.as_str().to_string()),
                         remote_api_key: cfg.remote_api_key,
                         remote_dim_hint: cfg.remote_dim_hint,
                     })
@@ -188,7 +182,7 @@ pub async fn resolve_startup(tx: mpsc::Sender<app::AppMessage>) {
 
 pub async fn fetch_registry(tx: mpsc::Sender<app::AppMessage>) {
     if let Ok(Some(mut reg)) = registry::load() {
-        reg.entries.insert(0, registry::openrouter_sentinel());
+        reg.entries.splice(0..0, registry::remote_sentinels());
         let _ = tx.send(app::AppMessage::RegistryLoaded(reg.entries)).await;
         return;
     }
@@ -199,7 +193,7 @@ pub async fn fetch_registry(tx: mpsc::Sender<app::AppMessage>) {
         let path = registry::registry_path()?;
         tokio::fs::write(&path, body.as_bytes()).await?;
         let mut reg = registry::parse(&body)?;
-        reg.entries.insert(0, registry::openrouter_sentinel());
+        reg.entries.splice(0..0, registry::remote_sentinels());
         Ok(reg.entries)
     }
     .await;

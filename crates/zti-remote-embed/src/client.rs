@@ -11,8 +11,6 @@ use crate::provider::RemoteProvider;
 const TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: usize = 4;
 const BACKOFF_MS: [u64; MAX_RETRIES] = [500, 1_000, 2_000, 4_000];
-const OPENROUTER_REFERER: &str = "https://github.com/hicaru/zebra_tree_indexer";
-const OPENROUTER_TITLE: &str = "zebraindex";
 
 #[inline]
 fn is_retryable(status: StatusCode) -> bool {
@@ -50,15 +48,14 @@ impl RemoteEmbedClient {
     }
 
     pub fn new(provider: RemoteProvider, api_key: Arc<str>) -> Result<Self> {
-        let mut headers = header::HeaderMap::with_capacity(2);
-        headers.insert(
-            header::HeaderName::from_static("http-referer"),
-            header::HeaderValue::from_static(OPENROUTER_REFERER),
-        );
-        headers.insert(
-            header::HeaderName::from_static("x-title"),
-            header::HeaderValue::from_static(OPENROUTER_TITLE),
-        );
+        let extra = provider.extra_headers();
+        let mut headers = header::HeaderMap::with_capacity(extra.len());
+        for (name, value) in extra {
+            headers.insert(
+                header::HeaderName::from_static(name),
+                header::HeaderValue::from_static(value),
+            );
+        }
         let inner = Client::builder()
             .https_only(true)
             .timeout(Duration::from_secs(TIMEOUT_SECS))
@@ -177,7 +174,11 @@ impl RemoteEmbedClient {
     pub async fn validate_key(&self) -> Result<()> {
         let resp = self
             .inner
-            .get(format!("{}/key", self.provider.base_url()))
+            .get(format!(
+                "{}{}",
+                self.provider.base_url(),
+                self.provider.validate_path()
+            ))
             .bearer_auth(self.api_key.as_ref())
             .send()
             .await?;

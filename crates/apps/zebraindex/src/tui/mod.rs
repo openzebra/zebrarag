@@ -257,7 +257,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                 .model
                 .as_deref()
                 .is_some_and(|model| {
-                    model.starts_with(zti_remote_embed::RemoteProvider::OpenRouter.model_prefix())
+                    zti_remote_embed::RemoteProvider::from_model_id(model).is_some()
                 })
                 && model_dim > 0
                 && app.remote_dim_hint != Some(model_dim as usize)
