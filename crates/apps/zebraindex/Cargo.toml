@@ -45,3 +45,4 @@ indoc.workspace            = true
 
 ratatui.workspace          = true
 crossterm.workspace        = true
+brotli-decompressor.workspace = true
