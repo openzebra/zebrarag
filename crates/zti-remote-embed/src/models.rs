@@ -26,6 +26,14 @@ pub async fn list_models(
     }
 }
 
+/// Case-insensitive substring test without allocating a lowercased copy.
+fn contains_ignore_ascii_case(haystack: &str, needle: &[u8]) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// Returns OpenRouter embedding-capable models only (id or name contains "embed").
 pub async fn list_openrouter_models(api_key: &Arc<str>) -> Result<Vec<RemoteModelInfo>> {
     #[derive(Deserialize)]
@@ -39,9 +47,10 @@ pub async fn list_openrouter_models(api_key: &Arc<str>) -> Result<Vec<RemoteMode
         .data
         .into_iter()
         .filter(|m| {
-            m.id.contains("embed") || m.name.to_ascii_lowercase().contains("embed")
+            contains_ignore_ascii_case(&m.id, b"embed")
+                || contains_ignore_ascii_case(&m.name, b"embed")
         })
         .collect();
-    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     Ok(models)
 }

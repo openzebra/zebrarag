@@ -12,6 +12,8 @@ use crate::provider::RemoteProvider;
 const DEFAULT_BATCH_TOKENS: usize = 100_000;
 /// Bytes-per-token estimate for batch sizing math.
 const BYTES_PER_TOKEN: usize = 4;
+/// Maximum characters per single HTTP request (byte-proxy for the token budget).
+const BATCH_CHAR_LIMIT: usize = DEFAULT_BATCH_TOKENS * BYTES_PER_TOKEN;
 const DEFAULT_MAX_LENGTH: usize = 4096;
 const REMOTE_EMBED_PIPELINE: usize = 4;
 
@@ -25,13 +27,10 @@ async fn probe_dim(client: &RemoteEmbedClient, model_id: &str) -> Result<usize> 
 
 pub struct RemoteEmbedEngine {
     client: RemoteEmbedClient,
-    provider: RemoteProvider,
     model_id: Arc<str>,
     dim: usize,
     /// Effective token ceiling for chunking decisions (from model metadata or default).
     max_length: usize,
-    /// Maximum number of characters per single HTTP request (byte-proxy for token budget).
-    batch_char_limit: usize,
 }
 
 impl RemoteEmbedEngine {
@@ -51,20 +50,17 @@ impl RemoteEmbedEngine {
             .ok()
             .filter(|len| *len > 0)
             .unwrap_or(DEFAULT_MAX_LENGTH);
-        let batch_char_limit = DEFAULT_BATCH_TOKENS.saturating_mul(BYTES_PER_TOKEN);
         Ok(Self {
             client,
-            provider,
             model_id: Arc::from(model.id.as_str()),
             dim,
             max_length,
-            batch_char_limit,
         })
     }
 
     #[inline]
     pub const fn provider(&self) -> RemoteProvider {
-        self.provider
+        self.client.provider()
     }
 
     #[inline]
@@ -90,14 +86,14 @@ impl RemoteEmbedEngine {
             return Ok(Vec::new());
         }
 
-        let max_items = self.provider.max_batch_items().max(1);
+        let max_items = self.client.provider().max_batch_items().max(1);
         let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(texts.len().div_ceil(max_items));
         let (mut start, mut batch_chars) = (0usize, 0usize);
         for (i, text) in texts.iter().enumerate() {
             let len = text.len();
             if i > start
                 && (i - start >= max_items
-                    || batch_chars.saturating_add(len) > self.batch_char_limit)
+                    || batch_chars.saturating_add(len) > BATCH_CHAR_LIMIT)
             {
                 ranges.push((start, i));
                 start = i;

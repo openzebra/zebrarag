@@ -37,7 +37,6 @@ fn retry_delay(resp: &Response, attempt: usize) -> Duration {
         .saturating_add(jitter())
 }
 
-#[derive(Clone)]
 pub struct RemoteEmbedClient {
     inner: Client,
     provider: RemoteProvider,
@@ -45,6 +44,11 @@ pub struct RemoteEmbedClient {
 }
 
 impl RemoteEmbedClient {
+    #[inline]
+    pub const fn provider(&self) -> RemoteProvider {
+        self.provider
+    }
+
     pub fn new(provider: RemoteProvider, api_key: Arc<str>) -> Result<Self> {
         let mut headers = header::HeaderMap::with_capacity(2);
         headers.insert(

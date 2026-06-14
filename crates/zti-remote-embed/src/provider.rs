@@ -42,6 +42,7 @@ impl RemoteProvider {
     /// Conservative item-count cap for one provider embeddings request.
     /// The remote engine also applies a char-budget split; this outer count
     /// cap avoids oversized JSON arrays on providers with element limits.
+    #[inline]
     pub const fn max_batch_items(self) -> usize {
         match self {
             Self::OpenRouter => 512,
