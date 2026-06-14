@@ -1,24 +1,34 @@
 const DELETE_FILTER_MAX_BYTES: usize = 8 * 1024;
+const FILTER_PREFIX: &str = "file_path IN (";
 
+/// Build `file_path IN ('a', 'b', …)` delete predicates, batched so no single
+/// predicate exceeds ~8 KiB.
+///
+/// An `IN` list parses to one flat `InList` expression. A `file_path = 'a' OR
+/// file_path = 'b' OR …` chain, by contrast, builds a deeply nested binary
+/// expression tree that overflows the query planner's stack once a project has
+/// a few hundred changed files — so always emit `IN` lists, never `OR` chains.
 pub(crate) fn file_path_delete_filters(paths: &[&str]) -> Vec<String> {
     let mut filters = Vec::with_capacity(1);
     let mut current = String::with_capacity(DELETE_FILTER_MAX_BYTES);
+    let mut items = 0usize;
     for path in paths {
-        let clause_len = "file_path = ''".len() + path.len() + " OR ".len();
-        if !current.is_empty()
-            && current.len().saturating_add(clause_len) > DELETE_FILTER_MAX_BYTES
-        {
+        // Worst case: ", " + "'" + every char escaped + "'", plus the ")" close.
+        let item_len = ", '".len() + path.len() * 2 + "')".len();
+        if items > 0 && current.len().saturating_add(item_len) > DELETE_FILTER_MAX_BYTES {
+            current.push(')');
             filters.push(std::mem::take(&mut current));
             current.reserve(DELETE_FILTER_MAX_BYTES);
+            items = 0;
         }
-        if !current.is_empty() {
-            current.push_str(" OR ");
-        }
-        current.push_str("file_path = '");
+        current.push_str(if items == 0 { FILTER_PREFIX } else { ", " });
+        current.push('\'');
         push_escaped_sql_string(path, &mut current);
         current.push('\'');
+        items += 1;
     }
-    if !current.is_empty() {
+    if items > 0 {
+        current.push(')');
         filters.push(current);
     }
     filters

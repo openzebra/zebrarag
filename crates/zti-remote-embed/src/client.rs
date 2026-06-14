@@ -59,6 +59,10 @@ impl RemoteEmbedClient {
         let inner = Client::builder()
             .https_only(true)
             .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .default_headers(headers)
             .build()?;
         Ok(Self {
@@ -70,6 +74,12 @@ impl RemoteEmbedClient {
 
     /// Batch embed with automatic retry on transient failures (429 / 5xx).
     pub async fn embed_batch(&self, model: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        tracing::info!(
+            provider = %self.provider.label(),
+            model,
+            items = texts.len(),
+            "remote embed: sending batch request"
+        );
         #[derive(serde::Serialize)]
         struct Req<'a> {
             model: &'a str,
@@ -87,9 +97,16 @@ impl RemoteEmbedClient {
 
         let mut attempt = 0usize;
         loop {
+            let url = format!("{}/embeddings", self.provider.base_url());
+            tracing::info!(
+                provider = %self.provider.label(),
+                %url,
+                attempt,
+                "remote embed: POST request sent"
+            );
             let send_result = self
                 .inner
-                .post(format!("{}/embeddings", self.provider.base_url()))
+                .post(&url)
                 .bearer_auth(self.api_key.as_ref())
                 .json(&Req {
                     model,
@@ -115,6 +132,12 @@ impl RemoteEmbedClient {
             };
 
             let status = resp.status();
+            tracing::info!(
+                provider = %self.provider.label(),
+                %status,
+                attempt,
+                "remote embed: response received"
+            );
             if status.is_success() {
                 let mut body: Resp = resp.json().await?;
                 body.data.sort_unstable_by_key(|d| d.index);
@@ -125,6 +148,11 @@ impl RemoteEmbedClient {
                         body.data.len(),
                     );
                 }
+                tracing::debug!(
+                    provider = %self.provider.label(),
+                    rows = body.data.len(),
+                    "remote embed: batch completed"
+                );
                 return Ok(body.data.into_iter().map(|d| d.embedding).collect());
             }
 

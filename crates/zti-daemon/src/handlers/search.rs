@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use tracing;
 use zti_protocol::request::{SearchMode, SearchReq};
 use zti_protocol::response::{Response, SearchHit, SearchResults};
 use zti_store::chunks_table::ChunkHit;
@@ -42,10 +43,20 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
             include_tests: req.include_tests,
         };
 
+        tracing::info!(
+            query = %req.query,
+            mode = ?req.mode,
+            dim = engine.dim(),
+            "search: embedding query"
+        );
         let query_emb = match req.mode {
             SearchMode::Query => engine.embed_query_async(&req.query).await?,
             SearchMode::Passage => engine.embed_passage_async(&req.query).await?,
         };
+        tracing::info!(
+            emb_dim = query_emb.len(),
+            "search: query embedded"
+        );
 
         let cached_params = if req.exhaustive {
             None
@@ -100,7 +111,12 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
         let mut hits = outcome.hits;
         dedup_overlapping_hits(&mut hits);
 
+        tracing::info!(
+            dim = engine.dim(),
+            "search: opening chunks table"
+        );
         let chunks_table = project.db.chunks_table(engine.dim()).await?;
+        tracing::info!("search: chunks table opened");
 
         // Walk `hits` once to collect (a) sym_ids already in the top-N (so the
         // appendix dedupe HashSet is seeded) and (b) the appendix candidate

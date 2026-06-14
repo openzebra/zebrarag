@@ -110,13 +110,30 @@ impl RemoteProvider {
 
     /// Conservative item-count cap for one provider embeddings request.
     /// The remote engine also applies a char-budget split; this outer count
-    /// cap avoids oversized JSON arrays on providers with element limits.
+    /// cap avoids oversized JSON arrays on providers with element limits and
+    /// keeps a single request small enough to stay under the request timeout.
     #[inline]
     pub const fn max_batch_items(self) -> usize {
         match self {
-            Self::OpenRouter | Self::OpenAI => 512,
+            // OpenRouter free tier is request/min-bound; larger batches
+            // mean fewer requests → less rate-limit pressure.
+            Self::OpenRouter => 128,
+            Self::OpenAI => 64,
             // DashScope caps `input` at 25 items; xAI follows the smaller bound too.
             Self::XAI | Self::Alibaba => 25,
+        }
+    }
+
+    /// Maximum concurrent embedding requests to this provider.
+    /// Rate-limited providers (OpenRouter free tier) benefit from lower
+    /// concurrency — fewer simultaneous requests means fewer 429 storms
+    /// and wasted retries. High-throughput providers get higher fan-out.
+    #[inline]
+    pub const fn max_concurrency(self) -> usize {
+        match self {
+            Self::OpenRouter => 2,
+            Self::OpenAI => 6,
+            Self::XAI | Self::Alibaba => 2,
         }
     }
 

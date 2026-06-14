@@ -78,3 +78,24 @@ pub async fn list_models(
     models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     Ok(models)
 }
+
+/// Fetch metadata for a single model id (e.g. its real `context_length`).
+/// Errors when the listing fails or the id isn't an embedding model for this
+/// provider — surfacing a bad model id at launch instead of letting the engine
+/// silently run with default settings.
+pub async fn fetch_model_info(
+    provider: RemoteProvider,
+    api_key: &Arc<str>,
+    model_id: &str,
+) -> Result<RemoteModelInfo> {
+    list_models(provider, api_key)
+        .await?
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "model '{model_id}' is not an available {} embedding model",
+                provider.label()
+            )
+        })
+}

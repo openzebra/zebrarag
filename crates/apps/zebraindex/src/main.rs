@@ -94,12 +94,20 @@ fn main() -> Result<()> {
             passage_prefix,
             model_dtype,
         }) => {
-            let env_remote_key = zti_remote_embed::RemoteProvider::from_model_id(&model)
-                .and_then(|(provider, _)| std::env::var(provider.env_var()).ok());
+            // Resolve the key from the provider env var first, then the OS
+            // keyring (where the TUI persists it once at setup) so launching the
+            // daemon directly works without re-supplying the key.
+            let remote_key = zti_remote_embed::RemoteProvider::from_model_id(&model).and_then(
+                |(provider, _)| {
+                    std::env::var(provider.env_var())
+                        .ok()
+                        .or_else(|| zti_common::secrets::retrieve(provider.as_str()))
+                },
+            );
             let env_remote_dim_hint = std::env::var("ZEBRA_REMOTE_DIM_HINT")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok());
-            let remote_api_key = env_remote_key.as_deref();
+            let remote_api_key = remote_key.as_deref();
             let config = zti_daemon::DaemonConfig {
                 model: Cow::Owned(model),
                 query_prefix: query_prefix.as_deref(),

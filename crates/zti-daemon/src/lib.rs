@@ -7,7 +7,7 @@ use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
 use zti_embed::{AnyEmbedEngine, EmbedEngine, LoadOverrides};
-use zti_remote_embed::{RemoteEmbedEngine, RemoteModelInfo, RemoteProvider};
+use zti_remote_embed::{RemoteEmbedEngine, RemoteProvider};
 
 pub mod handlers;
 pub mod listener;
@@ -112,13 +112,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
             let api_key = remote_api_key.as_ref().map(Arc::clone).ok_or_else(|| {
                 anyhow::anyhow!("remote API key is required for {}", provider.label())
             })?;
-            let info = RemoteModelInfo {
-                id: remote_model.to_string(),
-                name: remote_model.to_string(),
-                description: String::new(),
-                context_length: 0,
-                pricing: None,
-            };
+            let info = zti_remote_embed::fetch_model_info(provider, &api_key, remote_model).await?;
             let remote = RemoteEmbedEngine::connect(
                 provider,
                 Arc::clone(&api_key),
