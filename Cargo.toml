@@ -25,6 +25,7 @@ members = [
   "crates/zti-ipc-client",
   "crates/zti-daemon",
   "crates/zti-recursive-chunk",
+  "crates/zti-pdf",
   "crates/apps/zebraindex",
   "benches",
 ]
@@ -98,6 +99,10 @@ globset = "0.4"
 notify                 = "8"
 notify-debouncer-full  = "0.7"
 
+# PDF text extraction (Tier-1: Latin/WinAnsi/PDFDocEncoding + font-size headings).
+# Kept default-feature-free to avoid pulling chrono/jiff/rayon/time.
+lopdf = { version = "0.41", default-features = false }
+
 indoc = "2"
 toml    = "1"
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
@@ -129,3 +134,4 @@ zti-ann           = { path = "crates/zti-ann" }
 zti-ipc-client   = { path = "crates/zti-ipc-client" }
 zti-daemon       = { path = "crates/zti-daemon" }
 zti-recursive-chunk = { path = "crates/zti-recursive-chunk" }
+zti-pdf          = { path = "crates/zti-pdf" }

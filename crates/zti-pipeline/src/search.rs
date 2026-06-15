@@ -302,10 +302,12 @@ pub async fn search(
         .collect();
     let mut ranked = tokio::task::block_in_place(|| reranker.rerank(&rerank_input, query_emb));
 
+    // Dedup BEFORE diversify so the overfetch pool (raw_k = limit × overfetch)
+    // absorbs duplicate-symbol drops; diversify then makes the final exact-
+    // `limit` cut. The reverse order truncates to `limit` first and lets dedup
+    // shrink below it with no refill (the cause of under-filled result pages).
+    dedup_by_symbol_in_place(&mut ranked, &candidates);
     diversify_by_parent_in_place(&mut ranked, &candidates, opts.limit);
-
-    let mut seen_sym_ids: HashSet<u32> = HashSet::with_capacity(ranked.len());
-    ranked.retain(|(idx, _)| seen_sym_ids.insert(candidates[*idx].sym_id));
 
     let mut slots: Vec<Option<ChunkHit>> = candidates.drain(..).map(Some).collect();
     let mut hits: Vec<Hit> = Vec::with_capacity(ranked.len());
@@ -339,6 +341,20 @@ fn diversify_by_parent_in_place(ranked: &mut Vec<(usize, f32)>, candidates: &[Ch
             .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
     });
     ranked.truncate(k);
+}
+
+/// Drop repeat chunks of the same symbol so one symbol can't crowd the
+/// results. Chunks whose `sym_id` is `u32::MAX` (the "no owning symbol"
+/// sentinel used by PDF pages, text files, and TSV/PSV rows) are each distinct
+/// passages and are kept unconditionally — deduping them would collapse an
+/// entire document to a single hit.
+#[inline]
+fn dedup_by_symbol_in_place(ranked: &mut Vec<(usize, f32)>, candidates: &[ChunkHit]) {
+    let mut seen_sym_ids: HashSet<u32> = HashSet::with_capacity(ranked.len());
+    ranked.retain(|(idx, _)| {
+        let sym_id = candidates[*idx].sym_id;
+        sym_id == u32::MAX || seen_sym_ids.insert(sym_id)
+    });
 }
 
 pub async fn search_exhaustive(
@@ -550,13 +566,21 @@ mod tq_tests {
     }
 
     fn make_candidate_with_file_type(parent_sym_id: Option<u32>, file_type: FileType) -> ChunkHit {
+        make_candidate_with_sym(parent_sym_id, file_type, 0)
+    }
+
+    fn make_candidate_with_sym(
+        parent_sym_id: Option<u32>,
+        file_type: FileType,
+        sym_id: u32,
+    ) -> ChunkHit {
         ChunkHit {
             chunk_id: [0u8; 16],
             file_path: String::new(),
             file_type,
             symbol_qualified: String::new(),
             symbol_kind: String::new(),
-            sym_id: 0,
+            sym_id,
             sub_chunk_idx: 0,
             total_sub_chunks: 1,
             chunk_strategy: ChunkStrategy::Symbol,
@@ -633,5 +657,73 @@ mod tq_tests {
         let mut ranked: Vec<(usize, f32)> = vec![(0, 1.0), (1, 1.0)];
         diversify_by_parent_in_place(&mut ranked, &candidates, 2);
         assert_eq!(ranked.first().map(|entry| entry.0), Some(1));
+    }
+
+    #[test]
+    fn dedup_drops_repeat_chunks_of_same_symbol() {
+        // Two chunks of symbol 7 → only the first survives.
+        let candidates = vec![
+            make_candidate_with_sym(None, FileType::Source, 7),
+            make_candidate_with_sym(None, FileType::Source, 7),
+        ];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 1.0), (1, 0.9)];
+        dedup_by_symbol_in_place(&mut ranked, &candidates);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0, 0);
+    }
+
+    #[test]
+    fn dedup_keeps_all_sentinel_chunks_regression() {
+        // u32::MAX marks "no owning symbol" (PDF pages, text, TSV rows). Every
+        // such chunk is a distinct passage and MUST survive — deduping them
+        // would collapse a whole document to one search hit.
+        let candidates = vec![
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+        ];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 1.0), (1, 0.9), (2, 0.8)];
+        dedup_by_symbol_in_place(&mut ranked, &candidates);
+        assert_eq!(ranked.len(), 3);
+    }
+
+    #[test]
+    fn dedup_mixed_symbols_and_sentinels() {
+        // Real symbols dedup; sentinels survive; distinct symbols survive.
+        let candidates = vec![
+            make_candidate_with_sym(None, FileType::Source, 1),
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Source, 1), // dup of #0
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Source, 2), // distinct
+        ];
+        let mut ranked: Vec<(usize, f32)> = vec![(0, 1.0), (1, 0.9), (2, 0.8), (3, 0.7), (4, 0.6)];
+        dedup_by_symbol_in_place(&mut ranked, &candidates);
+        // Drops only idx 2 (dup of symbol 1). idx 0,1,3,4 survive.
+        assert_eq!(ranked.len(), 4);
+        assert!(ranked.iter().all(|(idx, _)| *idx != 2));
+    }
+
+    #[test]
+    fn dedup_before_diversify_reaches_limit() {
+        // Regression for the under-filled result page: an overfetched pool
+        // with duplicate symbols must still reach exactly `limit` after
+        // dedup-then-diversify, because dedup runs on the full pool (not the
+        // truncated one) and diversify makes the final cut.
+        let candidates = vec![
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Source, 7),
+            make_candidate_with_sym(None, FileType::Source, 7), // dup
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+            make_candidate_with_sym(None, FileType::Source, 8),
+            make_candidate_with_sym(None, FileType::Doc, u32::MAX),
+        ];
+        let mut ranked: Vec<(usize, f32)> =
+            vec![(0, 1.0), (1, 0.9), (2, 0.8), (3, 0.7), (4, 0.6), (5, 0.5), (6, 0.4)];
+        // Compose in the fixed order (dedup then diversify).
+        dedup_by_symbol_in_place(&mut ranked, &candidates);
+        diversify_by_parent_in_place(&mut ranked, &candidates, 5);
+        assert_eq!(ranked.len(), 5);
     }
 }

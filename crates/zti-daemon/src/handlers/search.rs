@@ -176,11 +176,22 @@ pub async fn handle(req: &SearchReq, state: &DaemonState) -> Response {
 }
 
 fn dedup_overlapping_hits(hits: &mut Vec<zti_pipeline::search::Hit>) {
+    /// Document chunks (PDF pages, text files, TSV/PSV rows) carry the
+    /// `u32::MAX` "no owning symbol" sentinel. Each is a distinct passage —
+    /// overlapping page ranges are expected (heading-aware packing produces
+    /// overlapping spans) — so they must never be overlap-deduped. Only real
+    /// symbol chunks, where overlapping ranges signal a redundant sub-chunk of
+    /// the same function/type, are candidates for overlap dedup.
+    const NO_SYMBOL: u32 = u32::MAX;
+
     let mut kept = 0usize;
     for i in 0..hits.len() {
         let current = &hits[i];
         let is_duplicate = hits[..kept].iter().any(|kept_hit| {
-            kept_hit.chunk.file_path == current.chunk.file_path
+            let both_symbols =
+                current.chunk.sym_id != NO_SYMBOL && kept_hit.chunk.sym_id != NO_SYMBOL;
+            both_symbols
+                && kept_hit.chunk.file_path == current.chunk.file_path
                 && kept_hit.chunk.symbol_qualified == current.chunk.symbol_qualified
                 && kept_hit.chunk.start_line.max(current.chunk.start_line)
                     <= kept_hit.chunk.end_line.min(current.chunk.end_line)
@@ -222,6 +233,16 @@ mod tests {
     use zti_store::chunks_table::ChunkHit;
 
     fn hit(file_path: &str, symbol_qualified: &str, start_line: u32, end_line: u32) -> Hit {
+        make_hit(file_path, symbol_qualified, start_line, end_line, 0)
+    }
+
+    fn make_hit(
+        file_path: &str,
+        symbol_qualified: &str,
+        start_line: u32,
+        end_line: u32,
+        sym_id: u32,
+    ) -> Hit {
         Hit {
             chunk: ChunkHit {
                 chunk_id: [0u8; 16],
@@ -229,7 +250,7 @@ mod tests {
                 file_type: FileType::Source,
                 symbol_qualified: symbol_qualified.to_string(),
                 symbol_kind: String::from("function"),
-                sym_id: 0,
+                sym_id,
                 sub_chunk_idx: 0,
                 total_sub_chunks: 1,
                 chunk_strategy: ChunkStrategy::Symbol,
@@ -259,5 +280,21 @@ mod tests {
         assert_eq!(hits[0].chunk.start_line, 56);
         assert_eq!(hits[1].chunk.start_line, 80);
         assert_eq!(hits[2].chunk.symbol_qualified, "other");
+    }
+
+    #[test]
+    fn dedup_keeps_overlapping_document_chunks() {
+        // Regression: PDF/text/TSV chunks (sym_id = u32::MAX) are distinct
+        // passages even when their page/line ranges overlap. Overlap dedup is
+        // for code sub-chunks of the same symbol only — applying it to
+        // documents collapsed heavily-overlapping page spans to a single hit.
+        let mut hits = vec![
+            make_hit("book.pdf", "p.84-130", 84, 130, u32::MAX),
+            make_hit("book.pdf", "p.85-99", 85, 99, u32::MAX),
+            make_hit("book.pdf", "p.130-155", 130, 155, u32::MAX),
+            make_hit("book.pdf", "p.56-98", 56, 98, u32::MAX),
+        ];
+        dedup_overlapping_hits(&mut hits);
+        assert_eq!(hits.len(), 4, "all overlapping document chunks must survive");
     }
 }

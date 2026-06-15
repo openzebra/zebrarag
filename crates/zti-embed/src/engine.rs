@@ -350,8 +350,7 @@ impl EmbedEngine {
             .name("zti-embed".into())
             .spawn(move || {
                 while let Some(req) = rx.blocking_recv() {
-                    let refs: Vec<&str> =
-                        req.texts.iter().map(String::as_str).collect();
+                    let refs: Vec<&str> = req.texts.iter().map(String::as_str).collect();
                     let encs = match worker_tokenizer.encode_batch(&refs) {
                         Ok(e) => e,
                         Err(e) => {
@@ -360,8 +359,7 @@ impl EmbedEngine {
                         }
                     };
                     let enc_refs: Vec<&Tokenized> = encs.iter().collect();
-                    let _ =
-                        req.reply.send(embed_on_state(&mut state, &enc_refs, &cfg));
+                    let _ = req.reply.send(embed_on_state(&mut state, &enc_refs, &cfg));
                 }
             })
             .map_err(|e| anyhow!("spawn embed worker: {e}"))?;
@@ -419,10 +417,7 @@ impl EmbedEngine {
     /// The worker tokenizes and runs the forward pass on its own OS thread;
     /// the tokio reactor never blocks on tokenization or GPU work.
     /// Await the returned receiver to collect the pooled result.
-    pub fn submit_texts(
-        &self,
-        texts: Arc<[String]>,
-    ) -> Result<oneshot::Receiver<Result<Pooled>>> {
+    pub fn submit_texts(&self, texts: Arc<[String]>) -> Result<oneshot::Receiver<Result<Pooled>>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(EmbedRequest { texts, reply })

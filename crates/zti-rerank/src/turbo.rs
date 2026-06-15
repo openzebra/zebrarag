@@ -62,11 +62,17 @@ impl TurboReranker {
         let mut scores: Vec<(usize, f32)> = candidates
             .iter()
             .enumerate()
-            .filter_map(|(i, (code_bytes, initial_score))| {
-                let code = TurboCode::from_compact_bytes(code_bytes).ok()?;
-                let ip = self.quantizer.inner_product_estimate(&code, query).ok()?;
-                let combined = initial_score + ip;
-                Some((i, combined))
+            .map(|(i, (code_bytes, initial_score))| {
+                // A missing or undecodable turbo code must NOT drop the
+                // candidate — it was legitimately surfaced by vector/lexical
+                // search. Fall back to the initial score with no reranker
+                // boost so recall is preserved; the candidate simply competes
+                // on its fusion score alone.
+                let boost = TurboCode::from_compact_bytes(code_bytes)
+                    .ok()
+                    .and_then(|code| self.quantizer.inner_product_estimate(&code, query).ok())
+                    .unwrap_or(0.0);
+                (i, initial_score + boost)
             })
             .collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
@@ -247,7 +253,11 @@ mod tq_tests {
     }
 
     #[test]
-    fn rerank_filters_invalid() -> Result<()> {
+    fn rerank_keeps_invalid_unboosted() -> Result<()> {
+        // Regression: a candidate whose turbo code is missing/garbage must
+        // STAY searchable (fall back to its initial score, no boost) rather
+        // than being silently dropped. Dropping shrank recall on documents
+        // whose chunks lacked valid turbo codes.
         let r = make_reranker(test_dim());
         let query = unit_vector(test_dim());
         let v = unit_vector(test_dim());
@@ -256,8 +266,11 @@ mod tq_tests {
 
         let candidates: Vec<(&[u8], f32)> = vec![(&garbage, 1.0), (&code_valid, 0.0)];
         let ranked = r.rerank(&candidates, &query);
-        assert_eq!(ranked.len(), 1, "invalid code should be filtered");
-        assert_eq!(ranked[0].0, 1, "only valid candidate should remain");
+        assert_eq!(
+            ranked.len(),
+            2,
+            "invalid code must stay searchable, just unboosted"
+        );
         Ok(())
     }
 

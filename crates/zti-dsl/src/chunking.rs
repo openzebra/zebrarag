@@ -182,11 +182,7 @@ fn looks_like_doc_or_attr(t: &str) -> bool {
 
 /// One whole-file chunk for files we don't parse with tree-sitter (READMEs,
 /// docs, plain text). Borrows `content` — no clone.
-pub fn chunk_text_file<'a>(
-    rel_path: &str,
-    full_path: &str,
-    content: &'a str,
-) -> Chunk<'a> {
+pub fn chunk_text_file<'a>(rel_path: &str, full_path: &str, content: &'a str) -> Chunk<'a> {
     let newlines = content.bytes().filter(|&b| b == b'\n').count() as u32;
     let end_line = if content.is_empty() { 1 } else { newlines + 1 };
     Chunk {

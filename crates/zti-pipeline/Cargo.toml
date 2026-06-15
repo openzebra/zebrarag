@@ -11,6 +11,7 @@ tracing.workspace = true
 zti-dsl.workspace = true
 zti-ts-core.workspace = true
 zti-recursive-chunk.workspace = true
+zti-pdf.workspace = true
 tree-sitter.workspace = true
 zti-embed.workspace = true
 zti-store.workspace = true

@@ -32,6 +32,7 @@ const CHUNK_OVERLAP: usize = 200;
 const MIN_CHUNK_FLOOR: usize = 512;
 
 use crate::manifest::{FileSnapshot, SourceKind, detect_changes, walk_source_files};
+use crate::pdf_chunk::pack_pdf_pages;
 use crate::progress::{ProgressReporter, Reporter};
 
 fn content_chunk_id(chunk: &Chunk<'_>) -> [u8; 16] {
@@ -145,7 +146,11 @@ pub async fn index_project(
 
     let phase_start = std::time::Instant::now();
     let snapshots = tokio::task::block_in_place(|| walk_source_files(root));
-    info!(files = snapshots.len(), ms = phase_start.elapsed().as_millis() as u64, "walk_source_files");
+    info!(
+        files = snapshots.len(),
+        ms = phase_start.elapsed().as_millis() as u64,
+        "walk_source_files"
+    );
 
     let files_table = db.files_table().await?;
     let previous = files_table.list().await.unwrap_or_default();
@@ -245,7 +250,7 @@ pub async fn index_project(
             content: snap.contents.as_str(),
             language: lang,
         }),
-        SourceKind::Tsv | SourceKind::Psv | SourceKind::Text => None,
+        SourceKind::Tsv | SourceKind::Psv | SourceKind::Text | SourceKind::Pdf => None,
     });
     let dsl_index = tokio::task::block_in_place(|| {
         build_index_from_sources(root_str.to_string(), dsl_sources, |processed| {
@@ -303,90 +308,107 @@ pub async fn index_project(
     let phase_start = std::time::Instant::now();
     let all_pending: Vec<(Chunk<'_>, &'static str, u32)> = tokio::task::block_in_place(|| {
         need_reindex
-        .par_iter()
-        .enumerate()
-        .flat_map(|(fidx, rel)| {
-            let fidx = fidx as u32;
-            let snap = match snapshots.get(rel) {
-                Some(s) => s,
-                None => return Vec::new(),
-            };
-            match snap.kind {
-                SourceKind::Code(lang) => {
-                    let full_path = root.join(rel);
-                    let label = full_path.display().to_string();
-                    let chunks = chunker.chunks_for_file(&label, &snap.contents);
-                    let frontend = frontend_for(lang);
-                    let ts_lang = frontend.language();
-                    let terminal_ids = terminal_cache
-                        .get(&lang)
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]);
-                    let mut out = Vec::with_capacity(chunks.len());
-                    for c in chunks {
-                        match adaptive_split(&c.body, engine) {
-                            Some(sizing) => generate_sub_chunks(
-                                &c,
-                                &sizing,
-                                Some(&ts_lang),
-                                lang.as_str(),
-                                &mut out,
-                                terminal_ids,
-                                fidx,
-                            ),
-                            None => out.push((c, lang.as_str(), fidx)),
+            .par_iter()
+            .enumerate()
+            .flat_map(|(fidx, rel)| {
+                let fidx = fidx as u32;
+                let snap = match snapshots.get(rel) {
+                    Some(s) => s,
+                    None => return Vec::new(),
+                };
+                match snap.kind {
+                    SourceKind::Code(lang) => {
+                        let full_path = root.join(rel);
+                        let label = full_path.display().to_string();
+                        let chunks = chunker.chunks_for_file(&label, &snap.contents);
+                        let frontend = frontend_for(lang);
+                        let ts_lang = frontend.language();
+                        let terminal_ids = terminal_cache
+                            .get(&lang)
+                            .map(|v| v.as_slice())
+                            .unwrap_or(&[]);
+                        let mut out = Vec::with_capacity(chunks.len());
+                        for c in chunks {
+                            match adaptive_split(&c.body, engine) {
+                                Some(sizing) => generate_sub_chunks(
+                                    &c,
+                                    &sizing,
+                                    Some(&ts_lang),
+                                    lang.as_str(),
+                                    &mut out,
+                                    terminal_ids,
+                                    fidx,
+                                ),
+                                None => out.push((c, lang.as_str(), fidx)),
+                            }
                         }
+                        out
                     }
-                    out
-                }
-                SourceKind::Tsv | SourceKind::Psv => {
-                    let full_path = root.join(rel).display().to_string();
-                    // Pack rows up to the same byte budget `adaptive_split` uses
-                    // so multi-row chunks fit the model and aren't re-split.
-                    let budget = engine.max_length().saturating_mul(CHARS_PER_TOKEN);
-                    let rows = zti_dsl::chunking::chunk_tabular_file(
-                        rel,
-                        &full_path,
-                        &snap.contents,
-                        budget,
-                    );
-                    let label = snap.kind.label();
-                    let mut out = Vec::with_capacity(rows.len());
-                    for chunk in rows {
-                        match adaptive_split(&chunk.body, engine) {
-                            Some(sizing) => generate_sub_chunks(
-                                &chunk,
-                                &sizing,
-                                None,
-                                label,
-                                &mut out,
-                                &[],
-                                fidx,
-                            ),
-                            None => out.push((chunk, label, fidx)),
+                    SourceKind::Tsv | SourceKind::Psv => {
+                        let full_path = root.join(rel).display().to_string();
+                        // Pack rows up to the same byte budget `adaptive_split` uses
+                        // so multi-row chunks fit the model and aren't re-split.
+                        let budget = engine.max_length().saturating_mul(CHARS_PER_TOKEN);
+                        let rows = zti_dsl::chunking::chunk_tabular_file(
+                            rel,
+                            &full_path,
+                            &snap.contents,
+                            budget,
+                        );
+                        let label = snap.kind.label();
+                        let mut out = Vec::with_capacity(rows.len());
+                        for chunk in rows {
+                            match adaptive_split(&chunk.body, engine) {
+                                Some(sizing) => generate_sub_chunks(
+                                    &chunk,
+                                    &sizing,
+                                    None,
+                                    label,
+                                    &mut out,
+                                    &[],
+                                    fidx,
+                                ),
+                                None => out.push((chunk, label, fidx)),
+                            }
                         }
+                        out
                     }
-                    out
-                }
-                SourceKind::Text => {
-                    let full_path = root.join(rel).display().to_string();
-                    let chunk = zti_dsl::chunking::chunk_text_file(
-                        rel,
-                        &full_path,
-                        &snap.contents,
-                    );
-                    match adaptive_split(&chunk.body, engine) {
-                        Some(sizing) => {
-                            let mut out = Vec::with_capacity(4);
-                            generate_sub_chunks(&chunk, &sizing, None, "text", &mut out, &[], fidx);
-                            out
+                    SourceKind::Text | SourceKind::Pdf => {
+                        let full_path = root.join(rel).display().to_string();
+                        let label = snap.kind.label();
+                        // PDF: page-aware packing with heading-aware boundaries.
+                        // Text: one whole-file Document chunk (existing behaviour).
+                        let budget = engine.max_length().saturating_mul(CHARS_PER_TOKEN);
+                        let packed: Vec<Chunk<'_>> = match &snap.pdf_pages {
+                            Some(metas) => {
+                                pack_pdf_pages(rel, &full_path, &snap.contents, metas, budget)
+                            }
+                            None => vec![zti_dsl::chunking::chunk_text_file(
+                                rel,
+                                &full_path,
+                                &snap.contents,
+                            )],
+                        };
+                        let mut out = Vec::with_capacity(packed.len());
+                        for chunk in packed {
+                            match adaptive_split(&chunk.body, engine) {
+                                Some(sizing) => generate_sub_chunks(
+                                    &chunk,
+                                    &sizing,
+                                    None,
+                                    label,
+                                    &mut out,
+                                    &[],
+                                    fidx,
+                                ),
+                                None => out.push((chunk, label, fidx)),
+                            }
                         }
-                        None => vec![(chunk, "text", fidx)],
+                        out
                     }
                 }
-            }
-        })
-        .collect()
+            })
+            .collect()
     });
 
     info!(
@@ -638,10 +660,7 @@ pub async fn index_project(
 
             for (i, (chunk, lang, fidx)) in batch_items.iter().enumerate() {
                 pending_file_idxs.push(*fidx);
-                let file_type = file_types
-                    .get(*fidx as usize)
-                    .copied()
-                    .unwrap_or_default();
+                let file_type = file_types.get(*fidx as usize).copied().unwrap_or_default();
                 let emb = embs.row(i);
 
                 if emb.iter().any(|v| v.is_nan()) {
@@ -829,7 +848,7 @@ pub async fn index_project(
         .values()
         .filter_map(|s| match s.kind {
             SourceKind::Code(l) => Some(l),
-            SourceKind::Tsv | SourceKind::Psv | SourceKind::Text => None,
+            SourceKind::Tsv | SourceKind::Psv | SourceKind::Text | SourceKind::Pdf => None,
         })
         .collect();
     let languages: Vec<&Language> = languages.iter().collect();

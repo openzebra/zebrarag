@@ -41,17 +41,12 @@ impl AnyEmbedEngine {
 
     /// Submit raw texts to the worker for tokenization + forward pass.
     /// Returns immediately — no synchronous CPU work on the tokio reactor.
-    pub fn submit_texts_pooled(
-        &self,
-        texts: &[&str],
-    ) -> Result<oneshot::Receiver<Result<Pooled>>> {
+    pub fn submit_texts_pooled(&self, texts: &[&str]) -> Result<oneshot::Receiver<Result<Pooled>>> {
         match self {
             Self::Local(e) => {
                 if let Some(prefix) = e.profile().passage_prefix.as_deref() {
-                    let owned: Arc<[String]> = texts
-                        .iter()
-                        .map(|t| format!("{prefix}{t}"))
-                        .collect();
+                    let owned: Arc<[String]> =
+                        texts.iter().map(|t| format!("{prefix}{t}")).collect();
                     e.submit_texts(owned)
                 } else {
                     let owned: Arc<[String]> = texts.iter().map(|s| (*s).to_string()).collect();
@@ -111,10 +106,8 @@ impl AnyEmbedEngine {
         match self {
             Self::Local(e) => {
                 if let Some(prefix) = e.profile().passage_prefix.as_deref() {
-                    let owned: Arc<[String]> = texts
-                        .iter()
-                        .map(|t| format!("{prefix}{t}"))
-                        .collect();
+                    let owned: Arc<[String]> =
+                        texts.iter().map(|t| format!("{prefix}{t}")).collect();
                     e.submit_texts(owned)?
                         .await
                         .map_err(|_| anyhow::anyhow!("embed worker dropped without replying"))?

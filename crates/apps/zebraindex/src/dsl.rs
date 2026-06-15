@@ -459,6 +459,7 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 let trace_lang = match ext {
                     Some("tsv") => "tsv",
                     Some("psv") => "psv",
+                    Some("pdf") => "pdf",
                     _ => "text",
                 };
                 let chunks = if is_tabular {

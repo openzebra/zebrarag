@@ -1,6 +1,7 @@
 pub mod fusion;
 pub mod indexer;
 pub mod manifest;
+pub mod pdf_chunk;
 pub mod progress;
 pub mod search;
 

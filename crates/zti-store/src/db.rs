@@ -3,8 +3,8 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lance_io::object_store::ObjectStoreRegistry;
 use lance::session::Session;
+use lance_io::object_store::ObjectStoreRegistry;
 use lancedb::connect;
 
 use crate::chunks_table::ChunksTable;
