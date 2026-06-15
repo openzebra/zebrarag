@@ -263,13 +263,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                 *cpus = env_cpus;
                 *mem_total_mb = env_mem;
             }
-            if app
-                .model
-                .as_deref()
-                .is_some_and(|model| {
-                    zti_remote_embed::RemoteProvider::from_model_id(model).is_some()
-                })
-                && model_dim > 0
+            if app.model.as_deref().is_some_and(|model| {
+                zti_remote_embed::RemoteProvider::from_model_id(model).is_some()
+            }) && model_dim > 0
                 && app.remote_dim_hint != Some(model_dim as usize)
             {
                 app.remote_dim_hint = Some(model_dim as usize);

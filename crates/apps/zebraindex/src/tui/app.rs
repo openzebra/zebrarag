@@ -299,9 +299,7 @@ impl App {
         match msg {
             AppMessage::DaemonStatusUpdate(status) => self.daemon_status = status,
             AppMessage::DaemonEnvLoaded {
-                cpus,
-                mem_total_mb,
-                ..
+                cpus, mem_total_mb, ..
             } => {
                 self.env_cpus = cpus;
                 self.env_mem_total_mb = mem_total_mb;

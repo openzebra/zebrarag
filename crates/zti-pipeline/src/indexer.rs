@@ -934,13 +934,17 @@ async fn upsert_project(
             Arc::new(project_id_builder.finish()),
             Arc::new(StringArray::from(vec![root.to_string()])),
             Arc::new(languages_arr),
-            Arc::new(StringArray::from(vec![engine.persisted_model_id().as_ref()])),
+            Arc::new(StringArray::from(vec![
+                engine.persisted_model_id().as_ref(),
+            ])),
             Arc::new(UInt32Array::from(vec![engine.dim() as u32])),
             Arc::new(UInt64Array::from(vec![total_chunks as u64])),
             Arc::new(UInt64Array::from(vec![total_files as u64])),
             Arc::new(UInt64Array::from(vec![now_ns])),
             Arc::new(UInt64Array::from(vec![now_ns])),
-            Arc::new(UInt32Array::from(vec![zti_store::projects_table::INDEX_FORMAT_VERSION])),
+            Arc::new(UInt32Array::from(vec![
+                zti_store::projects_table::INDEX_FORMAT_VERSION,
+            ])),
             Arc::new(search_method),
             Arc::new(search_params),
         ],
@@ -1013,7 +1017,7 @@ mod tests_indexing {
             sub_chunk_idx: 0,
             total_sub_chunks: 1,
             chunk_strategy: ChunkStrategy::Symbol,
-            body: Cow::Borrowed("fn top_k() { 1 }") ,
+            body: Cow::Borrowed("fn top_k() { 1 }"),
             qualified: "top_k".into(),
             kind: Kind::Function,
         };

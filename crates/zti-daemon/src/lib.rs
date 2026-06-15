@@ -39,8 +39,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
     if pid_file.try_lock_exclusive().is_err() {
         // Lock held — a daemon is already running. Show a friendly
         // message with the existing PID instead of a cryptic OS error.
-        let existing_pid = std::fs::read_to_string(&pid_path)
-            .unwrap_or_else(|_| String::from("?"));
+        let existing_pid = std::fs::read_to_string(&pid_path).unwrap_or_else(|_| String::from("?"));
         let socket = zti_common::paths::daemon_socket()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| String::from("?"));
@@ -123,17 +122,20 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
                 anyhow::anyhow!("remote API key is required for {}", provider.label())
             })?;
             let info = zti_remote_embed::fetch_model_info(provider, &api_key, remote_model).await?;
-            let remote = RemoteEmbedEngine::connect(
-                provider,
-                Arc::clone(&api_key),
-                &info,
-                remote_dim_hint,
-            )
-            .await?;
-            tracing::info!(dim = remote.dim(), model = remote.model_id(), "remote embed engine ready");
+            let remote =
+                RemoteEmbedEngine::connect(provider, Arc::clone(&api_key), &info, remote_dim_hint)
+                    .await?;
+            tracing::info!(
+                dim = remote.dim(),
+                model = remote.model_id(),
+                "remote embed engine ready"
+            );
             AnyEmbedEngine::Remote(remote)
         } else {
-            anyhow::bail!("unsupported remote model '{}': missing provider prefix", config.model);
+            anyhow::bail!(
+                "unsupported remote model '{}': missing provider prefix",
+                config.model
+            );
         };
         let model_dtype = config.model_dtype.map(String::from);
         let state = Arc::new(DaemonState::new(

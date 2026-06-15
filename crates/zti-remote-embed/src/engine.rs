@@ -107,8 +107,7 @@ impl RemoteEmbedEngine {
         for (i, text) in texts.iter().enumerate() {
             let len = text.len();
             if i > start
-                && (i - start >= max_items
-                    || batch_chars.saturating_add(len) > BATCH_CHAR_LIMIT)
+                && (i - start >= max_items || batch_chars.saturating_add(len) > BATCH_CHAR_LIMIT)
             {
                 ranges.push((start, i));
                 start = i;

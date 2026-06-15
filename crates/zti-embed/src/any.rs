@@ -47,7 +47,9 @@ impl AnyEmbedEngine {
     pub fn persisted_model_id(&self) -> Cow<'_, str> {
         match self {
             Self::Local(e) => Cow::Borrowed(e.profile().model_id.as_str()),
-            Self::Remote(e) => Cow::Owned(format!("{}{}", e.provider().model_prefix(), e.model_id())),
+            Self::Remote(e) => {
+                Cow::Owned(format!("{}{}", e.provider().model_prefix(), e.model_id()))
+            }
         }
     }
 

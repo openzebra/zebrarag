@@ -493,7 +493,9 @@ async fn run_remote(cmd: RemoteCommand) -> Result<()> {
         } => {
             let provider = RemoteProvider::try_from(provider.as_str())?;
             let key = resolve_remote_key(provider, api_key)?;
-            let bare = model.strip_prefix(provider.model_prefix()).unwrap_or(&model);
+            let bare = model
+                .strip_prefix(provider.model_prefix())
+                .unwrap_or(&model);
             let info = RemoteModelInfo {
                 id: bare.to_owned(),
                 name: bare.to_owned(),

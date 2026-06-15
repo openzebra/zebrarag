@@ -37,9 +37,7 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let model_label: Cow<'_, str> = match app.model.as_deref() {
         None => Cow::Borrowed("--"),
         Some(model) => match RemoteProvider::from_model_id(model) {
-            Some((provider, remote)) => {
-                Cow::Owned(format!("{}:{remote}", provider.as_str()))
-            }
+            Some((provider, remote)) => Cow::Owned(format!("{}:{remote}", provider.as_str())),
             None => Cow::Borrowed(model),
         },
     };

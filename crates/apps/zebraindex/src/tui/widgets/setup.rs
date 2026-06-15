@@ -631,7 +631,9 @@ fn draw_api_key_entry(
         Span::raw("  > "),
         Span::styled(
             masked_input,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         cursor,
     ]));
@@ -648,7 +650,12 @@ fn draw_api_key_entry(
             Style::default().fg(Color::Red),
         )));
     }
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// Format a stored key for display: first 5 chars visible, middle replaced

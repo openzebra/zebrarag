@@ -127,10 +127,9 @@ pub async fn handle_action(
                         // Check for a stored key before asking — the key may
                         // already be in memory (from startup or a previous
                         // provider selection) or in the OS keyring.
-                        let stored = app
-                            .remote_api_key
-                            .clone()
-                            .or_else(|| zti_common::secrets::retrieve(provider.as_str()).map(Arc::from));
+                        let stored = app.remote_api_key.clone().or_else(|| {
+                            zti_common::secrets::retrieve(provider.as_str()).map(Arc::from)
+                        });
                         if let Some(key) = stored {
                             // Key found: pre-fill the entry so the user sees it
                             // masked and can press Enter to continue or type a
@@ -153,7 +152,8 @@ pub async fn handle_action(
                     ModelSource::Local => {
                         let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
                         if entry.is_downloaded() {
-                            let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device) {
+                            let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device)
+                            {
                                 Some(zti_hw::Device::Cpu) => 0,
                                 _ => 1,
                             };
@@ -163,7 +163,8 @@ pub async fn handle_action(
                             });
                         } else {
                             let id = Arc::clone(&model_id);
-                            app.screen = app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
+                            app.screen =
+                                app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
                             let tx_c = tx.clone();
                             tokio::spawn(async move { download_model(id, tx_c).await });
                         }
@@ -248,8 +249,7 @@ pub async fn handle_action(
                 }
                 let api_key: Arc<str> = Arc::from(trimmed);
                 let provider = *provider;
-                let handle =
-                    spawn_fetch_remote_models(provider, Arc::clone(&api_key), tx.clone());
+                let handle = spawn_fetch_remote_models(provider, Arc::clone(&api_key), tx.clone());
                 app.screen = app::Screen::Setup(app::SetupPhase::FetchingRemoteModels {
                     provider,
                     api_key,

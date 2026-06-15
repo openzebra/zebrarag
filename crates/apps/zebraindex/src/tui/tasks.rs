@@ -616,21 +616,20 @@ pub async fn do_index(
 
 pub async fn cancel_index(project_root: String, ctx: ClientCtx) {
     let (m, qp, pp, md, rk) = ctx.deref_opts();
-    let mut client =
-        match zti_ipc_client::Client::connect(
-            Duration::from_secs(10),
-            m,
-            qp,
-            pp,
-            md,
-            rk,
-            ctx.remote_dim_hint,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+    let mut client = match zti_ipc_client::Client::connect(
+        Duration::from_secs(10),
+        m,
+        qp,
+        pp,
+        md,
+        rk,
+        ctx.remote_dim_hint,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
     if client.handshake().await.is_err() {
         return;
     }

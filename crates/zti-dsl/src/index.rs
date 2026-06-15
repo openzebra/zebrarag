@@ -513,13 +513,16 @@ fn rewrite_relative_path(
     }
 }
 
-fn join_module_path(
-    crate_name: &str,
-    modules: &[std::borrow::Cow<'_, str>],
-    rest: &str,
-) -> String {
-    let modules_len = modules.iter().map(|module| module.len().saturating_add(2)).sum::<usize>();
-    let mut out = String::with_capacity(crate_name.len().saturating_add(2 + modules_len + rest.len()));
+fn join_module_path(crate_name: &str, modules: &[std::borrow::Cow<'_, str>], rest: &str) -> String {
+    let modules_len = modules
+        .iter()
+        .map(|module| module.len().saturating_add(2))
+        .sum::<usize>();
+    let mut out = String::with_capacity(
+        crate_name
+            .len()
+            .saturating_add(2 + modules_len + rest.len()),
+    );
     out.push_str(crate_name);
     modules.iter().for_each(|module| {
         out.push_str("::");
@@ -857,10 +860,7 @@ mod tests {
 
     #[test]
     fn resolve_edges_rewrites_crate_relative_call() {
-        let symbols = vec![
-            sym(0, "caller", "caller", 0),
-            sym(1, "rrf", "rrf", 1),
-        ];
+        let symbols = vec![sym(0, "caller", "caller", 0), sym(1, "rrf", "rrf", 1)];
         let files = vec![
             file_entry(0, "/p/crates/zti-pipeline/src/search.rs"),
             file_entry(1, "/p/crates/zti-pipeline/src/fusion.rs"),
@@ -915,10 +915,7 @@ mod tests {
 
     #[test]
     fn external_qualified_call_does_not_use_bare_fallback() {
-        let symbols = vec![
-            sym(0, "caller", "caller", 0),
-            sym(1, "spawn", "spawn", 1),
-        ];
+        let symbols = vec![sym(0, "caller", "caller", 0), sym(1, "spawn", "spawn", 1)];
         let files = vec![
             file_entry(0, "/p/crates/zti-pipeline/src/search.rs"),
             file_entry(1, "/p/crates/zti-pipeline/src/local.rs"),
@@ -979,7 +976,8 @@ mod tests {
             root: "/p".into(),
             manifest_paths: Vec::with_capacity(0),
         };
-        let rendered = crate::render::tree::AsciiTreeRenderer::new(&index).render_callees_clean(0, 2);
+        let rendered =
+            crate::render::tree::AsciiTreeRenderer::new(&index).render_callees_clean(0, 2);
         assert!(rendered.contains("*tokio::spawn"));
     }
 

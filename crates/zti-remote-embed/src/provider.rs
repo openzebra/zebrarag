@@ -79,7 +79,10 @@ impl RemoteProvider {
     pub const fn extra_headers(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::OpenRouter => &[
-                ("http-referer", "https://github.com/hicaru/zebra_tree_indexer"),
+                (
+                    "http-referer",
+                    "https://github.com/hicaru/zebra_tree_indexer",
+                ),
                 ("x-title", "zebraindex"),
             ],
             Self::Alibaba => &[],
@@ -128,9 +131,11 @@ impl RemoteProvider {
     /// (unprefixed) model id.
     #[inline]
     pub fn from_model_id(model_id: &str) -> Option<(Self, &str)> {
-        Self::ALL
-            .iter()
-            .find_map(|p| model_id.strip_prefix(p.model_prefix()).map(|rest| (*p, rest)))
+        Self::ALL.iter().find_map(|p| {
+            model_id
+                .strip_prefix(p.model_prefix())
+                .map(|rest| (*p, rest))
+        })
     }
 }
 

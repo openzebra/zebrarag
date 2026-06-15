@@ -138,8 +138,7 @@ impl DaemonState {
             return Ok(Arc::clone(engine));
         }
 
-        let result = if let Some((provider, remote_model)) =
-            RemoteProvider::from_model_id(model_id)
+        let result = if let Some((provider, remote_model)) = RemoteProvider::from_model_id(model_id)
         {
             tracing::info!(
                 provider = %provider.label(),
