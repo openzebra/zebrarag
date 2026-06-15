@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::fmt::Write;
+use std::sync::Arc;
 
 use anyhow::Result;
+use lance_io::object_store::ObjectStoreRegistry;
+use lance::session::Session;
 use lancedb::connect;
 
 use crate::chunks_table::ChunksTable;
@@ -19,11 +22,18 @@ impl Db {
         let lance_dir = root.join("lance");
         std::fs::create_dir_all(&lance_dir)?;
 
+        let session = Arc::new(Session::new(
+            16 * 1024 * 1024,
+            64 * 1024 * 1024,
+            Arc::new(ObjectStoreRegistry::default()),
+        ));
+
         let db = connect(
             lance_dir
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid path"))?,
         )
+        .session(session)
         .execute()
         .await?;
 

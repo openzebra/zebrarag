@@ -52,6 +52,7 @@ bincode    = { version = "2", features = ["derive", "serde"] }
 reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
 
 blake3 = "1"
+mimalloc = "0.1"
 regex = "1"
 ignore = "0.4"
 walkdir = "2"
@@ -82,6 +83,8 @@ bitpolar = { version = "0.3", features = ["parallel", "simd", "serde-support"] }
 usearch = "2"
 
 lancedb     = "0.30"
+lance       = "7"
+lance-io    = "7"
 arrow       = "58"
 arrow-array = "58"
 

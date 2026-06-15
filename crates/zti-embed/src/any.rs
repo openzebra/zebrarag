@@ -1,9 +1,11 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::oneshot;
 use zti_remote_embed::RemoteEmbedEngine;
 
-use crate::{EmbedEngine, apply_prefix};
+use crate::{EmbedEngine, Pooled, apply_prefix};
 
 const REMOTE_OUTER_BATCH_MULTIPLIER: usize = 8;
 
@@ -35,6 +37,29 @@ impl AnyEmbedEngine {
     #[inline]
     pub const fn is_remote(&self) -> bool {
         matches!(self, Self::Remote(_))
+    }
+
+    /// Submit raw texts to the worker for tokenization + forward pass.
+    /// Returns immediately — no synchronous CPU work on the tokio reactor.
+    pub fn submit_texts_pooled(
+        &self,
+        texts: &[&str],
+    ) -> Result<oneshot::Receiver<Result<Pooled>>> {
+        match self {
+            Self::Local(e) => {
+                if let Some(prefix) = e.profile().passage_prefix.as_deref() {
+                    let owned: Arc<[String]> = texts
+                        .iter()
+                        .map(|t| format!("{prefix}{t}"))
+                        .collect();
+                    e.submit_texts(owned)
+                } else {
+                    let owned: Arc<[String]> = texts.iter().map(|s| (*s).to_string()).collect();
+                    e.submit_texts(owned)
+                }
+            }
+            Self::Remote(_) => anyhow::bail!("pipelined submit not available for remote engines"),
+        }
     }
 
     pub fn model_id_str(&self) -> &str {
@@ -75,6 +100,37 @@ impl AnyEmbedEngine {
                 .max_batch_items()
                 .saturating_mul(REMOTE_OUTER_BATCH_MULTIPLIER)
                 .max(1),
+        }
+    }
+
+    /// Unified passage embedding that returns `Pooled` directly, bypassing
+    /// the `Vec<Vec<f32>>` roundtrip. Prefix application produces `String`s
+    /// directly for the worker channel — no intermediate Cow layer.
+    pub async fn embed_texts_pooled_async(&self, texts: &[&str]) -> Result<Pooled> {
+        let dim = self.dim();
+        match self {
+            Self::Local(e) => {
+                if let Some(prefix) = e.profile().passage_prefix.as_deref() {
+                    let owned: Arc<[String]> = texts
+                        .iter()
+                        .map(|t| format!("{prefix}{t}"))
+                        .collect();
+                    e.submit_texts(owned)?
+                        .await
+                        .map_err(|_| anyhow::anyhow!("embed worker dropped without replying"))?
+                } else {
+                    e.embed_batch_pooled_async(texts).await
+                }
+            }
+            Self::Remote(e) => {
+                let rows = e.embed_texts(texts).await?;
+                let batch = rows.len();
+                let mut data = Vec::with_capacity(batch.saturating_mul(dim));
+                for row in rows {
+                    data.extend(row);
+                }
+                Ok(Pooled { data, dim, batch })
+            }
         }
     }
 

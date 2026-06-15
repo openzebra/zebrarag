@@ -9,7 +9,11 @@ license.workspace = true
 name = "zebraindex"
 path = "src/main.rs"
 
+[features]
+default = []
+
 [dependencies]
+mimalloc.workspace = true
 zti-daemon.workspace      = true
 zti-ipc-client.workspace   = true
 zti-protocol.workspace     = true

@@ -12,6 +12,7 @@ use arrow::array::{
     UInt8Array, UInt32Array, UInt32Builder, UInt64Array,
 };
 use rayon::prelude::*;
+use tokio::sync::oneshot;
 use tracing::info;
 
 use zti_common::ids::project_id;
@@ -97,16 +98,20 @@ fn generate_sub_chunks<'a>(
     );
     let total = sub_chunks.len() as u32;
     for (i, sub) in sub_chunks.iter().enumerate() {
+        let body: Cow<'a, str> = match &chunk.body {
+            Cow::Borrowed(s) => Cow::Borrowed(&s[sub.byte_start..sub.byte_end]),
+            Cow::Owned(s) => Cow::Owned(s[sub.byte_start..sub.byte_end].to_string()),
+        };
         let sc = Chunk {
-            file: chunk.file.clone(),
-            rel_file: chunk.rel_file.clone(),
+            file: Arc::clone(&chunk.file),
+            rel_file: Arc::clone(&chunk.rel_file),
             start_line: chunk.start_line + sub.start_line - 1,
             end_line: chunk.start_line + sub.end_line - 1,
             sym_id: chunk.sym_id,
             sub_chunk_idx: i as u32,
             total_sub_chunks: total,
             chunk_strategy: ChunkStrategy::Recursive,
-            body: Cow::Owned(chunk.body[sub.byte_start..sub.byte_end].to_string()),
+            body,
             qualified: chunk.qualified.clone(),
             kind: chunk.kind,
         };
@@ -138,8 +143,9 @@ pub async fn index_project(
     let root_str = root.to_string_lossy();
     info!("indexing {}", root_str);
 
-    let snapshots = walk_source_files(root);
-    info!("found {} source files", snapshots.len());
+    let phase_start = std::time::Instant::now();
+    let snapshots = tokio::task::block_in_place(|| walk_source_files(root));
+    info!(files = snapshots.len(), ms = phase_start.elapsed().as_millis() as u64, "walk_source_files");
 
     let files_table = db.files_table().await?;
     let previous = files_table.list().await.unwrap_or_default();
@@ -222,6 +228,7 @@ pub async fn index_project(
     // time inside `zti_dsl::build_index`. Text-kind snapshots have no
     // tree-sitter frontend, so they're filtered out here and chunked
     // separately below.
+    let phase_start = std::time::Instant::now();
     let total_code = snapshots
         .values()
         .filter(|s| matches!(s.kind, SourceKind::Code(_)))
@@ -240,19 +247,22 @@ pub async fn index_project(
         }),
         SourceKind::Tsv | SourceKind::Psv | SourceKind::Text => None,
     });
-    let dsl_index = build_index_from_sources(root_str.to_string(), dsl_sources, |processed| {
-        reporter.set_phase(
-            zti_protocol::response::IndexPhase::Dsl,
-            processed as u64,
-            total_code,
-            "parsing code files",
-        );
+    let dsl_index = tokio::task::block_in_place(|| {
+        build_index_from_sources(root_str.to_string(), dsl_sources, |processed| {
+            reporter.set_phase(
+                zti_protocol::response::IndexPhase::Dsl,
+                processed as u64,
+                total_code,
+                "parsing code files",
+            );
+        })
     });
     info!(
-        "dsl-graph: {} symbols, {} edges, {} files",
-        dsl_index.symbols.len(),
-        dsl_index.edges.len(),
-        dsl_index.files.len(),
+        symbols = dsl_index.symbols.len(),
+        edges = dsl_index.edges.len(),
+        files = dsl_index.files.len(),
+        ms = phase_start.elapsed().as_millis() as u64,
+        "dsl parse"
     );
     reporter.set_phase(
         zti_protocol::response::IndexPhase::Gather,
@@ -290,7 +300,9 @@ pub async fn index_project(
         need_reindex.len()
     );
 
-    let all_pending: Vec<(Chunk<'_>, &'static str, u32)> = need_reindex
+    let phase_start = std::time::Instant::now();
+    let all_pending: Vec<(Chunk<'_>, &'static str, u32)> = tokio::task::block_in_place(|| {
+        need_reindex
         .par_iter()
         .enumerate()
         .flat_map(|(fidx, rel)| {
@@ -359,9 +371,9 @@ pub async fn index_project(
                 SourceKind::Text => {
                     let full_path = root.join(rel).display().to_string();
                     let chunk = zti_dsl::chunking::chunk_text_file(
-                        rel.clone(),
-                        full_path,
-                        snap.contents.clone(),
+                        rel,
+                        &full_path,
+                        &snap.contents,
                     );
                     match adaptive_split(&chunk.body, engine) {
                         Some(sizing) => {
@@ -374,12 +386,14 @@ pub async fn index_project(
                 }
             }
         })
-        .collect();
+        .collect()
+    });
 
     info!(
-        "collected {} chunks from {} files",
-        all_pending.len(),
-        need_reindex.len()
+        chunks = all_pending.len(),
+        files = need_reindex.len(),
+        ms = phase_start.elapsed().as_millis() as u64,
+        "chunking"
     );
 
     let mut remaining: Vec<u32> = vec![0u32; need_reindex.len()];
@@ -408,41 +422,44 @@ pub async fn index_project(
         .map(|(c, _, _)| c.sym_id)
         .collect();
     info!(
-        "chunk_sym_set built with {} symbols, building appendix BFS",
+        "chunk_sym_set built with {} symbols, precomputing appendix BFS",
         chunk_sym_set.len()
     );
 
-    let appendix_for = |sym_id: u32| -> Vec<u32> {
-        let mut visited: HashSet<u32> = HashSet::with_capacity(16);
-        let mut queue: VecDeque<(u32, usize)> = VecDeque::with_capacity(16);
-        let mut out: Vec<u32> = Vec::with_capacity(APPENDIX_CAP_PER_CHUNK);
-        visited.insert(sym_id);
-        queue.push_back((sym_id, 0));
-        while let Some((cur, depth)) = queue.pop_front() {
-            if depth >= APPENDIX_DEPTH {
-                continue;
-            }
-            let Some(edges) = dsl_index.forward_edges.get(&cur) else {
-                continue;
-            };
-            for edge in edges.iter().filter(|e| e.kind == EdgeKind::Call) {
-                let Target::Resolved(rid) = edge.to else {
+    let appendix_map: FxHashMap<u32, Vec<u32>> = chunk_sym_set
+        .iter()
+        .map(|&sym_id| {
+            let mut visited: HashSet<u32> = HashSet::with_capacity(16);
+            let mut queue: VecDeque<(u32, usize)> = VecDeque::with_capacity(16);
+            let mut out: Vec<u32> = Vec::with_capacity(APPENDIX_CAP_PER_CHUNK);
+            visited.insert(sym_id);
+            queue.push_back((sym_id, 0));
+            while let Some((cur, depth)) = queue.pop_front() {
+                if depth >= APPENDIX_DEPTH {
+                    continue;
+                }
+                let Some(edges) = dsl_index.forward_edges.get(&cur) else {
                     continue;
                 };
-                if !visited.insert(rid) {
-                    continue;
+                for edge in edges.iter().filter(|e| e.kind == EdgeKind::Call) {
+                    let Target::Resolved(rid) = edge.to else {
+                        continue;
+                    };
+                    if !visited.insert(rid) {
+                        continue;
+                    }
+                    if !chunk_sym_set.contains(&rid) {
+                        continue;
+                    }
+                    if out.len() < APPENDIX_CAP_PER_CHUNK {
+                        out.push(rid);
+                    }
+                    queue.push_back((rid, depth + 1));
                 }
-                if !chunk_sym_set.contains(&rid) {
-                    continue;
-                }
-                if out.len() < APPENDIX_CAP_PER_CHUNK {
-                    out.push(rid);
-                }
-                queue.push_back((rid, depth + 1));
             }
-        }
-        out
-    };
+            (sym_id, out)
+        })
+        .collect();
 
     let total_chunks = all_pending.len();
     reporter.start(total_chunks as u64);
@@ -503,8 +520,27 @@ pub async fn index_project(
     let mut pending_rows = 0usize;
     let mut pending_file_idxs: Vec<u32> = Vec::with_capacity(CHUNK_FLUSH_ROWS);
 
+    let dim = engine.dim();
+    let schema = Arc::new(zti_store::schema::chunks_schema(dim));
+    let file_types: Vec<u8> = need_reindex
+        .iter()
+        .map(|rel| {
+            snapshots
+                .get(rel)
+                .map(|s| s.file_type.into())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let embed_start = std::time::Instant::now();
     if !paused {
         let mut cursor = 0usize;
+        // GPU pipelining: submit batch N+1 BEFORE awaiting batch N. Since
+        // tokenization now runs on the worker thread (not the tokio reactor),
+        // submit is instant — it just sends Strings through the channel.
+        // The worker tokenizes batch N+1 while the tokio task processes
+        // batch N's results (turbo codes, arrow builders).
+        let mut pending_rx: Option<oneshot::Receiver<Result<Pooled>>> = None;
         while cursor < all_pending.len() {
             if cancel.load(Ordering::Relaxed) {
                 paused = true;
@@ -519,9 +555,40 @@ pub async fn index_project(
                 .iter()
                 .map(|(chunk, _, _)| chunk.body.as_ref())
                 .collect();
+
+            // Submit current batch to GPU worker if not already prefetched
+            if pending_rx.is_none() && !engine.is_remote() {
+                pending_rx = Some(engine.submit_texts_pooled(&text_refs)?);
+            }
+
+            // Prefetch next batch: tokenize + queue on worker BEFORE awaiting
+            // current. This tokenization (CPU) overlaps with the GPU finishing
+            // the current batch, and the worker starts the next forward pass
+            // immediately after the current one completes.
+            let prefetch_end = end.saturating_add(batch_size).min(all_pending.len());
+            let next_rx = if prefetch_end > end && !engine.is_remote() {
+                let next_items = all_pending
+                    .get(end..prefetch_end)
+                    .ok_or_else(|| anyhow::anyhow!("invalid prefetch range"))?;
+                let next_refs: Vec<&str> = next_items
+                    .iter()
+                    .map(|(chunk, _, _)| chunk.body.as_ref())
+                    .collect();
+                Some(engine.submit_texts_pooled(&next_refs)?)
+            } else {
+                None
+            };
+
+            // Await current batch result (GPU may still be finishing)
             let batch_started = std::time::Instant::now();
-            let rows = engine.embed_texts_async(&text_refs).await?;
-            let embs = rows_into_pooled(rows, engine.dim())?;
+            let embs = match pending_rx.take() {
+                Some(rx) => rx
+                    .await
+                    .map_err(|_| anyhow::anyhow!("embed worker dropped without replying"))??,
+                None => engine.embed_texts_pooled_async(&text_refs).await?,
+            };
+            pending_rx = next_rx;
+
             let n = embs.batch;
             if n != batch_items.len() {
                 anyhow::bail!(
@@ -531,7 +598,6 @@ pub async fn index_project(
                 );
             }
 
-            let dim = engine.dim();
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -572,10 +638,9 @@ pub async fn index_project(
 
             for (i, (chunk, lang, fidx)) in batch_items.iter().enumerate() {
                 pending_file_idxs.push(*fidx);
-                let file_type = need_reindex
+                let file_type = file_types
                     .get(*fidx as usize)
-                    .and_then(|rel| snapshots.get(rel))
-                    .map(|snap| snap.file_type)
+                    .copied()
                     .unwrap_or_default();
                 let emb = embs.row(i);
 
@@ -598,16 +663,16 @@ pub async fn index_project(
                         .get(chunk.sym_id as usize)
                         .and_then(|s| s.parent)
                 };
-                let appendix_ids: Vec<u32> = if chunk.sym_id == u32::MAX {
-                    Vec::with_capacity(0)
+                let appendix_ids: &[u32] = if chunk.sym_id == u32::MAX {
+                    &[]
                 } else {
-                    appendix_for(chunk.sym_id)
+                    appendix_map.get(&chunk.sym_id).map_or(&[], Vec::as_slice)
                 };
 
                 chunk_id_builder.append_value(chunk_id)?;
                 file_path_builder.append_value(&chunk.file);
                 language_builder.append_value(lang);
-                file_type_builder.append_value(file_type.into());
+                file_type_builder.append_value(file_type);
                 symbol_qualified_builder.append_value(&chunk.qualified);
                 symbol_kind_builder.append_value(chunk.kind.as_str());
                 sym_id_builder.append_value(chunk.sym_id);
@@ -621,7 +686,7 @@ pub async fn index_project(
                 if appendix_ids.is_empty() {
                     appendix_sym_ids_builder.append_null();
                 } else {
-                    for id in &appendix_ids {
+                    for id in appendix_ids {
                         appendix_sym_ids_builder.values().append_value(*id);
                     }
                     appendix_sym_ids_builder.append(true);
@@ -640,7 +705,7 @@ pub async fn index_project(
 
             let embedding_arr = embs.into_fixed_size_list();
             let record = RecordBatch::try_new(
-                std::sync::Arc::new(zti_store::schema::chunks_schema(dim)),
+                Arc::clone(&schema),
                 vec![
                     std::sync::Arc::new(chunk_id_builder.finish()),
                     std::sync::Arc::new(file_path_builder.finish()),
@@ -686,9 +751,16 @@ pub async fn index_project(
                 "embedded batch",
             );
             reporter.inc(n as u64);
+
             cursor = end;
         }
     } // if !paused
+
+    info!(
+        chunks = total_embedded,
+        ms = embed_start.elapsed().as_millis() as u64,
+        "embed phase"
+    );
 
     // Flush pending batches regardless of pause — preserves embedded chunks
     // and checkpoints completed files so a resumed run skips them.
@@ -743,9 +815,14 @@ pub async fn index_project(
             0,
             "building search index",
         );
+        let lance_start = std::time::Instant::now();
         chunks_table.optimize().await?;
+        let opt_ms = lance_start.elapsed().as_millis();
         chunks_table.ensure_fts_indexes().await?;
+        let fts_ms = lance_start.elapsed().as_millis() - opt_ms;
         chunks_table.build_index(&params).await?;
+        let idx_ms = lance_start.elapsed().as_millis() - opt_ms - fts_ms;
+        info!(opt_ms, fts_ms, idx_ms, "lance post-index ops");
     }
 
     let languages: HashSet<Language> = snapshots
@@ -794,18 +871,6 @@ pub async fn index_project(
         duration_ms: elapsed.as_millis() as u64,
         paused,
     })
-}
-
-fn rows_into_pooled(rows: Vec<Vec<f32>>, dim: usize) -> Result<Pooled> {
-    let batch = rows.len();
-    let mut data = Vec::with_capacity(batch.saturating_mul(dim));
-    for row in rows {
-        if row.len() != dim {
-            anyhow::bail!("embedding dim mismatch: got {}, expected {dim}", row.len());
-        }
-        data.extend(row);
-    }
-    Ok(Pooled { data, dim, batch })
 }
 
 async fn upsert_files(

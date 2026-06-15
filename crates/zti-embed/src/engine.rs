@@ -153,11 +153,12 @@ struct WorkerCfg {
     pooling: PoolingStrategyEnum,
 }
 
-/// One embedding job: the shared tokenized batch, the indices into it to embed,
-/// and a one-shot channel to return the pooled result.
+/// One embedding job: raw texts for the worker to tokenize + forward.
+/// Moving tokenization onto the worker thread eliminates all synchronous
+/// CPU work from the tokio reactor — the async caller just sends Strings
+/// and awaits the one-shot reply.
 struct EmbedRequest {
-    encs: Arc<Vec<Tokenized>>,
-    idxs: Arc<[usize]>,
+    texts: Arc<[String]>,
     reply: oneshot::Sender<Result<Pooled>>,
 }
 
@@ -230,14 +231,16 @@ fn warmup_model(
 
 pub struct EmbedEngine {
     /// Hands jobs to the single thread that owns the model/device/scratch. The
-    /// reactor never blocks on GPU work and the model is never contended —
-    /// exactly one thread ever runs a forward pass.
+    /// reactor never blocks on GPU work or tokenization — the worker thread
+    /// does both.
     tx: mpsc::UnboundedSender<EmbedRequest>,
     /// Clone source for [`Self::device`]. The model lives on the worker; this
     /// is a cheap, uncontended handle used only to build the GPU rerank scorer
     /// on the search path.
     device: Mutex<candle_core::Device>,
-    tokenizer: Tokenizer,
+    /// Shared with the worker thread. Kept on the engine for lightweight,
+    /// non-GPU operations: `count_tokens`, `truncates`, BPT estimation.
+    tokenizer: Arc<Tokenizer>,
     profile: ModelProfile,
     hardware: Arc<Hardware>,
 }
@@ -311,6 +314,10 @@ impl EmbedEngine {
             warmup_model(&model, &tokenizer, &device, &mut profile, DType::F32, &hw)?;
         }
 
+        // Wrap after all &mut calls (set_truncation) are done — worker gets a
+        // clone, engine keeps one for count_tokens / truncates / BPT checks.
+        let tokenizer = Arc::new(tokenizer);
+
         tracing::info!(
             dim = profile.dim,
             max_len = profile.max_length,
@@ -333,6 +340,7 @@ impl EmbedEngine {
             pooling: profile.pooling,
         };
         let (tx, mut rx) = mpsc::unbounded_channel::<EmbedRequest>();
+        let worker_tokenizer = Arc::clone(&tokenizer);
         let mut state = State {
             model,
             device,
@@ -342,9 +350,18 @@ impl EmbedEngine {
             .name("zti-embed".into())
             .spawn(move || {
                 while let Some(req) = rx.blocking_recv() {
-                    let refs: Vec<&Tokenized> =
-                        req.idxs.iter().filter_map(|&i| req.encs.get(i)).collect();
-                    let _ = req.reply.send(embed_on_state(&mut state, &refs, &cfg));
+                    let refs: Vec<&str> =
+                        req.texts.iter().map(String::as_str).collect();
+                    let encs = match worker_tokenizer.encode_batch(&refs) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let _ = req.reply.send(Err(e));
+                            continue;
+                        }
+                    };
+                    let enc_refs: Vec<&Tokenized> = encs.iter().collect();
+                    let _ =
+                        req.reply.send(embed_on_state(&mut state, &enc_refs, &cfg));
                 }
             })
             .map_err(|e| anyhow!("spawn embed worker: {e}"))?;
@@ -398,54 +415,41 @@ impl EmbedEngine {
         self.tokenizer.truncation_max_length().is_some()
     }
 
-    /// Queue a tokenized batch on the embedding worker and return immediately.
-    /// Await the returned receiver to collect the pooled result. `idxs` selects
-    /// rows of `encs`; the heavy token buffers stay shared via `Arc`, and only
-    /// the small index list is owned per request.
-    pub fn submit(
+    /// Queue raw texts on the embedding worker and return immediately.
+    /// The worker tokenizes and runs the forward pass on its own OS thread;
+    /// the tokio reactor never blocks on tokenization or GPU work.
+    /// Await the returned receiver to collect the pooled result.
+    pub fn submit_texts(
         &self,
-        encs: Arc<Vec<Tokenized>>,
-        idxs: Arc<[usize]>,
+        texts: Arc<[String]>,
     ) -> Result<oneshot::Receiver<Result<Pooled>>> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(EmbedRequest { encs, idxs, reply })
+            .send(EmbedRequest { texts, reply })
             .map_err(|_| anyhow!("embed worker thread is gone"))?;
         Ok(rx)
     }
 
-    /// Submit a tokenized batch to the embedding worker and await the pooled
-    /// result. The reactor never blocks: the GPU forward runs on the worker
-    /// thread while this task is parked on the one-shot.
-    pub async fn embed_tokenized(
-        &self,
-        encs: Arc<Vec<Tokenized>>,
-        idxs: Vec<usize>,
-    ) -> Result<Pooled> {
-        self.submit(encs, idxs.into())?
+    /// Embed a batch of texts: send to worker, await result. The worker
+    /// handles tokenization + forward pass. No synchronous work on the reactor.
+    pub async fn embed_batch_pooled_async(&self, texts: &[&str]) -> Result<Pooled> {
+        if texts.is_empty() {
+            return Ok(Pooled::empty(self.dim()));
+        }
+        let owned: Arc<[String]> = texts.iter().map(|s| (*s).to_string()).collect();
+        self.submit_texts(owned)?
             .await
             .map_err(|_| anyhow!("embed worker dropped without replying"))?
     }
 
     pub async fn embed_batch_async(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let encs = self.tokenizer.encode_batch(texts)?;
-        let n = encs.len();
-        let pooled = self
-            .embed_tokenized(Arc::new(encs), (0..n).collect())
-            .await?;
+        let pooled = self.embed_batch_pooled_async(texts).await?;
         Ok(pooled.rows().map(<[f32]>::to_vec).collect())
     }
 
     pub async fn embed_query_async(&self, text: &str) -> Result<Vec<f32>> {
         let input = apply_prefix(text, self.profile.query_prefix.as_deref());
-        let encs = self.tokenizer.encode_batch(&[&*input])?;
-        let n = encs.len();
-        let pooled = self
-            .embed_tokenized(Arc::new(encs), (0..n).collect())
-            .await?;
+        let pooled = self.embed_batch_pooled_async(&[&*input]).await?;
         if pooled.data.is_empty() {
             anyhow::bail!("no embedding produced");
         }
@@ -454,11 +458,7 @@ impl EmbedEngine {
 
     pub async fn embed_passage_async(&self, text: &str) -> Result<Vec<f32>> {
         let input = apply_prefix(text, self.profile.passage_prefix.as_deref());
-        let encs = self.tokenizer.encode_batch(&[&*input])?;
-        let n = encs.len();
-        let pooled = self
-            .embed_tokenized(Arc::new(encs), (0..n).collect())
-            .await?;
+        let pooled = self.embed_batch_pooled_async(&[&*input]).await?;
         if pooled.data.is_empty() {
             anyhow::bail!("no embedding produced");
         }
