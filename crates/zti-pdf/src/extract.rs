@@ -10,7 +10,8 @@ use lopdf::{Document, Encoding, ObjectId};
 
 use crate::encoding::push_winansi;
 use crate::heading::{body_font_size, pick_heading};
-use crate::interpreter::{GlyphDecoder, interpret};
+use crate::interpreter::{GlyphDecoder, interpret_runs};
+use crate::mathrec;
 
 /// Per-font glyph decoder for one page. Maps each `/Resources /Font` resource
 /// name to its lopdf [`Encoding`] (ToUnicode CMap, `/Differences`, or a base
@@ -101,7 +102,10 @@ pub fn extract_pages(bytes: &[u8]) -> Result<Vec<PageText>> {
             }
         };
         let decoder = page_decoder(&doc, page_id);
-        let lines = interpret(&content, &decoder);
+        // Reconstruct matrices from glyph geometry before flattening to lines, so
+        // the dual box-art + LaTeX block lands in the page text (and embedding).
+        let runs = interpret_runs(&content, &decoder);
+        let lines = mathrec::rewrite(&runs);
         let (text, heading) = assemble_page(&lines);
         out.push(PageText {
             page: page_num,

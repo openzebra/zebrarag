@@ -10,7 +10,8 @@
 //!
 //! - [`encoding`] — WinAnsiEncoding byte→char map.
 //! - [`tokenizer`] — low-level content-stream operand primitives.
-//! - [`interpreter`] — text state machine that emits [`interpreter::Line`]s.
+//! - [`interpreter`] — text state machine that emits positioned runs / lines.
+//! - [`mathrec`] — geometric matrix/vector reconstruction from glyph runs.
 //! - [`heading`] — font-size clustering to pick a page heading.
 //! - [`extract`] — orchestrator: `lopdf` load + per-page wiring.
 
@@ -18,6 +19,7 @@ mod encoding;
 mod extract;
 mod heading;
 mod interpreter;
+mod mathrec;
 mod tokenizer;
 
 pub use extract::PageText;
