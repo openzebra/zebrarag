@@ -54,9 +54,15 @@ pub fn body_font_size(lines: &[Line]) -> f32 {
     best
 }
 
+/// Minimum letter ratio for a heading candidate. Lines dominated by digits
+/// and punctuation (exercise markers like `x70.[M33]`) are noise even when
+/// they render at a heading size.
+pub const HEADING_MIN_LETTER_RATIO: f32 = 0.5;
+
 /// Pick the first heading-sized short line as the page heading, given the
-/// precomputed `body_size`. Returns `None` when the page has uniform sizing or
-/// every candidate is empty/too long.
+/// precomputed `body_size`. Returns `None` when the page has uniform sizing,
+/// every candidate is empty/too long, or the candidate is mostly non-letter
+/// characters (digit/punctuation noise).
 #[must_use]
 pub fn pick_heading(lines: &[Line], body_size: f32) -> Option<String> {
     if body_size <= 0.0 {
@@ -67,9 +73,14 @@ pub fn pick_heading(lines: &[Line], body_size: f32) -> Option<String> {
             continue;
         }
         let trimmed = line.text.trim();
-        if !trimmed.is_empty() && trimmed.len() <= HEADING_MAX_LEN {
-            return Some(trimmed.to_string());
+        if trimmed.is_empty() || trimmed.len() > HEADING_MAX_LEN {
+            continue;
         }
+        let letters = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+        if letters as f32 / (trimmed.len() as f32) < HEADING_MIN_LETTER_RATIO {
+            continue;
+        }
+        return Some(trimmed.to_string());
     }
     None
 }

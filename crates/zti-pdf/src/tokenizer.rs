@@ -5,12 +5,12 @@
 //! operands *mean*. The [`crate::interpreter`] layer consumes them.
 
 /// Operands pushed between operators. Strings are materialised (escapes/hex
-/// must be decoded, so they cannot borrow); names are tracked only as operands
-/// for operators like `Tf` whose payload Tier-1 does not inspect.
+/// must be decoded, so they cannot borrow); a name carries its raw bytes so
+/// `Tf` can resolve the current font's resource name for glyph decoding.
 #[derive(Debug, Clone)]
 pub enum Operand {
     Str(Vec<u8>),
-    Name,
+    Name(Vec<u8>),
     Num(f32),
     ArrayStart,
 }

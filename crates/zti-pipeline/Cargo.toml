@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Exposes `zti_pipeline::testing` (assemble_pdf_contents, pack_pdf_pages,
+# PdfPageMeta) for integration tests. Enable with `--features testing`.
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true

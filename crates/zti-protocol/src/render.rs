@@ -111,6 +111,10 @@ fn write_hit_capped(out: &mut String, hit: &SearchHit, hdr_len: usize, cap: usiz
         let _ = write!(out, "{}:{}-{}\n    …\n", hit.file_path, hit.start_line, hit.end_line);
         return;
     }
+    if hit.symbol_kind == "document" {
+        write_pdf_hit_capped(out, hit, hdr_len, cap);
+        return;
+    }
     let _ = write!(out, "{}:{}-{}", hit.file_path, hit.start_line, hit.end_line);
     out.push('\n');
     let remaining = cap.saturating_sub(hdr_len + 1);
@@ -130,6 +134,100 @@ fn write_hit_capped(out: &mut String, hit: &SearchHit, hdr_len: usize, cap: usiz
         out.push('\n');
         written += cost;
     }
+}
+
+/// Render a PDF (`document`-kind) hit as a titled, sectioned passage. The
+/// detected heading — carried in `symbol_qualified` as `"<title> · p.N-M"` —
+/// becomes a `Title:` line, and the body is split into a `Description:` block
+/// and, when an `Example:`-lead line is present, an `Example:` block. The
+/// result reads like a book passage with database-like fields rather than a raw
+/// prose blob. Honours the same per-hit `cap` as [`write_hit_capped`].
+fn write_pdf_hit_capped(out: &mut String, hit: &SearchHit, hdr_len: usize, cap: usize) {
+    let _ = write!(out, "{}:{}-{}", hit.file_path, hit.start_line, hit.end_line);
+    out.push('\n');
+    let mut remaining = cap.saturating_sub(hdr_len + 1);
+    let mut lines_left = MAX_LINES_PER_HIT;
+
+    // Title from the heading half of `symbol_qualified` ("Algorithm C · p.1-1").
+    // A bare page range ("p.1-1") has no " · " separator → no Title line.
+    if let Some((title, _)) = hit.symbol_qualified.rsplit_once(" · ") {
+        let title = title.trim();
+        if !title.is_empty() {
+            let line = format!("  Title: {title}\n");
+            if line.len() <= remaining {
+                out.push_str(&line);
+                remaining -= line.len();
+                lines_left = lines_left.saturating_sub(1);
+            }
+        }
+    }
+
+    // Split the body at the first `Example:`-lead line: prose before it is the
+    // Description; the example and any trailing lines form the Example.
+    let body = hit.content.as_str();
+    let mut split = None;
+    let mut off = 0usize;
+    for line in body.split('\n') {
+        if line.trim_start().starts_with("Example:") {
+            split = Some(off);
+            break;
+        }
+        off += line.len() + 1;
+    }
+    let (desc, example) = match split {
+        Some(at) => (body[..at].trim(), body[at..].trim()),
+        None => (body.trim(), ""),
+    };
+
+    remaining = write_section(out, "Description:", desc, remaining, &mut lines_left);
+    // Drop the literal `Example:` lead so the section label isn't duplicated.
+    let example = example.strip_prefix("Example:").unwrap_or(example).trim();
+    if !example.is_empty() {
+        let _ = write_section(out, "Example:", example, remaining, &mut lines_left);
+    }
+}
+
+/// Write a `  <label> <first line>` block, indenting continuation lines by four
+/// spaces. Returns the leftover byte budget; stops early when `remaining` or
+/// `lines_left` is exhausted.
+fn write_section(
+    out: &mut String,
+    label: &str,
+    text: &str,
+    mut remaining: usize,
+    lines_left: &mut usize,
+) -> usize {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return remaining;
+    };
+    if *lines_left == 0 {
+        return remaining;
+    }
+    let head = format!("  {label} {first}\n");
+    if head.len() > remaining {
+        return remaining;
+    }
+    out.push_str(&head);
+    remaining -= head.len();
+    *lines_left -= 1;
+    for line in lines {
+        if *lines_left == 0 {
+            out.push_str("    …\n");
+            return 0;
+        }
+        let cost = 4 + line.len() + 1;
+        if cost > remaining {
+            out.push_str("    ...\n");
+            return 0;
+        }
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+        remaining -= cost;
+        *lines_left -= 1;
+    }
+    remaining
 }
 
 #[cfg(test)]

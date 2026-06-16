@@ -443,7 +443,7 @@ fn load_pdf(path: &Path, rel: &str) -> Option<(String, [u8; 32], Option<Vec<PdfP
 /// Concatenate per-page text into one string with form-feed page separators
 /// (`\n\u{c}\n`) and collect per-page heading metadata parallel to the
 /// segments. Pure — no I/O — so it is unit-testable in isolation.
-fn assemble_pdf_contents(pages: &[zti_pdf::PageText]) -> (String, Vec<PdfPageMeta>) {
+pub fn assemble_pdf_contents(pages: &[zti_pdf::PageText]) -> (String, Vec<PdfPageMeta>) {
     let total: usize = pages.iter().map(|p| p.text.len() + 3).sum::<usize>() + 3;
     let mut text = String::with_capacity(total);
     let mut meta = Vec::with_capacity(pages.len());

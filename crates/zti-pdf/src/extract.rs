@@ -3,11 +3,68 @@
 //! heavy lifting lives in [`crate::interpreter`] (text) and [`crate::heading`]
 //! (analysis); this module is wiring only.
 
-use anyhow::{Result, anyhow};
-use lopdf::Document;
+use std::collections::HashMap;
 
+use anyhow::{Result, anyhow};
+use lopdf::{Document, Encoding, ObjectId};
+
+use crate::encoding::push_winansi;
 use crate::heading::{body_font_size, pick_heading};
-use crate::interpreter::interpret;
+use crate::interpreter::{GlyphDecoder, interpret};
+
+/// Per-font glyph decoder for one page. Maps each `/Resources /Font` resource
+/// name to its lopdf [`Encoding`] (ToUnicode CMap, `/Differences`, or a base
+/// encoding) and decodes shown text through it, recovering ligatures, math
+/// symbols, and subscripts that the fixed WinAnsi byte map mangles.
+struct PageDecoder<'a> {
+    encodings: HashMap<Vec<u8>, Encoding<'a>>,
+}
+
+impl GlyphDecoder for PageDecoder<'_> {
+    fn decode(&self, font: Option<&[u8]>, bytes: &[u8], out: &mut String) {
+        let start = out.len();
+        if let Some(name) = font
+            && let Some(enc) = self.encodings.get(name)
+            && enc.write_to_string(bytes, out).is_ok()
+            && !is_mostly_replacement(&out[start..])
+        {
+            return;
+        }
+        // No usable encoding, decode error, or replacement-char garbage: drop
+        // anything partially written and fall back to the Tier-1 byte map.
+        out.truncate(start);
+        push_winansi(out, bytes);
+    }
+}
+
+/// True when more than a third of `s` is the Unicode replacement character —
+/// the signature of a sparse/broken ToUnicode CMap whose codes mostly miss.
+/// Such output is worse than the WinAnsi fallback, so we reject it.
+fn is_mostly_replacement(s: &str) -> bool {
+    let total = s.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let bad = s.chars().filter(|&c| c == '\u{fffd}').count();
+    bad * 3 > total
+}
+
+/// Build a page's font decoder from its resource dictionary. Fonts whose
+/// encoding cannot be resolved are simply omitted (they fall back to WinAnsi).
+fn page_decoder(doc: &Document, page_id: ObjectId) -> PageDecoder<'_> {
+    let Ok(fonts) = doc.get_page_fonts(page_id) else {
+        return PageDecoder {
+            encodings: HashMap::new(),
+        };
+    };
+    let mut encodings = HashMap::with_capacity(fonts.len());
+    for (name, dict) in fonts {
+        if let Ok(enc) = dict.get_font_encoding(doc) {
+            encodings.insert(name, enc);
+        }
+    }
+    PageDecoder { encodings }
+}
 
 /// Plain text plus an optional detected heading for one PDF page. `page` is
 /// 1-based to match PDF page labelling.
@@ -43,7 +100,8 @@ pub fn extract_pages(bytes: &[u8]) -> Result<Vec<PageText>> {
                 continue;
             }
         };
-        let lines = interpret(&content);
+        let decoder = page_decoder(&doc, page_id);
+        let lines = interpret(&content, &decoder);
         let (text, heading) = assemble_page(&lines);
         out.push(PageText {
             page: page_num,

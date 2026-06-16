@@ -6,6 +6,16 @@
 //! space so embedded LFs/CRs inside a text string never fracture lines (line
 //! breaks are derived from positioning operators in [`crate::content_stream`]).
 
+/// Append `bytes` decoded under WinAnsiEncoding to `out`. The byte-wise Tier-1
+/// fallback used whenever a font carries no usable encoding (or its glyph map
+/// produced garbage).
+pub fn push_winansi(out: &mut String, bytes: &[u8]) {
+    out.reserve(bytes.len());
+    for &b in bytes {
+        out.push(decode_byte(b));
+    }
+}
+
 /// Map one raw byte to its Unicode scalar under WinAnsiEncoding.
 #[must_use]
 pub const fn decode_byte(b: u8) -> char {
