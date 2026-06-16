@@ -139,7 +139,44 @@ impl RemoteEmbedClient {
                 "remote embed: response received"
             );
             if status.is_success() {
-                let mut body: Resp = resp.json().await?;
+                // Read the body as text first, then parse manually — so we can
+                // log the actual serde/JSON error AND a body excerpt when
+                // deserialization fails. `resp.json()` gives only a generic
+                // "error decoding response body" with no field/path detail.
+                let body_text = resp.text().await?;
+
+                // OpenRouter wraps API errors in HTTP 200 with an
+                // {"error":{...}} body (e.g. "Input length exceeds maximum
+                // allowed token size"). Detect this before attempting to
+                // parse as an embeddings response.
+                #[derive(serde::Deserialize)]
+                struct ErrorBody {
+                    #[serde(default)]
+                    message: Option<String>,
+                }
+                #[derive(serde::Deserialize)]
+                struct ErrorResp {
+                    #[serde(default)]
+                    error: Option<ErrorBody>,
+                }
+                if let Ok(err_resp) = serde_json::from_str::<ErrorResp>(&body_text)
+                    && let Some(err) = err_resp.error
+                {
+                    let msg = err.message.unwrap_or_else(|| "unknown error".into());
+                    bail!("{} API error: {msg}", self.provider.label());
+                }
+
+                let mut body: Resp = match serde_json::from_str(&body_text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let excerpt: String = body_text.chars().take(500).collect();
+                        bail!(
+                            "{} embed response decode failed: {e} (body len {}, first 500 chars: {excerpt})",
+                            self.provider.label(),
+                            body_text.len(),
+                        );
+                    }
+                };
                 body.data.sort_unstable_by_key(|d| d.index);
                 if body.data.iter().enumerate().any(|(i, d)| d.index != i) {
                     bail!(

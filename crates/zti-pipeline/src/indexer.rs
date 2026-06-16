@@ -27,7 +27,6 @@ use zti_ts_core::walker::LanguageFrontend;
 
 const APPENDIX_DEPTH: usize = 2;
 const APPENDIX_CAP_PER_CHUNK: usize = 32;
-const CHARS_PER_TOKEN: usize = 4;
 const CHUNK_OVERLAP: usize = 200;
 const MIN_CHUNK_FLOOR: usize = 512;
 
@@ -67,14 +66,14 @@ fn sizing_for(body_len: usize, max_len: usize, bpt: usize) -> Option<AdaptiveChu
 
 /// `Some(sizing)` when the body should be recursively split; `None` keeps it whole.
 fn adaptive_split(body: &str, engine: &AnyEmbedEngine) -> Option<AdaptiveChunkSizing> {
-    let max_len = engine.max_length();
+    let max_len = engine.chunk_max_tokens();
 
     // Fast path: bytes ≤ max_len → tokens ≤ bytes ≤ max_len → always fits.
     if body.len() <= max_len {
         return None;
     }
 
-    sizing_for(body.len(), max_len, CHARS_PER_TOKEN)
+    sizing_for(body.len(), max_len, engine.chars_per_token())
 }
 
 #[inline]
@@ -348,7 +347,7 @@ pub async fn index_project(
                         let full_path = root.join(rel).display().to_string();
                         // Pack rows up to the same byte budget `adaptive_split` uses
                         // so multi-row chunks fit the model and aren't re-split.
-                        let budget = engine.max_length().saturating_mul(CHARS_PER_TOKEN);
+                        let budget = engine.chunk_max_tokens().saturating_mul(engine.chars_per_token());
                         let rows = zti_dsl::chunking::chunk_tabular_file(
                             rel,
                             &full_path,
@@ -378,7 +377,7 @@ pub async fn index_project(
                         let label = snap.kind.label();
                         // PDF: page-aware packing with heading-aware boundaries.
                         // Text: one whole-file Document chunk (existing behaviour).
-                        let budget = engine.max_length().saturating_mul(CHARS_PER_TOKEN);
+                        let budget = engine.chunk_max_tokens().saturating_mul(engine.chars_per_token());
                         let packed: Vec<Chunk<'_>> = match &snap.pdf_pages {
                             Some(metas) => {
                                 pack_pdf_pages(rel, &full_path, &snap.contents, metas, budget)
@@ -505,6 +504,7 @@ pub async fn index_project(
         device = ?hw.device,
         mem_avail_mb = hw.mem_avail >> 20,
         max_length = engine.max_length(),
+        chunk_max_tokens = engine.chunk_max_tokens(),
         remote = engine.is_remote(),
         "computed embed batch_size",
     );
@@ -556,6 +556,11 @@ pub async fn index_project(
 
     let embed_start = std::time::Instant::now();
     if !paused {
+        info!(
+            total_chunks,
+            batch_size,
+            "embed loop: starting",
+        );
         let mut cursor = 0usize;
         // GPU pipelining: submit batch N+1 BEFORE awaiting batch N. Since
         // tokenization now runs on the worker thread (not the tokio reactor),
@@ -603,6 +608,13 @@ pub async fn index_project(
 
             // Await current batch result (GPU may still be finishing)
             let batch_started = std::time::Instant::now();
+            let max_body_len = text_refs.iter().map(|s| s.len()).max().unwrap_or(0);
+            info!(
+                cursor,
+                items = end - cursor,
+                max_body_chars = max_body_len,
+                "embed loop: calling engine",
+            );
             let embs = match pending_rx.take() {
                 Some(rx) => rx
                     .await
@@ -610,6 +622,10 @@ pub async fn index_project(
                 None => engine.embed_texts_pooled_async(&text_refs).await?,
             };
             pending_rx = next_rx;
+            info!(
+                ms = batch_started.elapsed().as_millis() as u64,
+                "embed loop: engine returned",
+            );
 
             let n = embs.batch;
             if n != batch_items.len() {
@@ -629,6 +645,7 @@ pub async fn index_project(
             // is the #1 app-CPU cost and was previously run serially on the
             // async task while rayon cores sat idle. `&reranker` is Sync;
             // results are index-aligned with rows, preserving order.
+            let turbo_start = std::time::Instant::now();
             let turbo_codes: Vec<Option<Vec<u8>>> = (0..n)
                 .into_par_iter()
                 .map(|i| match reranker.encode(embs.row(i)) {
@@ -639,6 +656,10 @@ pub async fn index_project(
                     }
                 })
                 .collect();
+            info!(
+                ms = turbo_start.elapsed().as_millis() as u64,
+                "embed loop: turbo encoded",
+            );
 
             let mut chunk_id_builder = FixedSizeBinaryBuilder::new(16);
             let mut file_path_builder = StringBuilder::with_capacity(n, n * 64);
@@ -750,6 +771,11 @@ pub async fn index_project(
             pending_rows += record.num_rows();
             pending_batches.push(record);
             if pending_rows >= CHUNK_FLUSH_ROWS {
+                info!(
+                    rows = pending_rows,
+                    "embed loop: flushing to LanceDB",
+                );
+                let flush_start = std::time::Instant::now();
                 chunks_table
                     .append_batches(std::mem::take(&mut pending_batches))
                     .await?;
@@ -762,12 +788,18 @@ pub async fn index_project(
                     &std::mem::take(&mut pending_file_idxs),
                 )
                 .await?;
+                info!(
+                    ms = flush_start.elapsed().as_millis() as u64,
+                    "embed loop: flush + checkpoint done",
+                );
             }
 
-            tracing::debug!(
+            tracing::info!(
                 items = n,
+                cursor,
+                total = total_chunks,
                 ms = batch_started.elapsed().as_millis() as u64,
-                "embedded batch",
+                "embed loop: batch complete",
             );
             reporter.inc(n as u64);
 

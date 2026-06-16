@@ -7,7 +7,36 @@ use zti_remote_embed::RemoteEmbedEngine;
 
 use crate::{EmbedEngine, Pooled, apply_prefix};
 
-const REMOTE_OUTER_BATCH_MULTIPLIER: usize = 8;
+/// Clip `s` to at most `max_bytes` at a valid UTF-8 char boundary. Never
+/// panics: walks back from `max_bytes` to the nearest boundary, or returns
+/// empty if none exists (only possible when `max_bytes` is within a multi-byte
+/// sequence starting at byte 0).
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Multiplier on the provider's per-request item cap for the indexer's outer
+/// embed loop. Set to 1: the outer loop should iterate at the provider's item
+/// cap so progress is reported and RecordBatches flush incrementally — the
+/// remote engine's `embed_texts` already pipelines HTTP requests internally.
+/// Higher values (previously 8) made the indexer block on hundreds of HTTP
+/// requests before reporting any progress, which looks like a hang.
+const REMOTE_OUTER_BATCH_MULTIPLIER: usize = 1;
+
+/// Cap on remote `context_length` for chunk-size decisions. Remote providers
+/// report the underlying LLM's full context window (e.g. 128K), which is the
+/// API's truncation limit, not an embedding-optimal chunk size. A 128K-token
+/// embedding of a whole chapter is semantically near-useless and makes the
+/// recursive chunker's DP pathological. 8 192 tokens (~32 KB) balances context
+/// coverage with embedding precision.
+const REMOTE_CHUNK_TOKENS_CAP: usize = 8192;
 
 // This enum is stored behind Arc in daemon state; avoiding Box keeps one heap
 // allocation and pointer chase out of every embedding call.
@@ -32,6 +61,75 @@ impl AnyEmbedEngine {
             Self::Local(e) => e.profile().max_length,
             Self::Remote(e) => e.max_length(),
         }
+    }
+
+    /// Token ceiling to use for *chunking decisions* (PDF packing budget,
+    /// `adaptive_split` sizing). This differs from [`max_length`](Self::max_length):
+    /// - **Local**: uses the curated `max_length` directly — real embedding
+    ///   models (BERT 512, JinaBERT 8192) set this sensibly, so it is the right
+    ///   chunk size.
+    /// - **Remote**: caps `context_length` at [`REMOTE_CHUNK_TOKENS_CAP`],
+    ///   because `context_length` is the LLM API's truncation limit, not an
+    ///   embedding-optimal chunk size (a 128K-token chunk produces a useless
+    ///   vector and pathological chunker DP).
+    #[inline]
+    pub fn chunk_max_tokens(&self) -> usize {
+        match self {
+            Self::Local(e) => e.profile().max_length,
+            Self::Remote(e) => e.max_length().min(REMOTE_CHUNK_TOKENS_CAP),
+        }
+    }
+
+    /// Conservative bytes-per-token estimate for chunk-size decisions. The
+    /// true ratio varies by content: ~4-5 for prose, ~3.5 for code, but only
+    /// ~2.1-2.45 for dense PDF math text (LaTeX-derived fonts, Unicode
+    /// symbols, frequent single-char tokens). Measured from OpenRouter HTTP
+    /// 400s: a 24576-byte chunk at ratio 3 decoded to 10047-11555 tokens
+    /// (~2.1-2.4 B/tok).
+    /// - **Local**: returns 4 — the local tokenizer truncates precisely if
+    ///   the estimate is slightly wrong, so a generous ratio avoids
+    ///   over-splitting.
+    /// - **Remote**: returns 2 — there is no client-side tokenizer, so a too-
+    ///   large chunk is a hard HTTP 400 with no truncation fallback. The
+    ///   send-boundary cap (`cap_remote_texts`) is the final safety net for
+    ///   any residual overshoot from packing/overlap.
+    #[inline]
+    pub const fn chars_per_token(&self) -> usize {
+        match self {
+            Self::Local(_) => 4,
+            Self::Remote(_) => 2,
+        }
+    }
+
+    /// Hard per-item byte cap for remote batch sends. Clips each input to
+    /// `chunk_max_tokens × chars_per_token` at a UTF-8 char boundary before
+    /// sending to the provider. This is the final safety net: even if
+    /// `pack_pdf_pages` overshoots its budget or `adaptive_split` mis-estimates
+    /// the byte→token ratio, no item can exceed the model's token limit.
+    ///
+    /// Zero-copy: returns borrowed prefix slices; only a `Vec<&str>` of
+    /// pointers is allocated. Correctly-sized chunks pass untouched.
+    fn cap_remote_texts<'t>(&self, texts: &[&'t str]) -> Vec<&'t str> {
+        let max_bytes = self
+            .chunk_max_tokens()
+            .saturating_mul(self.chars_per_token());
+        let mut clipped = 0usize;
+        let capped = texts
+            .iter()
+            .map(|s| {
+                let t = truncate_to_char_boundary(s, max_bytes);
+                clipped += usize::from(t.len() < s.len());
+                t
+            })
+            .collect::<Vec<_>>();
+        if clipped > 0 {
+            tracing::warn!(
+                clipped,
+                max_bytes,
+                "remote embed: clipped oversized chunk(s) to byte cap"
+            );
+        }
+        capped
     }
 
     #[inline]
@@ -116,7 +214,8 @@ impl AnyEmbedEngine {
                 }
             }
             Self::Remote(e) => {
-                let rows = e.embed_texts(texts).await?;
+                let capped = self.cap_remote_texts(texts);
+                let rows = e.embed_texts(&capped).await?;
                 let batch = rows.len();
                 let mut data = Vec::with_capacity(batch.saturating_mul(dim));
                 for row in rows {
@@ -138,7 +237,10 @@ impl AnyEmbedEngine {
                 let refs: Vec<&str> = prefixed.iter().map(|text| text.as_ref()).collect();
                 e.embed_batch_async(&refs).await
             }
-            Self::Remote(e) => e.embed_texts(texts).await,
+            Self::Remote(e) => {
+                let capped = self.cap_remote_texts(texts);
+                e.embed_texts(&capped).await
+            }
         }
     }
 
@@ -154,5 +256,46 @@ impl AnyEmbedEngine {
             Self::Local(e) => e.embed_passage_async(text).await,
             Self::Remote(e) => e.embed_passage(text).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_to_char_boundary;
+
+    #[test]
+    fn truncate_passthrough_when_within_budget() {
+        assert_eq!(truncate_to_char_boundary("hello", 10), "hello");
+        assert_eq!(truncate_to_char_boundary("hello", 5), "hello");
+        assert_eq!(truncate_to_char_boundary("", 0), "");
+    }
+
+    #[test]
+    fn truncate_ascii_at_exact_byte() {
+        assert_eq!(truncate_to_char_boundary("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_never_splits_multibyte_char() {
+        // \u{1F600} (😀) is 4 bytes. Capping at byte 1-3 must walk back to 0.
+        let s = "ab\u{1F600}cd";
+        assert_eq!(truncate_to_char_boundary(s, 3), "ab");
+        assert_eq!(truncate_to_char_boundary(s, 2), "ab");
+        assert_eq!(truncate_to_char_boundary(s, 1), "a");
+        assert_eq!(truncate_to_char_boundary(s, 0), "");
+        // Capping just before the emoji keeps it out.
+        assert_eq!(truncate_to_char_boundary(s, 4), "ab");
+        // Capping at the emoji's last byte includes it.
+        assert_eq!(truncate_to_char_boundary(s, 6), "ab\u{1F600}");
+    }
+
+    #[test]
+    fn truncate_cjk_boundary() {
+        // Each CJK char is 3 bytes in UTF-8.
+        let s = "\u{4E2D}\u{6587}"; // 中文
+        assert_eq!(s.len(), 6);
+        assert_eq!(truncate_to_char_boundary(s, 5), "\u{4E2D}"); // 3 bytes
+        assert_eq!(truncate_to_char_boundary(s, 3), "\u{4E2D}");
+        assert_eq!(truncate_to_char_boundary(s, 6), s);
     }
 }

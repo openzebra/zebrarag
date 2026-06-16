@@ -117,6 +117,15 @@ impl RemoteEmbedEngine {
         }
         ranges.push((start, texts.len()));
 
+        tracing::info!(
+            total_items = texts.len(),
+            sub_batches = ranges.len(),
+            max_items,
+            max_concurrency = self.client.provider().max_concurrency(),
+            "remote embed_texts: dispatching",
+        );
+        let dispatch_start = std::time::Instant::now();
+
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         let mut stream = futures::stream::iter(ranges)
             .map(|(s, e)| async move {
@@ -127,9 +136,23 @@ impl RemoteEmbedEngine {
             })
             .buffered(self.client.provider().max_concurrency());
 
+        let mut sub_batch_idx = 0usize;
         while let Some(rows) = stream.next().await {
-            out.extend(rows?);
+            let rows = rows?;
+            tracing::info!(
+                sub_batch = sub_batch_idx,
+                items = rows.len(),
+                ms = dispatch_start.elapsed().as_millis() as u64,
+                "remote embed_texts: sub-batch received",
+            );
+            sub_batch_idx = sub_batch_idx.saturating_add(1);
+            out.extend(rows);
         }
+        tracing::info!(
+            total_items = out.len(),
+            ms = dispatch_start.elapsed().as_millis() as u64,
+            "remote embed_texts: all sub-batches done",
+        );
         Ok(out)
     }
 
