@@ -5,7 +5,7 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 use zti_remote_embed::RemoteEmbedEngine;
 
-use crate::{EmbedEngine, Pooled, apply_prefix};
+use crate::{apply_prefix, EmbedEngine, Pooled};
 
 /// Clip `s` to at most `max_bytes` at a valid UTF-8 char boundary. Never
 /// panics: walks back from `max_bytes` to the nearest boundary, or returns
@@ -96,8 +96,8 @@ impl AnyEmbedEngine {
     #[inline]
     pub const fn chars_per_token(&self) -> usize {
         match self {
-            Self::Local(_) => 4,
-            Self::Remote(_) => 2,
+            Self::Local(_) => 8,
+            Self::Remote(_) => 1,
         }
     }
 
