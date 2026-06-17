@@ -64,6 +64,55 @@ pub enum CliCommand {
     },
     #[command(about = "List all indexed projects")]
     Projects,
+    #[command(
+        subcommand,
+        about = "Test remote embedding providers end-to-end (standalone, no daemon)"
+    )]
+    Remote(RemoteCommand),
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    #[command(about = "List embedding models for a provider")]
+    Models {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+    },
+    #[command(about = "Validate the API key for a provider")]
+    Validate {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+    },
+    #[command(about = "One-shot embed (connect + embed) to smoke-test a model")]
+    Embed {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(short, long, help = "Model id, with or without the provider: prefix")]
+        model: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+        #[arg(help = "Text to embed (defaults to a short probe string)")]
+        text: Vec<String>,
+    },
 }
 
 async fn open_client(
@@ -374,6 +423,99 @@ pub async fn run(
                 );
             }
             println!("\n{} project(s)", projects.len());
+        }
+        CliCommand::Remote(command) => run_remote(command).await?,
+    }
+
+    Ok(())
+}
+
+/// Resolve a provider's API key: explicit `--api-key` arg first, then the env
+/// var, then the OS keyring.
+fn resolve_remote_key(
+    provider: zti_remote_embed::RemoteProvider,
+    cli_key: Option<String>,
+) -> Result<std::sync::Arc<str>> {
+    cli_key
+        .or_else(|| std::env::var(provider.env_var()).ok())
+        .or_else(|| zti_common::secrets::retrieve(provider.as_str()))
+        .map(std::sync::Arc::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no API key for {}: pass --api-key, set {}, or store it in the OS keyring",
+                provider.label(),
+                provider.env_var()
+            )
+        })
+}
+
+async fn run_remote(cmd: RemoteCommand) -> Result<()> {
+    use zti_remote_embed::{RemoteEmbedEngine, RemoteModelInfo, RemoteProvider, list_models};
+
+    match cmd {
+        RemoteCommand::Models { provider, api_key } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let models = list_models(provider, &key).await?;
+            if models.is_empty() {
+                println!("No embedding models available for {}.", provider.label());
+                return Ok(());
+            }
+            println!("| Model | Context | Price |");
+            println!("|-------|---------|-------|");
+            for m in &models {
+                let price = m
+                    .pricing
+                    .as_ref()
+                    .map_or_else(|| String::from("—"), |p| p.format_price());
+                println!(
+                    "| {}{} | {} | {} |",
+                    provider.model_prefix(),
+                    m.id,
+                    m.context_length,
+                    price
+                );
+            }
+            println!("\n{} model(s) for {}", models.len(), provider.label());
+        }
+        RemoteCommand::Validate { provider, api_key } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let client = zti_remote_embed::client::RemoteEmbedClient::new(provider, key)?;
+            client.validate_key().await?;
+            println!("OK: {} API key is valid.", provider.label());
+        }
+        RemoteCommand::Embed {
+            provider,
+            model,
+            api_key,
+            text,
+        } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let bare = model
+                .strip_prefix(provider.model_prefix())
+                .unwrap_or(&model);
+            let info = RemoteModelInfo {
+                id: bare.to_owned(),
+                name: bare.to_owned(),
+                description: String::new(),
+                context_length: 0,
+                pricing: None,
+            };
+            let engine = RemoteEmbedEngine::connect(provider, key, &info, None).await?;
+            let joined = text.join(" ");
+            let input = if joined.trim().is_empty() {
+                "the quick brown fox"
+            } else {
+                joined.as_str()
+            };
+            let vector = engine.embed_query(input).await?;
+            let preview: Vec<String> = vector.iter().take(8).map(|v| format!("{v:.4}")).collect();
+            println!("Provider: {}", provider.label());
+            println!("Model:    {}{}", provider.model_prefix(), engine.model_id());
+            println!("Dim:      {}", engine.dim());
+            println!("Sample:   [{}, …]", preview.join(", "));
         }
     }
 

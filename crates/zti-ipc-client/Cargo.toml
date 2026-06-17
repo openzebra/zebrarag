@@ -10,5 +10,6 @@ anyhow.workspace = true
 tracing.workspace = true
 zti-protocol.workspace = true
 zti-common.workspace = true
+zti-remote-embed.workspace = true
 fs2.workspace = true
 tokio = { workspace = true, features = ["net", "process", "time", "io-util"] }

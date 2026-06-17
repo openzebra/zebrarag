@@ -36,15 +36,15 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let model_label: Cow<'_, str> = match app.model.as_deref() {
         None => Cow::Borrowed("--"),
-        Some(model) => model
-            .strip_prefix(RemoteProvider::OpenRouter.model_prefix())
-            .map(|remote| Cow::Owned(format!("remote:{remote}")))
-            .unwrap_or(Cow::Borrowed(model)),
+        Some(model) => match RemoteProvider::from_model_id(model) {
+            Some((provider, remote)) => Cow::Owned(format!("{}:{remote}", provider.as_str())),
+            None => Cow::Borrowed(model),
+        },
     };
     let model_style = if app
         .model
         .as_deref()
-        .is_some_and(|model| model.starts_with(RemoteProvider::OpenRouter.model_prefix()))
+        .is_some_and(|model| RemoteProvider::from_model_id(model).is_some())
     {
         Style::default().fg(Color::Yellow)
     } else {

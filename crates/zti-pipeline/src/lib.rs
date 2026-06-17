@@ -1,8 +1,18 @@
 pub mod fusion;
 pub mod indexer;
 pub mod manifest;
+pub mod pdf_chunk;
 pub mod progress;
 pub mod search;
+
+/// Re-exports of otherwise-internal helpers for integration tests and the
+/// `testing` feature. Gated so the symbols only exist under `cfg(test)` or
+/// `--features testing`, keeping the release API surface clean.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    pub use crate::manifest::{PdfPageMeta, assemble_pdf_contents};
+    pub use crate::pdf_chunk::pack_pdf_pages;
+}
 
 #[cfg(test)]
 mod alloc_counting {

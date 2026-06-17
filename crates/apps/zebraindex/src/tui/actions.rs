@@ -124,32 +124,36 @@ pub async fn handle_action(
                 };
                 match entry.source {
                     ModelSource::Remote(provider) => {
-                        if let Ok(key) = std::env::var(provider.env_var()) {
-                            let api_key: Arc<str> = Arc::from(key.as_str());
-                            let handle = spawn_fetch_remote_models(
+                        // Check for a stored key before asking — the key may
+                        // already be in memory (from startup or a previous
+                        // provider selection) or in the OS keyring.
+                        let stored = app.remote_api_key.clone().or_else(|| {
+                            zti_common::secrets::retrieve(provider.as_str()).map(Arc::from)
+                        });
+                        if let Some(key) = stored {
+                            // Key found: pre-fill the entry so the user sees it
+                            // masked and can press Enter to continue or type a
+                            // new key to override.
+                            app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
                                 provider,
-                                Arc::clone(&api_key),
-                                tx.clone(),
-                            );
-                            app.screen = app::Screen::Setup(
-                                app::SetupPhase::FetchingRemoteModels {
-                                    provider,
-                                    api_key,
-                                    cancel: Arc::new(handle.abort_handle()),
-                                },
-                            );
+                                input: key.to_string(),
+                                error: None,
+                                from_keyring: true,
+                            });
                         } else {
                             app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
                                 provider,
                                 input: String::with_capacity(128),
                                 error: None,
+                                from_keyring: false,
                             });
                         }
                     }
                     ModelSource::Local => {
                         let model_id: Arc<str> = Arc::from(entry.model_id.as_str());
                         if entry.is_downloaded() {
-                            let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device) {
+                            let pre_selected = match app.local_hardware.as_ref().map(|h| &h.device)
+                            {
                                 Some(zti_hw::Device::Cpu) => 0,
                                 _ => 1,
                             };
@@ -159,7 +163,8 @@ pub async fn handle_action(
                             });
                         } else {
                             let id = Arc::clone(&model_id);
-                            app.screen = app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
+                            app.screen =
+                                app::Screen::Setup(app::SetupPhase::DownloadingModel { model_id });
                             let tx_c = tx.clone();
                             tokio::spawn(async move { download_model(id, tx_c).await });
                         }
@@ -226,7 +231,12 @@ pub async fn handle_action(
                     })
                     .await;
             }
-            app::Screen::Setup(app::SetupPhase::ApiKeyEntry { provider, input, .. }) => {
+            app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
+                provider,
+                input,
+                from_keyring,
+                ..
+            }) => {
                 let trimmed = input.trim();
                 if trimmed.is_empty() {
                     if let app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
@@ -244,6 +254,7 @@ pub async fn handle_action(
                     provider,
                     api_key,
                     cancel: Arc::new(handle.abort_handle()),
+                    from_keyring: *from_keyring,
                 });
             }
             app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
@@ -251,12 +262,20 @@ pub async fn handle_action(
                 api_key,
                 models,
                 selected,
+                from_keyring,
             }) => {
                 let Some(model) = models.get(*selected) else {
                     return;
                 };
                 let model_str = format!("{}{}", provider.model_prefix(), model.id);
                 let model_arc: Arc<str> = Arc::from(model_str.as_str());
+                // When the key was retrieved from the keyring (unchanged),
+                // skip re-storing it — avoids a redundant keychain write prompt.
+                let key_for_save = if *from_keyring {
+                    None
+                } else {
+                    Some(api_key.as_ref())
+                };
                 if let Err(e) = config::save(
                     config::SaveConfig {
                         model: &model_str,
@@ -265,7 +284,7 @@ pub async fn handle_action(
                         remote_provider: Some(provider.as_str()),
                         remote_dim_hint: None,
                     },
-                    Some(api_key.as_ref()),
+                    key_for_save,
                 ) {
                     app.screen = app::Screen::Setup(app::SetupPhase::Error {
                         message: format!("Failed to save config: {e}"),
@@ -313,21 +332,27 @@ pub async fn handle_action(
                 cancel,
                 provider,
                 api_key,
+                from_keyring,
             }) => {
                 cancel.abort();
                 app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
                     provider: *provider,
                     input: api_key.to_string(),
                     error: None,
+                    from_keyring: *from_keyring,
                 });
             }
             app::Screen::Setup(app::SetupPhase::RemoteModelSelection {
-                provider, api_key, ..
+                provider,
+                api_key,
+                from_keyring,
+                ..
             }) => {
                 app.screen = app::Screen::Setup(app::SetupPhase::ApiKeyEntry {
                     provider: *provider,
                     input: api_key.to_string(),
                     error: None,
+                    from_keyring: *from_keyring,
                 });
             }
             _ => {}

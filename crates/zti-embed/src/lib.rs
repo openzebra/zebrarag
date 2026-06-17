@@ -15,4 +15,5 @@ pub use engine::Pooled;
 pub use engine::apply_prefix;
 pub use engine::parse_model_dtype;
 pub use model_registry::ModelProfile;
+pub use model_registry::is_model_cached;
 pub use tokenizer::Tokenized;

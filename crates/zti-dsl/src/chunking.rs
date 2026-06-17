@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -29,8 +30,8 @@ pub fn write_preamble(index: &ProjectIndex, out: &mut String) {
 
 #[derive(Debug, Clone)]
 pub struct Chunk<'a> {
-    pub file: String,
-    pub rel_file: String,
+    pub file: Arc<str>,
+    pub rel_file: Arc<str>,
     pub start_line: u32,
     pub end_line: u32,
     pub sym_id: u32,
@@ -68,11 +69,20 @@ impl<'a> DslChunker<'a> {
         let Some(symbols) = self.symbols_by_file.get(&file_idx) else {
             return Vec::new();
         };
+        let file_info = &self.index.files[file_idx as usize];
+        let file_arc: Arc<str> = Arc::from(file_info.path.as_str());
+        let rel = file_info
+            .path
+            .strip_prefix(&self.index.root)
+            .unwrap_or(&file_info.path)
+            .trim_start_matches('/');
+        let rel_file_arc: Arc<str> = Arc::from(rel);
+
         let approx = symbols.iter().filter(|s| is_chunkable_kind(s.kind)).count();
         let mut out = Vec::with_capacity(approx);
         let line_index = LineIndex::new(source);
         for sym in symbols.iter().filter(|s| is_chunkable_kind(s.kind)) {
-            if let Some(c) = self.make_chunk(sym, source, &line_index) {
+            if let Some(c) = self.make_chunk(sym, source, &line_index, &file_arc, &rel_file_arc) {
                 out.push(c);
             }
         }
@@ -103,6 +113,8 @@ impl<'a> DslChunker<'a> {
         sym: &zti_ts_core::types::Symbol,
         source: &'s str,
         line_index: &LineIndex,
+        file: &Arc<str>,
+        rel_file: &Arc<str>,
     ) -> Option<Chunk<'s>> {
         if sym.line == 0 || sym.end_line < sym.line {
             return None;
@@ -119,17 +131,9 @@ impl<'a> DslChunker<'a> {
         }
         let body = Cow::Borrowed(&source[range]);
 
-        let file = self.index.files.get(sym.file_idx as usize)?;
-        let rel_file = file
-            .path
-            .strip_prefix(&self.index.root)
-            .unwrap_or(&file.path)
-            .trim_start_matches('/')
-            .to_string();
-
         Some(Chunk {
-            file: file.path.clone(),
-            rel_file,
+            file: Arc::clone(file),
+            rel_file: Arc::clone(rel_file),
             start_line: doc_start,
             end_line: sym.end_line,
             sym_id: sym.id,
@@ -177,20 +181,20 @@ fn looks_like_doc_or_attr(t: &str) -> bool {
 }
 
 /// One whole-file chunk for files we don't parse with tree-sitter (READMEs,
-/// docs, plain text). Takes ownership of `content` — no clone.
-pub fn chunk_text_file(rel_path: String, full_path: String, content: String) -> Chunk<'static> {
+/// docs, plain text). Borrows `content` — no clone.
+pub fn chunk_text_file<'a>(rel_path: &str, full_path: &str, content: &'a str) -> Chunk<'a> {
     let newlines = content.bytes().filter(|&b| b == b'\n').count() as u32;
     let end_line = if content.is_empty() { 1 } else { newlines + 1 };
     Chunk {
-        file: full_path,
-        rel_file: rel_path,
+        file: Arc::from(full_path),
+        rel_file: Arc::from(rel_path),
         start_line: 1,
         end_line,
         sym_id: u32::MAX,
         sub_chunk_idx: 0,
         total_sub_chunks: 1,
         chunk_strategy: ChunkStrategy::Symbol,
-        body: Cow::Owned(content),
+        body: Cow::Borrowed(content),
         qualified: String::new(),
         kind: Kind::Document,
     }
@@ -213,10 +217,10 @@ struct PackState {
 
 /// Finalize an accumulated row group into a `Chunk`, moving its buffer into
 /// `Cow::Owned` (no copy). The body is the raw row text only — no column labels.
-fn finalize_group(rel_path: &str, full_path: &str, group: RowGroup) -> Chunk<'static> {
+fn finalize_group(rel_path: &Arc<str>, full_path: &Arc<str>, group: RowGroup) -> Chunk<'static> {
     Chunk {
-        file: full_path.to_string(),
-        rel_file: rel_path.to_string(),
+        file: Arc::clone(full_path),
+        rel_file: Arc::clone(rel_path),
         start_line: group.first,
         end_line: group.last,
         sym_id: u32::MAX,
@@ -242,6 +246,8 @@ pub fn chunk_tabular_file(
     content: &str,
     target_bytes: usize,
 ) -> Vec<Chunk<'static>> {
+    let rel_arc: Arc<str> = Arc::from(rel_path);
+    let full_arc: Arc<str> = Arc::from(full_path);
     let cap = content.len() / target_bytes.max(1) + 1;
     // `enumerate` before `skip(1)` keeps `i` as the 0-based physical line, so the
     // first data row (physical line 2) lands at `i == 1`.
@@ -263,7 +269,7 @@ pub fn chunk_tabular_file(
                 };
                 if start_new {
                     if let Some(group) = state.pending.take() {
-                        state.done.push(finalize_group(rel_path, full_path, group));
+                        state.done.push(finalize_group(&rel_arc, &full_arc, group));
                     }
                     let mut buf = String::with_capacity(target_bytes.max(line.len()));
                     buf.push_str(line);
@@ -283,7 +289,7 @@ pub fn chunk_tabular_file(
 
     let PackState { mut done, pending } = state;
     if let Some(group) = pending {
-        done.push(finalize_group(rel_path, full_path, group));
+        done.push(finalize_group(&rel_arc, &full_arc, group));
     }
     done
 }
@@ -338,11 +344,7 @@ mod tests {
 
     #[test]
     fn chunk_text_file_counts_lines() {
-        let c = chunk_text_file(
-            "README.md".to_string(),
-            "/abs/README.md".to_string(),
-            "# Title\n\nSecond para\n".to_string(),
-        );
+        let c = chunk_text_file("README.md", "/abs/README.md", "# Title\n\nSecond para\n");
         assert_eq!(c.kind, Kind::Document);
         assert_eq!(c.start_line, 1);
         assert_eq!(c.end_line, 4);
@@ -350,11 +352,7 @@ mod tests {
 
     #[test]
     fn chunk_text_file_empty_is_one_line() {
-        let c = chunk_text_file(
-            "EMPTY.md".to_string(),
-            "/abs/EMPTY.md".to_string(),
-            String::new(),
-        );
+        let c = chunk_text_file("EMPTY.md", "/abs/EMPTY.md", "");
         assert_eq!(c.end_line, 1);
     }
 
@@ -367,7 +365,7 @@ mod tests {
 
         let c = &chunks[0];
         assert_eq!(c.kind, Kind::Document);
-        assert_eq!(c.rel_file, "db/users.tsv");
+        assert_eq!(&*c.rel_file, "db/users.tsv");
         // Spans physical lines 2..=3 (header is line 1).
         assert_eq!(c.start_line, 2);
         assert_eq!(c.end_line, 3);

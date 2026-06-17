@@ -7,7 +7,7 @@ use fs2::FileExt;
 use tokio::net::UnixListener;
 use tracing_subscriber::EnvFilter;
 use zti_embed::{AnyEmbedEngine, EmbedEngine, LoadOverrides};
-use zti_remote_embed::{RemoteEmbedEngine, RemoteModelInfo, RemoteProvider};
+use zti_remote_embed::{RemoteEmbedEngine, RemoteProvider};
 
 pub mod handlers;
 pub mod listener;
@@ -36,12 +36,21 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         .open(&pid_path)
         .with_context(|| format!("opening {}", pid_path.display()))?;
 
-    if let Err(e) = pid_file.try_lock_exclusive() {
-        anyhow::bail!(
-            "another daemon is running (cannot lock {}): {}",
-            pid_path.display(),
-            e
+    if pid_file.try_lock_exclusive().is_err() {
+        // Lock held — a daemon is already running. Show a friendly
+        // message with the existing PID instead of a cryptic OS error.
+        let existing_pid = std::fs::read_to_string(&pid_path).unwrap_or_else(|_| String::from("?"));
+        let socket = zti_common::paths::daemon_socket()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| String::from("?"));
+        eprintln!(
+            "Daemon is already running (PID {}).\n\
+             Socket: {}\n\
+             Use CLI commands directly: `zebraindex index`, `zebraindex search`, etc.",
+            existing_pid.trim(),
+            socket,
         );
+        return Ok(());
     }
 
     pid_file.set_len(0)?;
@@ -76,10 +85,7 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         passage_prefix: config.passage_prefix,
         model_dtype: config.model_dtype.and_then(zti_embed::parse_model_dtype),
     };
-    let is_remote_model = config
-        .model
-        .as_ref()
-        .starts_with(RemoteProvider::OpenRouter.model_prefix());
+    let is_remote_model = RemoteProvider::from_model_id(config.model.as_ref()).is_some();
     let preloaded_engine = if is_remote_model {
         None
     } else {
@@ -109,33 +115,27 @@ pub fn run_daemon(config: &DaemonConfig<'_>) -> Result<()> {
         let model_id: Arc<str> = Arc::from(config.model.as_ref());
         let engine = if let Some(engine) = preloaded_engine {
             engine
-        } else if let Some(remote_model) = config
-            .model
-            .as_ref()
-            .strip_prefix(RemoteProvider::OpenRouter.model_prefix())
+        } else if let Some((provider, remote_model)) =
+            RemoteProvider::from_model_id(config.model.as_ref())
         {
-            let api_key = remote_api_key
-                .as_ref()
-                .map(Arc::clone)
-                .ok_or_else(|| anyhow::anyhow!("remote API key is required for OpenRouter"))?;
-            let info = RemoteModelInfo {
-                id: remote_model.to_string(),
-                name: remote_model.to_string(),
-                description: String::new(),
-                context_length: 0,
-                pricing: None,
-            };
-            let remote = RemoteEmbedEngine::connect(
-                RemoteProvider::OpenRouter,
-                Arc::clone(&api_key),
-                &info,
-                remote_dim_hint,
-            )
-            .await?;
-            tracing::info!(dim = remote.dim(), model = remote.model_id(), "remote embed engine ready");
+            let api_key = remote_api_key.as_ref().map(Arc::clone).ok_or_else(|| {
+                anyhow::anyhow!("remote API key is required for {}", provider.label())
+            })?;
+            let info = zti_remote_embed::fetch_model_info(provider, &api_key, remote_model).await?;
+            let remote =
+                RemoteEmbedEngine::connect(provider, Arc::clone(&api_key), &info, remote_dim_hint)
+                    .await?;
+            tracing::info!(
+                dim = remote.dim(),
+                model = remote.model_id(),
+                "remote embed engine ready"
+            );
             AnyEmbedEngine::Remote(remote)
         } else {
-            anyhow::bail!("unsupported remote model '{}': missing provider prefix", config.model);
+            anyhow::bail!(
+                "unsupported remote model '{}': missing provider prefix",
+                config.model
+            );
         };
         let model_dtype = config.model_dtype.map(String::from);
         let state = Arc::new(DaemonState::new(

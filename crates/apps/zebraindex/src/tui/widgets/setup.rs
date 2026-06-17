@@ -70,7 +70,8 @@ pub fn draw(f: &mut Frame, phase: &SetupPhase, tick: u16) {
             provider,
             input,
             error,
-        } => draw_api_key_entry(f, *provider, input, error.as_deref()),
+            from_keyring,
+        } => draw_api_key_entry(f, *provider, input, error.as_deref(), *from_keyring),
         SetupPhase::FetchingRemoteModels { provider, .. } => {
             draw_spinner(f, &format!("Fetching {} models...", provider.label()), tick);
         }
@@ -551,25 +552,31 @@ fn draw_error(f: &mut Frame, message: &str, can_retry: bool) {
     f.render_widget(para, area);
 }
 
-fn draw_api_key_entry(f: &mut Frame, provider: RemoteProvider, input: &str, error: Option<&str>) {
+fn draw_api_key_entry(
+    f: &mut Frame,
+    provider: RemoteProvider,
+    input: &str,
+    error: Option<&str>,
+    from_keyring: bool,
+) {
     let area = centered_rect(60, 35, f.area());
     f.render_widget(Clear, area);
 
+    let has_stored = from_keyring && !input.is_empty();
+
+    let title = if has_stored {
+        format!(" {} — Stored API Key ", provider.label())
+    } else {
+        format!(" {} — Enter API Key ", provider.label())
+    };
     let block = Block::default()
-        .title(format!(" {} — Enter API Key ", provider.label()))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let masked = if input.len() > 4 {
-        let tail_start = input.len().saturating_sub(4);
-        format!("{}{}", "*".repeat(tail_start), &input[tail_start..])
-    } else {
-        "*".repeat(input.len())
-    };
-
     let env_hint = format!("  Tip: set {} to skip this screen", provider.env_var());
     let storage_hint = if zti_common::secrets::available() {
-        "  Key will be stored in your OS keyring."
+        "  Key is stored in your OS keyring."
     } else {
         "  ⚠ No OS keyring available; key will be stored as plaintext locally."
     };
@@ -578,26 +585,64 @@ fn draw_api_key_entry(f: &mut Frame, provider: RemoteProvider, input: &str, erro
     } else {
         Style::default().fg(Color::Yellow)
     };
-    let mut lines = Vec::with_capacity(10);
-    lines.extend([
-        Line::from(""),
-        Line::from(Span::styled(
+
+    let mut lines = Vec::with_capacity(12);
+    lines.push(Line::from(""));
+
+    if has_stored {
+        // Show the stored key in a readable masked format:
+        // first 5 chars visible, middle replaced with bullets, last 4 visible.
+        let pretty = pretty_mask_key(input);
+        let label = format!("  {} KEY:", provider.label().to_uppercase());
+        lines.push(Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Gray)),
+            Span::raw(" "),
+            Span::styled(
+                pretty,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Press Enter to use this key, or type a new one:",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
             "  Paste your API key:",
             Style::default().fg(Color::Gray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("  > "),
-            Span::styled(
-                masked,
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("_", Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(storage_hint, storage_style)),
-        Line::from(Span::styled(env_hint, Style::default().fg(Color::DarkGray))),
-    ]);
+        )));
+    }
+
+    lines.push(Line::from(""));
+
+    let masked_input = if input.len() > 4 {
+        let tail_start = input.len().saturating_sub(4);
+        format!("{}{}", "*".repeat(tail_start), &input[tail_start..])
+    } else if input.is_empty() {
+        String::new()
+    } else {
+        "*".repeat(input.len())
+    };
+    let cursor = Span::styled("_", Style::default().fg(Color::Yellow));
+    lines.push(Line::from(vec![
+        Span::raw("  > "),
+        Span::styled(
+            masked_input,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        cursor,
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(storage_hint, storage_style)));
+    lines.push(Line::from(Span::styled(
+        env_hint,
+        Style::default().fg(Color::DarkGray),
+    )));
     if let Some(err) = error {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -605,7 +650,24 @@ fn draw_api_key_entry(f: &mut Frame, provider: RemoteProvider, input: &str, erro
             Style::default().fg(Color::Red),
         )));
     }
-    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Format a stored key for display: first 5 chars visible, middle replaced
+/// with bullets, last 4 visible.  E.g. `sk-or-v1-••••••••••••••••6g45`.
+fn pretty_mask_key(key: &str) -> String {
+    if key.len() <= 9 {
+        return "*".repeat(key.len());
+    }
+    let prefix = &key[..5];
+    let suffix = &key[key.len().saturating_sub(4)..];
+    let bullet_count = key.len().saturating_sub(9);
+    format!("{prefix}{}{suffix}", "•".repeat(bullet_count))
 }
 
 fn pricing_span(pricing: &Option<zti_remote_embed::RemoteModelPricing>) -> Span<'static> {

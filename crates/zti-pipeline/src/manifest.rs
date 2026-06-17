@@ -195,6 +195,12 @@ pub enum SourceKind {
     /// (READMEs, design docs, plain text, YAML, JSON, etc.). One chunk per
     /// file.
     Text,
+    /// PDF documents. Binary on disk; text is extracted page-by-page in the
+    /// walker and stored in `FileSnapshot::contents` with page boundaries
+    /// marked by form-feed (`\n\u{c}\n`). Chunked page-aware, with page
+    /// numbers overloading `start_line`/`end_line` and the detected heading
+    /// in `qualified`.
+    Pdf,
 }
 
 impl SourceKind {
@@ -204,6 +210,7 @@ impl SourceKind {
             SourceKind::Tsv => "tsv",
             SourceKind::Psv => "psv",
             SourceKind::Text => "text",
+            SourceKind::Pdf => "pdf",
         }
     }
 }
@@ -216,6 +223,7 @@ fn classify_kind(path: &Path) -> SourceKind {
         None => match path.extension().and_then(|e| e.to_str()) {
             Some("tsv") => SourceKind::Tsv,
             Some("psv") => SourceKind::Psv,
+            Some("pdf") => SourceKind::Pdf,
             _ => SourceKind::Text,
         },
     }
@@ -230,6 +238,18 @@ pub struct FileSnapshot {
     pub contents: String,
     pub kind: SourceKind,
     pub file_type: FileType,
+    /// `Some` only for [`SourceKind::Pdf`]: one entry per `\u{c}`
+    /// (form-feed) page boundary in `contents`, holding the heading detected
+    /// for that page. `None` for every other kind keeps the field zero-cost.
+    pub pdf_pages: Option<Vec<PdfPageMeta>>,
+}
+
+/// Per-page metadata carried alongside the extracted text of a PDF. Indexed
+/// in parallel with the form-feed-separated segments of `FileSnapshot::contents`.
+#[derive(Debug, Clone)]
+pub struct PdfPageMeta {
+    /// Chapter/section title detected via font-size clustering, if any.
+    pub heading: Option<String>,
 }
 
 pub struct Changes {
@@ -260,7 +280,7 @@ pub fn classify_file_type(rel_path: &str, kind: SourceKind) -> FileType {
     }
     match kind {
         SourceKind::Code(_) => FileType::Source,
-        SourceKind::Tsv | SourceKind::Psv => FileType::Doc,
+        SourceKind::Tsv | SourceKind::Psv | SourceKind::Pdf => FileType::Doc,
         SourceKind::Text => classify_text(rel_path),
     }
 }
@@ -340,9 +360,22 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
 
         let file_type = classify_file_type(&rel, kind);
 
-        let contents = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => continue,
+        // PDFs are binary; everything else flows through the UTF-8 text read.
+        // blake3 hashes the raw bytes for PDFs (so reindex triggers on real
+        // file edits, not on extractor-version drift) and the UTF-8 bytes for
+        // text/code (unchanged behaviour).
+        let (contents, blake3, pdf_pages) = match kind {
+            SourceKind::Pdf => match load_pdf(path, &rel) {
+                Some(loaded) => loaded,
+                None => continue,
+            },
+            _ => match std::fs::read_to_string(path) {
+                Ok(s) => {
+                    let hash: [u8; 32] = blake3::hash(s.as_bytes()).into();
+                    (s, hash, None)
+                }
+                Err(_) => continue,
+            },
         };
 
         let metadata = match std::fs::metadata(path) {
@@ -356,8 +389,6 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
 
-        let blake3: [u8; 32] = blake3::hash(contents.as_bytes()).into();
-
         let rel_path = rel.clone();
         map.insert(
             rel,
@@ -369,11 +400,63 @@ pub fn walk_source_files(root: &Path) -> HashMap<String, FileSnapshot> {
                 contents,
                 kind,
                 file_type,
+                pdf_pages,
             },
         );
     }
 
     map
+}
+
+/// Read a PDF file, hash its raw bytes, and extract per-page text + headings.
+/// Returns `None` to signal "skip this file" (read error, parse error, or no
+/// extractable text); the caller logs nothing further — diagnostics are emitted
+/// here via `tracing::warn!`.
+fn load_pdf(path: &Path, rel: &str) -> Option<(String, [u8; 32], Option<Vec<PdfPageMeta>>)> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(path = rel, error = %e, "pdf read failed, skipping");
+            return None;
+        }
+    };
+    let hash: [u8; 32] = blake3::hash(&bytes).into();
+    let pages = match zti_pdf::extract_pages(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(path = rel, error = %e, "pdf extract failed, skipping");
+            return None;
+        }
+    };
+    if pages.is_empty() {
+        tracing::warn!(path = rel, "pdf has no pages, skipping");
+        return None;
+    }
+    let (text, meta) = assemble_pdf_contents(&pages);
+    if text.trim().is_empty() {
+        tracing::warn!(path = rel, "pdf yielded no text, skipping");
+        return None;
+    }
+    Some((text, hash, Some(meta)))
+}
+
+/// Concatenate per-page text into one string with form-feed page separators
+/// (`\n\u{c}\n`) and collect per-page heading metadata parallel to the
+/// segments. Pure — no I/O — so it is unit-testable in isolation.
+pub fn assemble_pdf_contents(pages: &[zti_pdf::PageText]) -> (String, Vec<PdfPageMeta>) {
+    let total: usize = pages.iter().map(|p| p.text.len() + 3).sum::<usize>() + 3;
+    let mut text = String::with_capacity(total);
+    let mut meta = Vec::with_capacity(pages.len());
+    for page in pages {
+        if !text.is_empty() {
+            text.push_str("\n\u{c}\n");
+        }
+        text.push_str(&page.text);
+        meta.push(PdfPageMeta {
+            heading: page.heading.clone(),
+        });
+    }
+    (text, meta)
 }
 
 pub fn detect_changes(current: &HashMap<String, FileSnapshot>, previous: &[FileRow]) -> Changes {
@@ -418,10 +501,13 @@ pub fn detect_changes(current: &HashMap<String, FileSnapshot>, previous: &[FileR
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceKind, classify_file_type, classify_kind, is_dependency_path};
+    use super::{
+        SourceKind, assemble_pdf_contents, classify_file_type, classify_kind, is_dependency_path,
+    };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use zti_common::file_type::FileType;
+    use zti_pdf::PageText;
     use zti_tree_sitter::Language;
 
     #[test]
@@ -432,6 +518,12 @@ mod tests {
     #[test]
     fn psv_is_its_own_kind() {
         assert_eq!(classify_kind(Path::new("db/findings.psv")), SourceKind::Psv);
+    }
+
+    #[test]
+    fn pdf_is_its_own_kind() {
+        assert_eq!(classify_kind(Path::new("spec.pdf")), SourceKind::Pdf);
+        assert_eq!(SourceKind::Pdf.label(), "pdf");
     }
 
     #[test]
@@ -470,6 +562,68 @@ mod tests {
             classify_file_type("config/settings.toml", SourceKind::Text),
             FileType::Config,
         );
+    }
+
+    #[test]
+    fn pdf_classifies_as_doc_file_type() {
+        assert_eq!(
+            classify_file_type("whitepaper.pdf", SourceKind::Pdf),
+            FileType::Doc,
+        );
+        // A PDF under a tests/ directory still wins the Test tag, mirroring
+        // every other kind.
+        assert_eq!(
+            classify_file_type("tests/fixtures/sample.pdf", SourceKind::Pdf),
+            FileType::Test,
+        );
+    }
+
+    #[test]
+    fn assemble_pdf_contents_joins_pages_with_form_feed() {
+        let pages = vec![
+            PageText {
+                page: 1,
+                text: "page one".into(),
+                heading: Some("Intro".into()),
+            },
+            PageText {
+                page: 2,
+                text: "page two".into(),
+                heading: None,
+            },
+            PageText {
+                page: 3,
+                text: "page three".into(),
+                heading: Some("Ch 2".into()),
+            },
+        ];
+        let (text, meta) = assemble_pdf_contents(&pages);
+        assert_eq!(text, "page one\n\u{c}\npage two\n\u{c}\npage three");
+        assert_eq!(meta.len(), 3);
+        assert_eq!(meta[0].heading.as_deref(), Some("Intro"));
+        assert!(meta[1].heading.is_none());
+        assert_eq!(meta[2].heading.as_deref(), Some("Ch 2"));
+    }
+
+    #[test]
+    fn assemble_pdf_contents_single_page_has_no_separator() {
+        let pages = vec![PageText {
+            page: 1,
+            text: "only".into(),
+            heading: None,
+        }];
+        let (text, meta) = assemble_pdf_contents(&pages);
+        assert_eq!(text, "only");
+        assert_eq!(meta.len(), 1);
+        assert!(meta[0].heading.is_none());
+    }
+
+    #[test]
+    fn assemble_pdf_contents_empty_input_is_empty() {
+        let pages: Vec<PageText> = vec![];
+        let (text, meta) = assemble_pdf_contents(&pages);
+        assert!(text.is_empty());
+        assert!(meta.is_empty());
     }
 
     #[test]

@@ -75,3 +75,39 @@ model_id = "thenlper/gte-large"
 parameters = "335M"
 technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
 description = "Top-tier retrieval for English. VRAM heavy."
+
+[[models]]
+model_id = "Alibaba-NLP/gte-Qwen2-7B-instruct"
+parameters = "7B"
+technologies = ["Qwen2", "LLM-based", "Instruct", "Multilingual"]
+description = "Heavyweight LLM-based encoder. Requires task instructions. Top-tier RAG performance with 32k context window."
+
+[[models]]
+model_id = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+parameters = "1.5B"
+technologies = ["Qwen2", "LLM-based", "Instruct", "Multilingual"]
+description = "Lightweight LLM-based encoder. Excellent balance of high accuracy and lower memory footprint with 32k context."
+
+[[models]]
+model_id = "Alibaba-NLP/qwen3-embedding-4b"
+parameters = "4B"
+technologies = ["Qwen3", "Flexible Dimension", "Multilingual"]
+description = "Latest architecture from Alibaba. Phenomenal accuracy on Chinese text with 32k context."
+
+[[models]]
+model_id = "BAAI/bge-multilingual-gemma2"
+parameters = "9B"
+technologies = ["Gemma2", "LLM-based", "Multilingual"]
+description = "Uncompromising accuracy and massive knowledge base. Heavyweight BGE model requiring significant VRAM."
+
+[[models]]
+model_id = "jinaai/jina-embeddings-v2-base-zh"
+parameters = "330M"
+technologies = ["JinaBERT", "ALiBi", "Chinese-focused"]
+description = "Excellent for long Chinese/English texts. Supports 8192 tokens without losing context meaning."
+
+[[models]]
+model_id = "infgrad/stella-base-zh-v3"
+parameters = "102M"
+technologies = ["RoBERTa", "Chinese-only", "High-precision"]
+description = "Surgical precision for Mandarin text. Historically dominates local Chinese benchmarks."

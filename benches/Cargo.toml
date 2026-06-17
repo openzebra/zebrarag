@@ -11,9 +11,16 @@ name = "score_bench"
 path = "score_bench.rs"
 harness = false
 
+[[bench]]
+name = "embed_pool_bench"
+path = "embed_pool_bench.rs"
+harness = false
+
 [dependencies]
 zti-rerank.workspace = true
+zti-embed.workspace = true
 candle-core.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

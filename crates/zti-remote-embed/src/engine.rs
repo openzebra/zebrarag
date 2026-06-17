@@ -7,20 +7,35 @@ use crate::client::RemoteEmbedClient;
 use crate::models::RemoteModelInfo;
 use crate::provider::RemoteProvider;
 
-/// Approximate token ceiling per HTTP request to a remote provider.
-/// Tuned to stay well under typical provider limits.
-const DEFAULT_BATCH_TOKENS: usize = 100_000;
+/// Approximate token ceiling per HTTP request to a remote provider. Bumped
+/// to ~20k tokens so requests fill to the provider's item cap rather than
+/// splitting early on the char budget — fewer requests on rate-limited
+/// providers. Still well under the 30s request timeout for embeddings.
+const DEFAULT_BATCH_TOKENS: usize = 20_000;
 /// Bytes-per-token estimate for batch sizing math.
 const BYTES_PER_TOKEN: usize = 4;
 /// Maximum characters per single HTTP request (byte-proxy for the token budget).
 const BATCH_CHAR_LIMIT: usize = DEFAULT_BATCH_TOKENS * BYTES_PER_TOKEN;
 const DEFAULT_MAX_LENGTH: usize = 4096;
-const REMOTE_EMBED_PIPELINE: usize = 4;
 
 async fn probe_dim(client: &RemoteEmbedClient, model_id: &str) -> Result<usize> {
+    tracing::info!(
+        provider = %client.provider().label(),
+        model_id,
+        "remote embed: probing dimension"
+    );
     let rows = client.embed_batch(model_id, &["a"]).await?;
     match rows.into_iter().next() {
-        Some(v) if !v.is_empty() => Ok(v.len()),
+        Some(v) if !v.is_empty() => {
+            let dim = v.len();
+            tracing::info!(
+                provider = %client.provider().label(),
+                model_id,
+                dim,
+                "remote embed: dimension probe complete"
+            );
+            Ok(dim)
+        }
         _ => bail!("remote probe returned an empty embedding vector"),
     }
 }
@@ -92,8 +107,7 @@ impl RemoteEmbedEngine {
         for (i, text) in texts.iter().enumerate() {
             let len = text.len();
             if i > start
-                && (i - start >= max_items
-                    || batch_chars.saturating_add(len) > BATCH_CHAR_LIMIT)
+                && (i - start >= max_items || batch_chars.saturating_add(len) > BATCH_CHAR_LIMIT)
             {
                 ranges.push((start, i));
                 start = i;
@@ -103,6 +117,15 @@ impl RemoteEmbedEngine {
         }
         ranges.push((start, texts.len()));
 
+        tracing::info!(
+            total_items = texts.len(),
+            sub_batches = ranges.len(),
+            max_items,
+            max_concurrency = self.client.provider().max_concurrency(),
+            "remote embed_texts: dispatching",
+        );
+        let dispatch_start = std::time::Instant::now();
+
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         let mut stream = futures::stream::iter(ranges)
             .map(|(s, e)| async move {
@@ -111,15 +134,35 @@ impl RemoteEmbedEngine {
                     None => Err(anyhow::anyhow!("invalid embed batch range {s}..{e}")),
                 }
             })
-            .buffered(REMOTE_EMBED_PIPELINE);
+            .buffered(self.client.provider().max_concurrency());
 
+        let mut sub_batch_idx = 0usize;
         while let Some(rows) = stream.next().await {
-            out.extend(rows?);
+            let rows = rows?;
+            tracing::info!(
+                sub_batch = sub_batch_idx,
+                items = rows.len(),
+                ms = dispatch_start.elapsed().as_millis() as u64,
+                "remote embed_texts: sub-batch received",
+            );
+            sub_batch_idx = sub_batch_idx.saturating_add(1);
+            out.extend(rows);
         }
+        tracing::info!(
+            total_items = out.len(),
+            ms = dispatch_start.elapsed().as_millis() as u64,
+            "remote embed_texts: all sub-batches done",
+        );
         Ok(out)
     }
 
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        tracing::info!(
+            provider = %self.provider().label(),
+            model_id = %self.model_id,
+            text_len = text.len(),
+            "remote embed: embedding query"
+        );
         let rows = self.client.embed_batch(&self.model_id, &[text]).await?;
         rows.into_iter()
             .next()

@@ -98,6 +98,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             remote_dim_hint,
         } => {
             if let Some(dt) = &model_dtype {
+                // Metadata-only save: the API key was already retrieved from the
+                // keyring by resolve_startup — re-saving it would trigger a
+                // redundant keychain write prompt on macOS.
                 let _ = config::save(
                     config::SaveConfig {
                         model: &m,
@@ -106,7 +109,7 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                         remote_provider: remote_provider.as_deref(),
                         remote_dim_hint,
                     },
-                    remote_api_key.as_deref(),
+                    None,
                 );
             }
             app.model = Some(Arc::from(m.as_str()));
@@ -154,11 +157,18 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
             api_key,
             models,
         } => {
+            // If the key matches what's already in memory, it came from the
+            // keyring (or was pre-filled from it) — no need to re-store.
+            let from_keyring = app
+                .remote_api_key
+                .as_deref()
+                .is_some_and(|stored| stored == api_key.as_ref());
             app.screen = Screen::Setup(SetupPhase::RemoteModelSelection {
                 provider,
                 api_key,
                 models: Arc::from(models),
                 selected: 0,
+                from_keyring,
             });
         }
         AppMessage::RemoteModelsError(msg) => {
@@ -253,13 +263,9 @@ async fn dispatch(app: &mut App, msg: AppMessage, tx: &mpsc::Sender<AppMessage>)
                 *cpus = env_cpus;
                 *mem_total_mb = env_mem;
             }
-            if app
-                .model
-                .as_deref()
-                .is_some_and(|model| {
-                    model.starts_with(zti_remote_embed::RemoteProvider::OpenRouter.model_prefix())
-                })
-                && model_dim > 0
+            if app.model.as_deref().is_some_and(|model| {
+                zti_remote_embed::RemoteProvider::from_model_id(model).is_some()
+            }) && model_dim > 0
                 && app.remote_dim_hint != Some(model_dim as usize)
             {
                 app.remote_dim_hint = Some(model_dim as usize);

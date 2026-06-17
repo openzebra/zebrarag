@@ -5,6 +5,7 @@ use zti_hw::{Device, Hardware};
 use crate::model_registry::ModelProfile;
 
 const F32: usize = 4;
+const WEIGHT_OVERHEAD: usize = 2;
 const ATTN_TENSORS: usize = 4;
 const FFN_TENSORS: usize = 2;
 const PIPELINE_LIVE: usize = 2;
@@ -74,7 +75,7 @@ pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
     let weight_bytes = std::fs::metadata(&profile.weights_path)
         .map(|m| m.len() as usize)
         .unwrap_or(0);
-    let weight_overhead = weight_bytes.saturating_mul(2);
+    let weight_overhead = weight_bytes.saturating_mul(WEIGHT_OVERHEAD);
 
     let inference_budget = budget.saturating_sub(weight_overhead);
 
@@ -98,7 +99,7 @@ pub fn attention_safe_seq_cap(profile: &ModelProfile, hw: &Hardware) -> usize {
     let weight_bytes = std::fs::metadata(&profile.weights_path)
         .map(|m| m.len() as usize)
         .unwrap_or(0);
-    let inference_budget = budget.saturating_sub(weight_bytes.saturating_mul(2));
+    let inference_budget = budget.saturating_sub(weight_bytes.saturating_mul(WEIGHT_OVERHEAD));
     let per_seq2 = ATTN_LIVE_BUFFERS
         .saturating_mul(profile.num_attention_heads.max(1))
         .saturating_mul(F32)
@@ -191,6 +192,7 @@ mod tests {
             num_hidden_layers: layers,
             intermediate_size: ffn,
             num_attention_heads: heads,
+            compute_dtype: None,
         }
     }
 

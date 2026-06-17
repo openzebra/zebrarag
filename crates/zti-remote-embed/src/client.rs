@@ -11,8 +11,6 @@ use crate::provider::RemoteProvider;
 const TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: usize = 4;
 const BACKOFF_MS: [u64; MAX_RETRIES] = [500, 1_000, 2_000, 4_000];
-const OPENROUTER_REFERER: &str = "https://github.com/hicaru/zebra_tree_indexer";
-const OPENROUTER_TITLE: &str = "zebraindex";
 
 #[inline]
 fn is_retryable(status: StatusCode) -> bool {
@@ -50,18 +48,21 @@ impl RemoteEmbedClient {
     }
 
     pub fn new(provider: RemoteProvider, api_key: Arc<str>) -> Result<Self> {
-        let mut headers = header::HeaderMap::with_capacity(2);
-        headers.insert(
-            header::HeaderName::from_static("http-referer"),
-            header::HeaderValue::from_static(OPENROUTER_REFERER),
-        );
-        headers.insert(
-            header::HeaderName::from_static("x-title"),
-            header::HeaderValue::from_static(OPENROUTER_TITLE),
-        );
+        let extra = provider.extra_headers();
+        let mut headers = header::HeaderMap::with_capacity(extra.len());
+        for (name, value) in extra {
+            headers.insert(
+                header::HeaderName::from_static(name),
+                header::HeaderValue::from_static(value),
+            );
+        }
         let inner = Client::builder()
             .https_only(true)
             .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .default_headers(headers)
             .build()?;
         Ok(Self {
@@ -73,6 +74,12 @@ impl RemoteEmbedClient {
 
     /// Batch embed with automatic retry on transient failures (429 / 5xx).
     pub async fn embed_batch(&self, model: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        tracing::info!(
+            provider = %self.provider.label(),
+            model,
+            items = texts.len(),
+            "remote embed: sending batch request"
+        );
         #[derive(serde::Serialize)]
         struct Req<'a> {
             model: &'a str,
@@ -90,9 +97,16 @@ impl RemoteEmbedClient {
 
         let mut attempt = 0usize;
         loop {
+            let url = format!("{}/embeddings", self.provider.base_url());
+            tracing::info!(
+                provider = %self.provider.label(),
+                %url,
+                attempt,
+                "remote embed: POST request sent"
+            );
             let send_result = self
                 .inner
-                .post(format!("{}/embeddings", self.provider.base_url()))
+                .post(&url)
                 .bearer_auth(self.api_key.as_ref())
                 .json(&Req {
                     model,
@@ -118,8 +132,51 @@ impl RemoteEmbedClient {
             };
 
             let status = resp.status();
+            tracing::info!(
+                provider = %self.provider.label(),
+                %status,
+                attempt,
+                "remote embed: response received"
+            );
             if status.is_success() {
-                let mut body: Resp = resp.json().await?;
+                // Read the body as text first, then parse manually — so we can
+                // log the actual serde/JSON error AND a body excerpt when
+                // deserialization fails. `resp.json()` gives only a generic
+                // "error decoding response body" with no field/path detail.
+                let body_text = resp.text().await?;
+
+                // OpenRouter wraps API errors in HTTP 200 with an
+                // {"error":{...}} body (e.g. "Input length exceeds maximum
+                // allowed token size"). Detect this before attempting to
+                // parse as an embeddings response.
+                #[derive(serde::Deserialize)]
+                struct ErrorBody {
+                    #[serde(default)]
+                    message: Option<String>,
+                }
+                #[derive(serde::Deserialize)]
+                struct ErrorResp {
+                    #[serde(default)]
+                    error: Option<ErrorBody>,
+                }
+                if let Ok(err_resp) = serde_json::from_str::<ErrorResp>(&body_text)
+                    && let Some(err) = err_resp.error
+                {
+                    let msg = err.message.unwrap_or_else(|| "unknown error".into());
+                    bail!("{} API error: {msg}", self.provider.label());
+                }
+
+                let mut body: Resp = match serde_json::from_str(&body_text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let excerpt: String = body_text.chars().take(500).collect();
+                        bail!(
+                            "{} embed response decode failed: {e} (body len {}, first 500 chars: {excerpt})",
+                            self.provider.label(),
+                            body_text.len(),
+                        );
+                    }
+                };
                 body.data.sort_unstable_by_key(|d| d.index);
                 if body.data.iter().enumerate().any(|(i, d)| d.index != i) {
                     bail!(
@@ -128,6 +185,11 @@ impl RemoteEmbedClient {
                         body.data.len(),
                     );
                 }
+                tracing::debug!(
+                    provider = %self.provider.label(),
+                    rows = body.data.len(),
+                    "remote embed: batch completed"
+                );
                 return Ok(body.data.into_iter().map(|d| d.embedding).collect());
             }
 
@@ -177,7 +239,11 @@ impl RemoteEmbedClient {
     pub async fn validate_key(&self) -> Result<()> {
         let resp = self
             .inner
-            .get(format!("{}/key", self.provider.base_url()))
+            .get(format!(
+                "{}{}",
+                self.provider.base_url(),
+                self.provider.validate_path()
+            ))
             .bearer_auth(self.api_key.as_ref())
             .send()
             .await?;

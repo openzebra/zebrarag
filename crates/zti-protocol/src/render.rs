@@ -27,6 +27,15 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
         return String::from("  no results\n");
     }
 
+    let n = results.hits.len();
+    // Equal per-hit share of the budget. Without this, early hits with large
+    // bodies (e.g. PDF page chunks) consume the whole budget and starve later
+    // hits out of the page entirely — the user asks for `limit` hits but sees
+    // fewer, with the omission notice itself silently dropped when the budget
+    // is full. Each hit now gets `budget / n` and its content is truncated to
+    // fit that share, so every requested hit renders (with a header at least).
+    let per_hit = budget / n;
+
     let est = budget.min(
         256 + results
             .hits
@@ -46,13 +55,16 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
             + count_digits(hit.start_line as usize)
             + 1
             + count_digits(hit.end_line as usize);
-        let min_cost = rank_len + hdr_len + 1 + 64;
-        if out.len() + min_cost > budget {
-            omitted = results.hits.len() - i;
+        let floor = rank_len + hdr_len + 1 + 64;
+        if per_hit < floor {
+            // Budget too tight for even this hit's header within its share.
+            omitted = n - i;
             break;
         }
         let _ = writeln!(out, "#{} {:.4}", i + 1, hit.score);
-        write_hit_budgeted_inner(&mut out, hit, hdr_len, budget);
+        // Content capped to this hit's own share (minus its header), never the
+        // global remainder, so every hit gets its turn.
+        write_hit_capped(&mut out, hit, hdr_len, per_hit - rank_len - 1);
     }
 
     if !results.appendix.is_empty() && out.len() < budget {
@@ -68,7 +80,10 @@ pub fn format_search_results_budgeted(results: &SearchResults, budget: usize) ->
                 omitted += 1;
                 continue;
             }
-            write_hit_budgeted_inner(&mut out, hit, hdr_len, budget);
+            // Appendix is bonus content — it shares whatever global budget
+            // remains after the primary hits.
+            let remaining = budget.saturating_sub(out.len());
+            write_hit_capped(&mut out, hit, hdr_len, remaining);
         }
     }
 
@@ -87,18 +102,22 @@ fn estimate_hit_bytes(h: &SearchHit) -> usize {
     h.content.len() + h.file_path.len() + 64
 }
 
-fn write_hit_budgeted_inner(out: &mut String, hit: &SearchHit, hdr_len: usize, budget: usize) {
-    if out.len() + hdr_len + 1 > budget {
-        out.push_str("    [omitted]\n");
+/// Render one hit's header plus as much of its content as fits in `cap` bytes.
+/// `cap` is a per-hit allowance (not the global budget), so a hit can never
+/// spend more than its fair share.
+fn write_hit_capped(out: &mut String, hit: &SearchHit, hdr_len: usize, cap: usize) {
+    if cap < hdr_len + 1 + 64 {
+        // Share too small to be useful — header only, no body.
+        let _ = write!(out, "{}:{}-{}\n    …\n", hit.file_path, hit.start_line, hit.end_line);
+        return;
+    }
+    if hit.symbol_kind == "document" {
+        write_pdf_hit_capped(out, hit, hdr_len, cap);
         return;
     }
     let _ = write!(out, "{}:{}-{}", hit.file_path, hit.start_line, hit.end_line);
     out.push('\n');
-    let remaining = budget.saturating_sub(out.len());
-    if remaining < 64 {
-        out.push_str("    [omitted]\n");
-        return;
-    }
+    let remaining = cap.saturating_sub(hdr_len + 1);
     let mut written = 0usize;
     for (n, line) in hit.content.lines().enumerate() {
         if n >= MAX_LINES_PER_HIT {
@@ -115,6 +134,100 @@ fn write_hit_budgeted_inner(out: &mut String, hit: &SearchHit, hdr_len: usize, b
         out.push('\n');
         written += cost;
     }
+}
+
+/// Render a PDF (`document`-kind) hit as a titled, sectioned passage. The
+/// detected heading — carried in `symbol_qualified` as `"<title> · p.N-M"` —
+/// becomes a `Title:` line, and the body is split into a `Description:` block
+/// and, when an `Example:`-lead line is present, an `Example:` block. The
+/// result reads like a book passage with database-like fields rather than a raw
+/// prose blob. Honours the same per-hit `cap` as [`write_hit_capped`].
+fn write_pdf_hit_capped(out: &mut String, hit: &SearchHit, hdr_len: usize, cap: usize) {
+    let _ = write!(out, "{}:{}-{}", hit.file_path, hit.start_line, hit.end_line);
+    out.push('\n');
+    let mut remaining = cap.saturating_sub(hdr_len + 1);
+    let mut lines_left = MAX_LINES_PER_HIT;
+
+    // Title from the heading half of `symbol_qualified` ("Algorithm C · p.1-1").
+    // A bare page range ("p.1-1") has no " · " separator → no Title line.
+    if let Some((title, _)) = hit.symbol_qualified.rsplit_once(" · ") {
+        let title = title.trim();
+        if !title.is_empty() {
+            let line = format!("  Title: {title}\n");
+            if line.len() <= remaining {
+                out.push_str(&line);
+                remaining -= line.len();
+                lines_left = lines_left.saturating_sub(1);
+            }
+        }
+    }
+
+    // Split the body at the first `Example:`-lead line: prose before it is the
+    // Description; the example and any trailing lines form the Example.
+    let body = hit.content.as_str();
+    let mut split = None;
+    let mut off = 0usize;
+    for line in body.split('\n') {
+        if line.trim_start().starts_with("Example:") {
+            split = Some(off);
+            break;
+        }
+        off += line.len() + 1;
+    }
+    let (desc, example) = match split {
+        Some(at) => (body[..at].trim(), body[at..].trim()),
+        None => (body.trim(), ""),
+    };
+
+    remaining = write_section(out, "Description:", desc, remaining, &mut lines_left);
+    // Drop the literal `Example:` lead so the section label isn't duplicated.
+    let example = example.strip_prefix("Example:").unwrap_or(example).trim();
+    if !example.is_empty() {
+        let _ = write_section(out, "Example:", example, remaining, &mut lines_left);
+    }
+}
+
+/// Write a `  <label> <first line>` block, indenting continuation lines by four
+/// spaces. Returns the leftover byte budget; stops early when `remaining` or
+/// `lines_left` is exhausted.
+fn write_section(
+    out: &mut String,
+    label: &str,
+    text: &str,
+    mut remaining: usize,
+    lines_left: &mut usize,
+) -> usize {
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return remaining;
+    };
+    if *lines_left == 0 {
+        return remaining;
+    }
+    let head = format!("  {label} {first}\n");
+    if head.len() > remaining {
+        return remaining;
+    }
+    out.push_str(&head);
+    remaining -= head.len();
+    *lines_left -= 1;
+    for line in lines {
+        if *lines_left == 0 {
+            out.push_str("    …\n");
+            return 0;
+        }
+        let cost = 4 + line.len() + 1;
+        if cost > remaining {
+            out.push_str("    ...\n");
+            return 0;
+        }
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+        remaining -= cost;
+        *lines_left -= 1;
+    }
+    remaining
 }
 
 #[cfg(test)]
@@ -192,5 +305,28 @@ mod tests {
         let out = format_search_results_budgeted(&r, 500);
         assert!(out.len() <= 500, "budget overshoot: {}", out.len());
         assert!(out.contains("omitted"), "should note omitted results");
+    }
+
+    #[test]
+    fn all_hits_render_with_equal_shares() {
+        // Regression: 10 hits each with a large body (the PDF-page-chunk
+        // scenario). Every requested hit must render its header at minimum;
+        // early hits with big bodies must NOT starve later hits off the page.
+        let hits: Vec<SearchHit> = (0..10)
+            .map(|i| mk_hit(&format!("fn_{i}"), "fn", i, &"x".repeat(5_000)))
+            .collect();
+        let r = SearchResults {
+            hits,
+            appendix: Vec::with_capacity(0),
+            total: 10,
+        };
+        let out = format_search_results_budgeted(&r, 12_000);
+        for rank in 1..=10 {
+            assert!(
+                out.contains(&format!("#{rank} ")),
+                "hit #{rank} missing from output (got {} rank headers)",
+                out.lines().filter(|l| l.starts_with('#')).count(),
+            );
+        }
     }
 }

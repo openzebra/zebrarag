@@ -11,7 +11,7 @@ use zti_ann::AnnCache;
 use zti_common::ids;
 use zti_dsl::ProjectIndex;
 use zti_embed::{AnyEmbedEngine, EmbedEngine, LoadOverrides};
-use zti_remote_embed::{RemoteEmbedEngine, RemoteModelInfo, RemoteProvider};
+use zti_remote_embed::{RemoteEmbedEngine, RemoteProvider};
 use zti_rerank::TurboReranker;
 use zti_rerank::gpu::TurboScorerCache;
 use zti_store::Db;
@@ -138,29 +138,48 @@ impl DaemonState {
             return Ok(Arc::clone(engine));
         }
 
-        let result = if let Some(remote_model) =
-            model_id.strip_prefix(RemoteProvider::OpenRouter.model_prefix())
+        let result = if let Some((provider, remote_model)) = RemoteProvider::from_model_id(model_id)
         {
+            tracing::info!(
+                provider = %provider.label(),
+                model = remote_model,
+                "daemon: loading remote embed engine for search"
+            );
             let api_key = self
                 .remote_api_key
                 .as_ref()
                 .map(Arc::clone)
                 .ok_or_else(|| anyhow::anyhow!("remote API key is not available"))?;
-            let info = RemoteModelInfo {
-                id: remote_model.to_string(),
-                name: remote_model.to_string(),
-                description: String::new(),
-                context_length: 0,
-                pricing: None,
-            };
-            RemoteEmbedEngine::connect(
-                RemoteProvider::OpenRouter,
-                api_key,
-                &info,
-                self.remote_dim_hint,
-            )
-            .await
-            .map(AnyEmbedEngine::Remote)
+            tracing::info!(
+                provider = %provider.label(),
+                model = remote_model,
+                "daemon: fetching remote model info"
+            );
+            let info = zti_remote_embed::fetch_model_info(provider, &api_key, remote_model).await?;
+            tracing::info!(
+                provider = %provider.label(),
+                model = remote_model,
+                context_length = info.context_length,
+                "daemon: model info fetched, connecting remote engine"
+            );
+            let engine = RemoteEmbedEngine::connect(provider, api_key, &info, self.remote_dim_hint)
+                .await
+                .map(AnyEmbedEngine::Remote);
+            match &engine {
+                Ok(e) => tracing::info!(
+                    provider = %provider.label(),
+                    model = remote_model,
+                    dim = e.dim(),
+                    "daemon: remote embed engine loaded"
+                ),
+                Err(e) => tracing::warn!(
+                    provider = %provider.label(),
+                    model = remote_model,
+                    error = %e,
+                    "daemon: remote embed engine load failed"
+                ),
+            }
+            engine
         } else {
             let hw = Arc::clone(&self.hardware);
             let owned = model_id.to_owned();

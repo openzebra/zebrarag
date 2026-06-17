@@ -29,11 +29,7 @@ pub struct ModelEntry {
 }
 
 pub fn is_model_downloaded(model_id: &str) -> bool {
-    let dir_name = model_id.replace('/', "_");
-    let Ok(models) = zti_common::paths::models_dir() else {
-        return false;
-    };
-    models.join(&dir_name).join(".zti_clone_complete").exists()
+    zti_embed::is_model_cached(model_id)
 }
 
 impl ModelEntry {
@@ -45,14 +41,26 @@ impl ModelEntry {
     }
 }
 
-pub fn openrouter_sentinel() -> ModelEntry {
+/// Menu placeholder for a remote provider; selecting it starts the API-key flow.
+pub fn remote_sentinel(provider: RemoteProvider) -> ModelEntry {
     ModelEntry {
-        model_id: String::from("openrouter"),
+        model_id: provider.as_str().to_string(),
         parameters: String::from("remote"),
         technologies: vec![String::from("API")],
-        description: String::from("Embeddings via OpenRouter API — no local download required"),
-        source: ModelSource::Remote(RemoteProvider::OpenRouter),
+        description: format!(
+            "Embeddings via {} API — no local download required",
+            provider.label()
+        ),
+        source: ModelSource::Remote(provider),
     }
+}
+
+/// One sentinel entry per supported remote provider, in declaration order.
+pub fn remote_sentinels() -> Vec<ModelEntry> {
+    RemoteProvider::ALL
+        .iter()
+        .map(|&provider| remote_sentinel(provider))
+        .collect()
 }
 
 pub fn registry_path() -> Result<PathBuf> {

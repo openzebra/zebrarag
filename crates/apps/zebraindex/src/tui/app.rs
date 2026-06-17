@@ -49,17 +49,20 @@ pub enum SetupPhase {
         provider: RemoteProvider,
         input: String,
         error: Option<String>,
+        from_keyring: bool,
     },
     FetchingRemoteModels {
         provider: RemoteProvider,
         api_key: Arc<str>,
         cancel: Arc<tokio::task::AbortHandle>,
+        from_keyring: bool,
     },
     RemoteModelSelection {
         provider: RemoteProvider,
         api_key: Arc<str>,
         models: Arc<[zti_remote_embed::RemoteModelInfo]>,
         selected: usize,
+        from_keyring: bool,
     },
     Launching {
         model_id: Arc<str>,
@@ -296,9 +299,7 @@ impl App {
         match msg {
             AppMessage::DaemonStatusUpdate(status) => self.daemon_status = status,
             AppMessage::DaemonEnvLoaded {
-                cpus,
-                mem_total_mb,
-                ..
+                cpus, mem_total_mb, ..
             } => {
                 self.env_cpus = cpus;
                 self.env_mem_total_mb = mem_total_mb;

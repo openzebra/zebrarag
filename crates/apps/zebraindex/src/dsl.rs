@@ -459,12 +459,13 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                 let trace_lang = match ext {
                     Some("tsv") => "tsv",
                     Some("psv") => "psv",
+                    Some("pdf") => "pdf",
                     _ => "text",
                 };
                 let chunks = if is_tabular {
                     chunk_tabular_file(&rel, &path, &contents, sizing.chunk_size)
                 } else {
-                    vec![chunk_text_file(rel, path, contents)]
+                    vec![chunk_text_file(&rel, &path, &contents)]
                 };
                 let f_locate = f_start.elapsed();
 
@@ -472,7 +473,7 @@ pub fn run_dsl(root: &Path, command: DslCommands) -> Result<()> {
                     "DEBUG [{}/{}] {} ({}B, ~{} tok, {}) -> {} chunks in {:?}{}",
                     i + 1,
                     total,
-                    chunks.first().map(|c| c.file.as_str()).unwrap_or(""),
+                    chunks.first().map(|c| &*c.file).unwrap_or(""),
                     bytes,
                     est_tokens,
                     trace_lang,
