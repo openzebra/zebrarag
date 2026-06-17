@@ -227,6 +227,12 @@ fn guess_prefixes_from_model_id(model_id: &str) -> (Option<String>, Option<Strin
             None,
         );
     }
+    if name.contains("mxbai") || name.contains("mixedbread") {
+        return (
+            Some("Represent this sentence for searching relevant passages: ".into()),
+            None,
+        );
+    }
     if name.contains("nomic-embed") {
         return (
             Some("search_query: ".into()),

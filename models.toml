@@ -77,6 +77,12 @@ technologies = ["BERT", "Mean Pooling", "General Text Embedding"]
 description = "Top-tier retrieval for English. VRAM heavy."
 
 [[models]]
+model_id = "mixedbread-ai/mxbai-embed-large-v1"
+parameters = "335M"
+technologies = ["BERT", "CLS Pooling", "Contrastive Learning", "Matryoshka"]
+description = "SOTA BERT-large English retrieval on MTEB. 1024-dim, 512 context, CLS pooling, and query-only prompt support."
+
+[[models]]
 model_id = "Alibaba-NLP/gte-Qwen2-7B-instruct"
 parameters = "7B"
 technologies = ["Qwen2", "LLM-based", "Instruct", "Multilingual"]
