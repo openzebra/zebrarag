@@ -52,11 +52,20 @@ pub fn prev_bucket(n: usize) -> usize {
         .unwrap_or(TYPICAL_SEQ_LEN)
 }
 
-const DEFAULT_METAL_MEM_FRAC: (usize, usize) = (4, 10);
+const DEFAULT_METAL_MEM_FRAC: (usize, usize) = (7, 10);
 const DEFAULT_CUDA_MEM_FRAC: (usize, usize) = (6, 10);
 const DEFAULT_CPU_MEM_FRAC: (usize, usize) = (5, 10);
 
-pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
+// Metal throughput ceiling for seq length. JinaBERT/BERT attention is O(seq²),
+// and candle-metal ALiBi kernels are not well-optimised beyond 512. Keep chunks
+// at the same 512-token budget used by `recommended_batch_size`. Override with
+// ZTI_EMBED_SEQ_CAP when longer context is needed.
+const DEFAULT_METAL_SEQ_CAP: usize = TYPICAL_SEQ_LEN;
+
+/// Memory-capacity estimate for the maximum safe batch size. This is an upper
+/// bound only — the engine calibrates empirically at load time and may choose a
+/// smaller value if the larger batch is not faster on the current hardware.
+pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware, dtype_bytes: usize) -> usize {
     let effective_seq = (profile.max_length).min(TYPICAL_SEQ_LEN);
     let per_sample = effective_seq
         .saturating_mul(profile.num_hidden_layers)
@@ -64,7 +73,7 @@ pub fn recommended_batch_size(profile: &ModelProfile, hw: &Hardware) -> usize {
             ATTN_TENSORS.saturating_mul(profile.hidden_size)
                 + FFN_TENSORS.saturating_mul(profile.intermediate_size),
         )
-        .saturating_mul(F32)
+        .saturating_mul(dtype_bytes)
         .saturating_mul(PIPELINE_LIVE)
         .max(1);
 
@@ -106,7 +115,18 @@ pub fn attention_safe_seq_cap(profile: &ModelProfile, hw: &Hardware) -> usize {
         .max(1);
     let cap = (inference_budget / per_seq2).max(1).isqrt();
 
-    clamp_seq_cap(cap, profile.max_length)
+    let mem_cap = clamp_seq_cap(cap, profile.max_length);
+
+    // On Metal, clamp to DEFAULT_METAL_SEQ_CAP (512) so actual forward-pass seq
+    // length matches the budget assumed by `recommended_batch_size`. Longer
+    // sequences make attention O(seq²) slower and overflow the batch budget.
+    // Override with ZTI_EMBED_SEQ_CAP when longer context is intentional.
+    if hw.device == Device::Metal {
+        let floor = TYPICAL_SEQ_LEN.min(profile.max_length);
+        mem_cap.min(DEFAULT_METAL_SEQ_CAP).max(floor)
+    } else {
+        mem_cap
+    }
 }
 
 /// Clamp a derived sequence cap to `[min(TYPICAL_SEQ_LEN, max_length), max_length]`.
@@ -199,21 +219,21 @@ mod tests {
     #[test]
     fn nomic_on_8gib_metal_is_safe() {
         let p = profile(768, 12, 3072, 12, 512, "/nonexistent");
-        let b = recommended_batch_size(&p, &hw(Device::Metal, 8));
-        assert!((1..=16).contains(&b), "expected [1..=16], got {b}");
+        let b = recommended_batch_size(&p, &hw(Device::Metal, 8), 2);
+        assert!((1..=32).contains(&b), "expected [1..=32], got {b}");
     }
 
     #[test]
     fn bge_small_on_8gib_metal_has_room() {
         let p = profile(384, 6, 1536, 6, 512, "/nonexistent");
-        let b = recommended_batch_size(&p, &hw(Device::Metal, 8));
+        let b = recommended_batch_size(&p, &hw(Device::Metal, 8), 2);
         assert!(b >= 8, "expected >= 8, got {b}");
     }
 
     #[test]
     fn pathological_clamps_to_one() {
         let p = profile(4096, 32, 16384, 32, 4096, "/nonexistent");
-        let b = recommended_batch_size(&p, &hw(Device::Metal, 1));
+        let b = recommended_batch_size(&p, &hw(Device::Metal, 1), 4);
         assert_eq!(b, 1);
     }
 
@@ -252,15 +272,18 @@ mod tests {
 
     #[test]
     fn attention_safe_seq_cap_keeps_model_max_on_large_metal() {
+        // Metal is capped at DEFAULT_METAL_SEQ_CAP (512) regardless of available
+        // memory, to align with `recommended_batch_size`'s TYPICAL_SEQ_LEN budget.
         let p = profile(768, 12, 3072, 12, 8192, "/nonexistent");
-        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 64)), 8192);
+        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 64)), 512);
     }
 
     #[test]
     fn attention_safe_seq_cap_shrinks_to_memory_bucket() {
+        // Both cases are now capped at DEFAULT_METAL_SEQ_CAP (512) on Metal.
         let p = profile(768, 12, 3072, 12, 8192, "/nonexistent");
-        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 13)), 4096);
-        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 4)), 2048);
+        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 13)), 512);
+        assert_eq!(attention_safe_seq_cap(&p, &hw(Device::Metal, 4)), 512);
     }
 
     #[test]

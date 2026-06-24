@@ -16,11 +16,26 @@ name = "embed_pool_bench"
 path = "embed_pool_bench.rs"
 harness = false
 
+[[bench]]
+name = "embed_inference_prof"
+path = "embed_inference_prof.rs"
+harness = false
+
+[[bench]]
+name = "index_prof"
+path = "index_prof.rs"
+harness = false
+
 [dependencies]
 zti-rerank.workspace = true
 zti-embed.workspace = true
 candle-core.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+zti-pipeline.workspace = true
+zti-store.workspace = true
+zti-common.workspace = true
+zti-protocol.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

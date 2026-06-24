@@ -243,6 +243,96 @@ pub struct EmbedEngine {
     tokenizer: Arc<Tokenizer>,
     profile: ModelProfile,
     hardware: Arc<Hardware>,
+    optimal_batch: usize,
+}
+
+#[inline]
+fn dtype_bytes(dtype: DType) -> usize {
+    match dtype {
+        DType::F16 | DType::BF16 => 2,
+        _ => 4,
+    }
+}
+
+fn run_dummy_forward(model: &Model, device: &candle_core::Device, batch: usize, seq: usize) {
+    let shape = (batch, seq);
+    let Ok(ids) = Tensor::zeros(shape, DType::U32, device) else {
+        return;
+    };
+    let Ok(zeros) = Tensor::zeros(shape, DType::U32, device) else {
+        return;
+    };
+    let Ok(mask) = Tensor::ones(shape, DType::U32, device) else {
+        return;
+    };
+    let _ = model
+        .forward(&ids, &zeros, Some(&mask))
+        .and_then(|out| out.to_device(&candle_core::Device::Cpu));
+}
+
+fn time_passes(
+    model: &Model,
+    device: &candle_core::Device,
+    batch: usize,
+    seq: usize,
+    n: usize,
+) -> f64 {
+    let mut total = std::time::Duration::ZERO;
+    for _ in 0..n {
+        let t0 = std::time::Instant::now();
+        run_dummy_forward(model, device, batch, seq);
+        total += t0.elapsed();
+    }
+    total.as_secs_f64() / n.max(1) as f64
+}
+
+/// Empirically select the optimal batch size for this model/device, then
+/// pre-compile backend shaders/kernels at every (optimal_batch, seq) bucket.
+///
+/// Behaviour per device:
+/// - Metal: times `candidate` vs `candidate/2` and picks the faster one.
+///   Memory capacity says `candidate` is safe, but unified-memory bandwidth can
+///   make a larger batch slower (observed: batch=32 → 4.4 chunks/s vs batch=16
+///   → 7.5 chunks/s on Apple Silicon with jina F16 at seq=512).
+/// - CUDA: uses `candidate` directly — cuBLAS GEMM scales well with batch and
+///   the memory-capacity formula is accurate for discrete GPU VRAM.
+/// - CPU: uses `candidate` directly — no JIT compilation, formula is accurate.
+fn calibrate_and_prewarm(
+    model: &Model,
+    device: &candle_core::Device,
+    candidate: usize,
+    seq_len: usize,
+    hw_device: &zti_hw::Device,
+) -> usize {
+    let optimal = if candidate > 1 {
+        match hw_device {
+            zti_hw::Device::Metal => {
+                let half = crate::batch::BATCH_BUCKETS
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&b| b <= candidate / 2)
+                    .unwrap_or(1);
+                let t_full = time_passes(model, device, candidate, seq_len, 2);
+                let t_half = time_passes(model, device, half, seq_len, 2);
+                let tp_full = candidate as f64 / t_full.max(f64::MIN_POSITIVE);
+                let tp_half = half as f64 / t_half.max(f64::MIN_POSITIVE);
+                if tp_full >= tp_half * 1.05 { candidate } else { half }
+            }
+            zti_hw::Device::Cuda | zti_hw::Device::Cpu => candidate,
+        }
+    } else {
+        candidate
+    };
+
+    // Pre-compile backend kernels/shaders for every (optimal, seq) bucket.
+    for &seq in crate::batch::SEQ_BUCKETS
+        .iter()
+        .filter(|&&s| s <= seq_len)
+    {
+        run_dummy_forward(model, device, optimal, seq);
+    }
+    optimal
 }
 
 impl EmbedEngine {
@@ -293,6 +383,7 @@ impl EmbedEngine {
         // reduced-precision dtype that overflows (e.g. a candle mask bug) falls
         // back to F32 once instead of silently wasting an entire index.
         let mut model = load_model(&profile, requested_dtype, &device)?;
+        let mut final_dtype = requested_dtype;
         if let Err(e) = warmup_model(
             &model,
             &tokenizer,
@@ -312,6 +403,7 @@ impl EmbedEngine {
             profile.dim = 0;
             model = load_model(&profile, DType::F32, &device)?;
             warmup_model(&model, &tokenizer, &device, &mut profile, DType::F32, &hw)?;
+            final_dtype = DType::F32;
         }
 
         // Wrap after all &mut calls (set_truncation) are done — worker gets a
@@ -325,6 +417,18 @@ impl EmbedEngine {
             model = %model_id,
             "embed engine ready"
         );
+
+        // Calibrate: time `candidate` vs `candidate/2` forward passes on Metal to
+        // find the empirically fastest batch size (memory capacity is not the only
+        // constraint — bandwidth limits can make a larger batch slower). Then
+        // pre-compile Metal shaders at every (optimal, seq) bucket used in production.
+        let candidate = crate::batch::recommended_batch_size(
+            &profile,
+            &hw,
+            dtype_bytes(final_dtype),
+        );
+        let optimal_batch = calibrate_and_prewarm(&model, &device, candidate, profile.max_length, &hw.device);
+        tracing::info!(candidate_batch = candidate, optimal_batch, device = ?hw.device, "calibrated embed batch size");
 
         let scratch = Scratch::with_capacity(BATCH_CEILING, profile.max_length, profile.dim);
 
@@ -370,6 +474,7 @@ impl EmbedEngine {
             tokenizer,
             profile,
             hardware: hw,
+            optimal_batch,
         })
     }
 
@@ -394,7 +499,7 @@ impl EmbedEngine {
     }
 
     pub fn recommended_batch_size(&self) -> usize {
-        crate::batch::recommended_batch_size(&self.profile, &self.hardware)
+        self.optimal_batch
     }
 
     pub fn tokenize(&self, texts: &[&str]) -> Result<Vec<Tokenized>> {

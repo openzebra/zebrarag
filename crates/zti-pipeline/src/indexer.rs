@@ -537,7 +537,9 @@ pub async fn index_project(
     // instead of a merge_insert per embed batch. The indexer deletes each
     // (re)indexed file's prior chunks before this loop, so freshly-hashed
     // chunk_ids can't collide with surviving rows — append is duplicate-free.
-    const CHUNK_FLUSH_ROWS: usize = 4096;
+    // 256 keeps pending_batches bounded at ~1 MB (vs 4096 which never flushed
+    // mid-loop for projects under 4096 chunks, causing a single end-of-loop burst).
+    const CHUNK_FLUSH_ROWS: usize = 256;
     let mut pending_batches: Vec<RecordBatch> = Vec::with_capacity(4);
     let mut pending_rows = 0usize;
     let mut pending_file_idxs: Vec<u32> = Vec::with_capacity(CHUNK_FLUSH_ROWS);

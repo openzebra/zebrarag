@@ -135,3 +135,7 @@ zti-ipc-client   = { path = "crates/zti-ipc-client" }
 zti-daemon       = { path = "crates/zti-daemon" }
 zti-recursive-chunk = { path = "crates/zti-recursive-chunk" }
 zti-pdf          = { path = "crates/zti-pdf" }
+
+[profile.profiling]
+inherits = "release"
+debug = true

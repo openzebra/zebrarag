@@ -31,7 +31,7 @@ pub fn build_sample_pdf() -> Vec<u8> {
 
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     // 10 objects: catalog(1), pages(2), 3×page(3,5,7), 3×stream(4,6,8), font(9).
-    let mut off = vec![0usize; 10];
+    let mut off = [0usize; 10];
 
     // `%` after the version marks the file as binary (per PDF spec) and keeps
     // tools happy.
@@ -88,8 +88,8 @@ pub fn build_sample_pdf() -> Vec<u8> {
     let xref_pos = buf.len();
     buf.extend_from_slice(b"xref\n0 10\n");
     buf.extend_from_slice(b"0000000000 65535 f \n");
-    for i in 1..10 {
-        buf.extend_from_slice(format!("{:010} 00000 n \n", off[i]).as_bytes());
+    for &o in off.iter().skip(1) {
+        buf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
 
     // Trailer + startxref pointer.
