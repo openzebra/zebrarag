@@ -11,8 +11,7 @@ tracing.workspace = true
 zti-hw-core.workspace = true
 candle-core.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { workspace = true, features = ["metal"] }
-
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-candle-core = { workspace = true, features = ["cuda"] }
+[features]
+default = []
+cuda  = ["candle-core/cuda"]
+metal = ["candle-core/metal"]

@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [features]
 default = []
+cuda  = ["zti-embed/cuda", "zti-hw/cuda"]
+metal = ["zti-embed/metal", "zti-hw/metal"]
 
 [dependencies]
 mimalloc.workspace = true
