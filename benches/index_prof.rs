@@ -3,12 +3,12 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use anyhow::Result;
-use zti_common::ids::project_id;
-use zti_embed::{AnyEmbedEngine, EmbedEngine};
-use zti_pipeline::indexer::index_project;
-use zti_pipeline::progress::{IpcReporter, Reporter};
-use zti_protocol::response::IndexPhase;
-use zti_store::Db;
+use zrag_common::ids::project_id;
+use zrag_embed::{AnyEmbedEngine, EmbedEngine};
+use zrag_pipeline::indexer::index_project;
+use zrag_pipeline::progress::{IpcReporter, Reporter};
+use zrag_protocol::response::IndexPhase;
+use zrag_store::Db;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {

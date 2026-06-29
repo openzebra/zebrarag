@@ -27,15 +27,15 @@ path = "index_prof.rs"
 harness = false
 
 [dependencies]
-zti-rerank.workspace = true
-zti-embed.workspace = true
+zrag-rerank.workspace = true
+zrag-embed.workspace = true
 candle-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
-zti-pipeline.workspace = true
-zti-store.workspace = true
-zti-common.workspace = true
-zti-protocol.workspace = true
+zrag-pipeline.workspace = true
+zrag-store.workspace = true
+zrag-common.workspace = true
+zrag-protocol.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

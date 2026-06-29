@@ -7,8 +7,8 @@ import "../styles/global.css";
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <title>zebraindex — local semantic code search</title>
-  <meta name="description" content="zebraindex: local-first semantic code index for AI agents. Parse, chunk, embed, store, query — entirely on device." />
+  <title>zebrarag — local semantic code search</title>
+  <meta name="description" content="zebrarag: local-first semantic code index for AI agents. Parse, chunk, embed, store, query — entirely on device." />
   <script is:inline>
     const stored = localStorage.getItem('theme');
     if (stored === 'dark') document.documentElement.classList.add('dark');
@@ -16,7 +16,7 @@ import "../styles/global.css";
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">zebraindex</a>
+    <a class="brand" href="/">zebrarag</a>
     <nav aria-label="links">
       <a href="/docs">docs</a>
       <a href="https://github.com/hicaru/zebra_tree_indexer" target="_blank" rel="noopener">git</a>
@@ -29,11 +29,11 @@ import "../styles/global.css";
     <section class="intro" aria-labelledby="title">
       <div class="term-window">
         <div class="term-titlebar">
-          <span class="term-title">zebraindex@localhost:~/src/zebraindex</span>
+          <span class="term-title">zebrarag@localhost:~/src/zebrarag</span>
         </div>
         <div class="term-body">
           <p class="term-line">
-            <span class="term-user">user@local</span><span class="term-sep">:</span><span class="term-dir">~/src/zebraindex</span><span class="term-dollar"> $</span>
+            <span class="term-user">user@local</span><span class="term-sep">:</span><span class="term-dir">~/src/zebrarag</span><span class="term-dollar"> $</span>
             <span id="typed-text"></span><span id="typed-cursor" class="cursor blink">▌</span>
           </p>
           <div class="terminal" aria-label="commands">
@@ -44,17 +44,17 @@ import "../styles/global.css";
             </div>
             <div class="term-row">
               <span class="prompt">$</span>
-              <code>zebraindex</code>
-              <button class="copy-cmd" type="button" data-copy="zebraindex">copy</button>
+              <code>zebrarag</code>
+              <button class="copy-cmd" type="button" data-copy="zebrarag">copy</button>
             </div>
             <div class="term-row">
               <span class="prompt">$</span>
-              <code>zebraindex --mcp</code>
-              <button class="copy-cmd" type="button" data-copy="zebraindex --mcp">copy</button>
+              <code>zebrarag --mcp</code>
+              <button class="copy-cmd" type="button" data-copy="zebrarag --mcp">copy</button>
             </div>
           </div>
           <div class="term-output" aria-hidden="true">
-            <span class="out-line">[daemon] ~/.local/share/zebraindex/daemon.sock</span>
+            <span class="out-line">[daemon] ~/.local/share/zebrarag/daemon.sock</span>
             <span class="out-line">[model] jina-embeddings-v2-base-code · metal</span>
             <span class="out-line out-ready">[mcp] stdio ready<span class="cursor blink">▌</span></span>
           </div>
@@ -67,7 +67,7 @@ import "../styles/global.css";
       </p>
     </section>
 
-    <section class="scene" aria-label="3D zebraindex visualization">
+    <section class="scene" aria-label="3D zebrarag visualization">
       <canvas id="canvas"></canvas>
       <p class="scene-caption">drag rotate / wheel zoom / no cloud</p>
     </section>
@@ -114,7 +114,7 @@ import "../styles/global.css";
       </ul>
       <div class="mcp-snippet">
         <span class="mcp-snippet-label">mcp config</span>
-        <code>&#123;"command":"zebraindex","args":["--mcp"]&#125;</code>
+        <code>&#123;"command":"zebrarag","args":["--mcp"]&#125;</code>
       </div>
     </aside>
   </main>
@@ -157,7 +157,7 @@ import "../styles/global.css";
     // Typewriter effect in terminal prompt
     const typed = document.getElementById('typed-text')!;
     const typedCursor = document.getElementById('typed-cursor')!;
-    const text = 'zebraindex --mcp';
+    const text = 'zebrarag --mcp';
     let i = 0;
     function typeNext() {
       if (i <= text.length) {

@@ -1,0 +1,523 @@
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::Result;
+use clap::Subcommand;
+use indicatif::{ProgressBar, ProgressStyle};
+
+use zrag_ipc_client::Client;
+use zrag_protocol::format_search_results;
+use zrag_protocol::request::*;
+use zrag_protocol::response::*;
+
+#[derive(Subcommand)]
+pub enum CliCommand {
+    #[command(about = "Index a project")]
+    Index {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: PathBuf,
+        #[arg(long)]
+        refresh: bool,
+    },
+    #[command(about = "Search a project")]
+    Search {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: PathBuf,
+        query: String,
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        glob: Option<String>,
+        #[arg(long, default_value = "false")]
+        exhaustive: bool,
+        #[arg(long, default_value_t = SearchMode::Query)]
+        mode: SearchMode,
+    },
+    #[command(about = "Interactive chat (search loop)")]
+    Chat {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: PathBuf,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+    #[command(about = "Show project status")]
+    Status {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: Option<PathBuf>,
+    },
+    #[command(about = "Run diagnostics")]
+    Doctor {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: Option<PathBuf>,
+    },
+    #[command(about = "Show daemon environment")]
+    Env,
+    #[command(about = "Stop the daemon")]
+    Stop,
+    #[command(about = "Remove a project")]
+    Remove {
+        #[arg(short, long, help = "Project name, index number, or root path")]
+        root: PathBuf,
+    },
+    #[command(about = "List all indexed projects")]
+    Projects,
+    #[command(
+        subcommand,
+        about = "Test remote embedding providers end-to-end (standalone, no daemon)"
+    )]
+    Remote(RemoteCommand),
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    #[command(about = "List embedding models for a provider")]
+    Models {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+    },
+    #[command(about = "Validate the API key for a provider")]
+    Validate {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+    },
+    #[command(about = "One-shot embed (connect + embed) to smoke-test a model")]
+    Embed {
+        #[arg(short, long, help = "openrouter | alibaba")]
+        provider: String,
+        #[arg(short, long, help = "Model id, with or without the provider: prefix")]
+        model: String,
+        #[arg(
+            short = 'k',
+            long,
+            help = "Provider API key. If omitted, falls back to the provider's env var \
+                    (e.g. ZEBRA_OPENROUTER_KEY) and then the OS keyring."
+        )]
+        api_key: Option<String>,
+        #[arg(help = "Text to embed (defaults to a short probe string)")]
+        text: Vec<String>,
+    },
+}
+
+async fn open_client(
+    model: Option<&str>,
+    query_prefix: Option<&str>,
+    passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
+) -> Result<Client> {
+    let mut client = Client::connect(
+        Duration::from_secs(60),
+        model,
+        query_prefix,
+        passage_prefix,
+        model_dtype,
+        None,
+        None,
+    )
+    .await?;
+    client.handshake().await?;
+    Ok(client)
+}
+
+async fn resolve_root(root: &Path) -> Result<String> {
+    zrag_store::resolve_project(Some(&root.to_string_lossy())).await
+}
+
+pub async fn run(
+    cmd: CliCommand,
+    model: Option<&str>,
+    query_prefix: Option<&str>,
+    passage_prefix: Option<&str>,
+    model_dtype: Option<&str>,
+) -> Result<()> {
+    let open = || open_client(model, query_prefix, passage_prefix, model_dtype);
+
+    match cmd {
+        CliCommand::Index { root, refresh } => {
+            let mut client = open().await?;
+            let project_root = match resolve_root(&root).await {
+                Ok(p) => p,
+                Err(_) => root
+                    .canonicalize()
+                    .map_err(|_| {
+                        anyhow::anyhow!("Project directory not found: {}", root.display())
+                    })?
+                    .to_string_lossy()
+                    .to_string(),
+            };
+            let bar = RefCell::new(None::<ProgressBar>);
+
+            let resp = client
+                .request_streaming(
+                    Request::Index(IndexReq {
+                        project_root,
+                        refresh,
+                        search_method: None,
+                    }),
+                    |frame| {
+                        if let Response::IndexProgress(p) = frame {
+                            let mut slot = bar.borrow_mut();
+                            match p.phase {
+                                zrag_protocol::response::IndexPhase::Start => {
+                                    if let Some(old) = slot.take() {
+                                        old.finish_and_clear();
+                                    }
+                                    let b = ProgressBar::new(p.total);
+                                    b.set_style(
+                                        ProgressStyle::with_template(
+                                            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                                        )
+                                        .unwrap_or_else(|_| ProgressStyle::default_bar()),
+                                    );
+                                    *slot = Some(b);
+                                }
+                                zrag_protocol::response::IndexPhase::Dsl
+                                | zrag_protocol::response::IndexPhase::Gather
+                                | zrag_protocol::response::IndexPhase::Tokenize => {
+                                    if let Some(b) = slot.as_ref() {
+                                        b.set_position(p.current);
+                                        b.set_message(p.message);
+                                    }
+                                }
+                                zrag_protocol::response::IndexPhase::Embed => {
+                                    if let Some(b) = slot.as_ref() {
+                                        b.set_position(p.current);
+                                    }
+                                }
+                                zrag_protocol::response::IndexPhase::BuildIndex => {
+                                    if let Some(b) = slot.as_ref() {
+                                        b.set_message(p.message);
+                                    }
+                                }
+                                zrag_protocol::response::IndexPhase::Finish => {
+                                    if let Some(b) = slot.take() {
+                                        b.finish_with_message(p.message);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                )
+                .await?;
+
+            match resp {
+                Response::Index(Ok(stats)) => {
+                    println!(
+                        "Indexed {} chunks in {} files ({:.1}s)",
+                        stats.total_chunks,
+                        stats.total_files,
+                        stats.duration_ms as f64 / 1000.0
+                    );
+                }
+                Response::Index(Err(e)) => eprintln!("Error: {}", e.message),
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Search {
+            root,
+            query,
+            limit,
+            lang,
+            glob,
+            exhaustive,
+            mode,
+        } => {
+            let mut client = open().await?;
+            let project_root = resolve_root(&root).await?;
+            let resp = client
+                .request(&Request::Search(SearchReq {
+                    project_root,
+                    query,
+                    limit,
+                    offset: None,
+                    languages: lang.map(|l| l.split(',').map(String::from).collect()),
+                    path_glob: glob,
+                    refresh_index: false,
+                    exhaustive,
+                    include_tests: false,
+                    mode,
+                }))
+                .await?;
+            match resp {
+                Response::Search(Ok(results)) => {
+                    print!("{}", format_search_results(&results));
+                    if results.total == 0 {
+                        println!(
+                            "0 results (hint: project may not be indexed; run `zebrarag index --root <root>` to index)"
+                        );
+                    } else {
+                        println!("{} results", results.total);
+                    }
+                }
+                Response::Search(Err(e)) => eprintln!("Error: {}", e.message),
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Chat { root, limit } => {
+            let mut client = open().await?;
+            let project_root = resolve_root(&root).await?;
+            let mut rl = rustyline::DefaultEditor::new()?;
+            println!("zebrarag chat — type a query, :q or Ctrl-D to exit.");
+
+            while let Ok(line) = rl.readline("> ") {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == ":q" {
+                    break;
+                }
+                let _ = rl.add_history_entry(trimmed);
+
+                let resp = client
+                    .request(&Request::Search(SearchReq {
+                        project_root: project_root.clone(),
+                        query: trimmed.to_string(),
+                        limit,
+                        offset: None,
+                        languages: None,
+                        path_glob: None,
+                        refresh_index: false,
+                        exhaustive: false,
+                        include_tests: false,
+                        mode: SearchMode::default(),
+                    }))
+                    .await?;
+                match resp {
+                    Response::Search(Ok(results)) => {
+                        print!("{}", format_search_results(&results));
+                    }
+                    Response::Search(Err(e)) => eprintln!("Error: {}", e.message),
+                    other => eprintln!("Unexpected response: {:?}", other),
+                }
+            }
+        }
+        CliCommand::Status { root } => {
+            let mut client = open().await?;
+            let project_root = match root {
+                Some(r) => Some(resolve_root(&r).await?),
+                None => None,
+            };
+            let resp = client
+                .request(&Request::ProjectStatus(ProjectStatusReq { project_root }))
+                .await?;
+            match resp {
+                Response::ProjectStatus(Ok(status)) => {
+                    println!("Root: {}", status.project_root);
+                    println!("Model: {} (dim={})", status.model_id, status.model_dim);
+                    println!("Chunks: {}", status.total_chunks);
+                    println!("Files: {}", status.total_files);
+                }
+                Response::ProjectStatus(Err(e)) => eprintln!("Error: {}", e.message),
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Doctor { root } => {
+            let mut client = open().await?;
+            let project_root = match root {
+                Some(r) => Some(resolve_root(&r).await?),
+                None => None,
+            };
+            let resp = client
+                .request(&Request::Doctor(DoctorReq { project_root }))
+                .await?;
+            match resp {
+                Response::Doctor(Ok(report)) => {
+                    println!("Device: {}", report.device);
+                    for check in &report.checks {
+                        let marker = match check.status {
+                            CheckStatus::Ok => "OK  ",
+                            CheckStatus::Warn => "WARN",
+                            CheckStatus::Err => "ERR ",
+                        };
+                        println!("[{}] {}: {}", marker, check.name, check.message);
+                    }
+                }
+                Response::Doctor(Err(e)) => eprintln!("Error: {}", e.message),
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Env => {
+            let mut client = open().await?;
+            let resp = client.request(&Request::DaemonEnv).await?;
+            match resp {
+                Response::DaemonEnv(env) => {
+                    println!("Data dir: {}", env.data_dir);
+                    println!("Socket: {}", env.socket_path);
+                    println!("Model: {}", env.model_id);
+                    println!("Device: {}", env.device);
+                    println!("CPUs: {}", env.cpus);
+                    println!("RAM: {} MB", env.mem_total_mb);
+                    if let Some(ref p) = env.query_prefix {
+                        println!("Query prefix: {:?}", p);
+                    } else {
+                        println!("Query prefix: None");
+                    }
+                    if let Some(ref p) = env.passage_prefix {
+                        println!("Passage prefix: {:?}", p);
+                    } else {
+                        println!("Passage prefix: None");
+                    }
+                }
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Stop => {
+            let mut client = open().await?;
+            let resp = client.request(&Request::Stop).await?;
+            if matches!(resp, Response::Stop(())) {
+                println!("Daemon stopped.");
+            }
+        }
+        CliCommand::Remove { root } => {
+            let mut client = open().await?;
+            let project_root = resolve_root(&root).await?;
+            let resp = client
+                .request(&Request::RemoveProject(RemoveProjectReq { project_root }))
+                .await?;
+            match resp {
+                Response::RemoveProject(Ok(())) => println!("Project removed."),
+                Response::RemoveProject(Err(e)) => eprintln!("Error: {}", e.message),
+                other => eprintln!("Unexpected response: {:?}", other),
+            }
+        }
+        CliCommand::Projects => {
+            let projects = zrag_store::list_projects().await?;
+            if projects.is_empty() {
+                println!("No indexed projects found.");
+                return Ok(());
+            }
+            println!("| # | Project | Root | Model | Chunks | Files | Last Indexed |");
+            println!("|---|---------|------|-------|--------|-------|-------------|");
+            for (i, p) in projects.iter().enumerate() {
+                let name = Path::new(&p.root_path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| std::borrow::Cow::Borrowed(&p.root_path));
+                let ago = zrag_common::format::format_elapsed(p.last_indexed_ns);
+                println!(
+                    "| {} | {} | {} | {} | {} | {} | {} |",
+                    i + 1,
+                    name,
+                    p.root_path,
+                    p.model_id,
+                    p.total_chunks,
+                    p.total_files,
+                    ago
+                );
+            }
+            println!("\n{} project(s)", projects.len());
+        }
+        CliCommand::Remote(command) => run_remote(command).await?,
+    }
+
+    Ok(())
+}
+
+/// Resolve a provider's API key: explicit `--api-key` arg first, then the env
+/// var, then the OS keyring.
+fn resolve_remote_key(
+    provider: zrag_remote_embed::RemoteProvider,
+    cli_key: Option<String>,
+) -> Result<std::sync::Arc<str>> {
+    cli_key
+        .or_else(|| std::env::var(provider.env_var()).ok())
+        .or_else(|| zrag_common::secrets::retrieve(provider.as_str()))
+        .map(std::sync::Arc::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no API key for {}: pass --api-key, set {}, or store it in the OS keyring",
+                provider.label(),
+                provider.env_var()
+            )
+        })
+}
+
+async fn run_remote(cmd: RemoteCommand) -> Result<()> {
+    use zrag_remote_embed::{RemoteEmbedEngine, RemoteModelInfo, RemoteProvider, list_models};
+
+    match cmd {
+        RemoteCommand::Models { provider, api_key } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let models = list_models(provider, &key).await?;
+            if models.is_empty() {
+                println!("No embedding models available for {}.", provider.label());
+                return Ok(());
+            }
+            println!("| Model | Context | Price |");
+            println!("|-------|---------|-------|");
+            for m in &models {
+                let price = m
+                    .pricing
+                    .as_ref()
+                    .map_or_else(|| String::from("—"), |p| p.format_price());
+                println!(
+                    "| {}{} | {} | {} |",
+                    provider.model_prefix(),
+                    m.id,
+                    m.context_length,
+                    price
+                );
+            }
+            println!("\n{} model(s) for {}", models.len(), provider.label());
+        }
+        RemoteCommand::Validate { provider, api_key } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let client = zrag_remote_embed::client::RemoteEmbedClient::new(provider, key)?;
+            client.validate_key().await?;
+            println!("OK: {} API key is valid.", provider.label());
+        }
+        RemoteCommand::Embed {
+            provider,
+            model,
+            api_key,
+            text,
+        } => {
+            let provider = RemoteProvider::try_from(provider.as_str())?;
+            let key = resolve_remote_key(provider, api_key)?;
+            let bare = model
+                .strip_prefix(provider.model_prefix())
+                .unwrap_or(&model);
+            let info = RemoteModelInfo {
+                id: bare.to_owned(),
+                name: bare.to_owned(),
+                description: String::new(),
+                context_length: 0,
+                pricing: None,
+            };
+            let engine = RemoteEmbedEngine::connect(provider, key, &info, None).await?;
+            let joined = text.join(" ");
+            let input = if joined.trim().is_empty() {
+                "the quick brown fox"
+            } else {
+                joined.as_str()
+            };
+            let vector = engine.embed_query(input).await?;
+            let preview: Vec<String> = vector.iter().take(8).map(|v| format!("{v:.4}")).collect();
+            println!("Provider: {}", provider.label());
+            println!("Model:    {}{}", provider.model_prefix(), engine.model_id());
+            println!("Dim:      {}", engine.dim());
+            println!("Sample:   [{}, …]", preview.join(", "));
+        }
+    }
+
+    Ok(())
+}

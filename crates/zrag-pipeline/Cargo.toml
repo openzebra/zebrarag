@@ -1,0 +1,38 @@
+[package]
+name = "zrag-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes `zrag_pipeline::testing` (assemble_pdf_contents, pack_pdf_pages,
+# PdfPageMeta) for integration tests. Enable with `--features testing`.
+testing = []
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zrag-dsl.workspace = true
+zrag-ts-core.workspace = true
+zrag-recursive-chunk.workspace = true
+zrag-pdf.workspace = true
+tree-sitter.workspace = true
+zrag-embed.workspace = true
+zrag-store.workspace = true
+zrag-tree-sitter.workspace = true
+zrag-rerank.workspace = true
+zrag-protocol.workspace = true
+zrag-common.workspace = true
+zrag-ann.workspace = true
+zrag-hw.workspace = true
+tokio.workspace = true
+indicatif.workspace = true
+rustyline.workspace = true
+blake3.workspace = true
+toml.workspace = true
+ignore.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true

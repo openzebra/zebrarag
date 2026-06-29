@@ -1,0 +1,17 @@
+[package]
+name = "zrag-hw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zrag-hw-core.workspace = true
+candle-core.workspace = true
+
+[features]
+default = []
+cuda  = ["candle-core/cuda"]
+metal = ["candle-core/metal"]

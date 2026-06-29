@@ -1,5 +1,5 @@
 use anyhow::Result;
-use zti_embed::EmbedEngine;
+use zrag_embed::EmbedEngine;
 
 const WARMUP: usize = 3;
 const ITERS: usize = 50;

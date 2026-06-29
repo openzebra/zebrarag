@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦓 ZebraIndex
+# 🦓 ZebraRAG
 
 ### Semantic Code Intelligence for AI Coding Agents
 
@@ -60,7 +60,7 @@ Or build from source:
 ```bash
 git clone https://github.com/hicaru/zebra_tree_indexer.git
 cd zebra_tree_indexer
-cargo build --release -p zebraindex
+cargo build --release -p zebrarag
 ```
 
 ### 2. Launch the TUI
@@ -68,20 +68,20 @@ cargo build --release -p zebraindex
 The terminal UI walks you through model selection, downloads, daemon launch, and indexing:
 
 ```bash
-zebraindex
+zebrarag
 ```
 
 ### 3. Index & Search
 
 ```bash
 # Index a project
-zebraindex index -r /path/to/your/project
+zebrarag index -r /path/to/your/project
 
 # Search by meaning
-zebraindex search -r /path/to/your/project "rate limiting middleware"
+zebrarag search -r /path/to/your/project "rate limiting middleware"
 
 # Interactive search loop
-zebraindex chat -r /path/to/your/project
+zebrarag chat -r /path/to/your/project
 ```
 
 ### 4. Wire up your agent(s)
@@ -89,7 +89,7 @@ zebraindex chat -r /path/to/your/project
 Run as an MCP server so your agent can search your codebase semantically:
 
 ```bash
-zebraindex --mcp
+zebrarag --mcp
 ```
 
 Add to **Claude Code** (`~/.claude.json`):
@@ -97,8 +97,8 @@ Add to **Claude Code** (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "zebra-mcp": {
-      "command": "zebraindex",
+    "zebrarag": {
+      "command": "zebrarag",
       "args": ["--mcp"]
     }
   }
@@ -108,7 +108,7 @@ Add to **Claude Code** (`~/.claude.json`):
 Or via CLI:
 
 ```bash
-claude mcp add -s user zebra-mcp -- zebraindex --mcp
+claude mcp add -s user zebrarag -- zebrarag --mcp
 ```
 
 Add to **Cursor** (`.cursor/mcp.json`):
@@ -116,8 +116,8 @@ Add to **Cursor** (`.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "zebra-mcp": {
-      "command": "zebraindex",
+    "zebrarag": {
+      "command": "zebrarag",
       "args": ["--mcp"]
     }
   }
@@ -127,9 +127,9 @@ Add to **Cursor** (`.cursor/mcp.json`):
 Add to **opencode** (`~/.config/opencode/opencode.json`):
 
 ```json
-"zebra-mcp": {
+"zebrarag": {
   "type": "local",
-  "command": ["zebraindex", "--mcp"],
+  "command": ["zebrarag", "--mcp"],
   "enabled": true
 }
 ```
@@ -137,20 +137,20 @@ Add to **opencode** (`~/.config/opencode/opencode.json`):
 Add to **Codex CLI** (`~/.codex/config.toml`):
 
 ```toml
-[mcp_servers.zebra-mcp]
-command = "zebraindex"
+[mcp_servers.zebrarag]
+command = "zebrarag"
 args = ["--mcp"]
 ```
 
 Add to **Pi** (`.pi/config.toml`):
 
 ```toml
-[mcp_servers.zebra-mcp]
-command = "zebraindex"
+[mcp_servers.zebrarag]
+command = "zebrarag"
 args = ["--mcp"]
 ```
 
-Add to **Gemini CLI**, **Hermes Agent**, **Antigravity IDE**, or **Kiro** — same pattern: point the MCP server config to `zebraindex --mcp`.
+Add to **Gemini CLI**, **Hermes Agent**, **Antigravity IDE**, or **Kiro** — same pattern: point the MCP server config to `zebrarag --mcp`.
 
 <sub>Zebra is MCP-native — works with **any** MCP-compatible agent. The agent gets seven tools: `searchQuery`, `searchPassage`, `searchDep`, `fileTree`, `projectList`, `doctor`, and `projectList`.</sub>
 
@@ -179,17 +179,17 @@ Add to **Gemini CLI**, **Hermes Agent**, **Antigravity IDE**, or **Kiro** — sa
 │                         AI Agent                                     │
 │                                                                     │
 │   "How does request validation work in this codebase?"              │
-│       calls zebra-mcp tools directly — no grep/find needed          │
+│       calls zebrarag tools directly — no grep/find needed          │
 │                                 │                                   │
 └─────────────────────────────────┬───────────────────────────────────┘
                                   │  MCP (stdio)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      zebraindex (CLI / TUI / MCP)                   │
+│                      zebrarag (CLI / TUI / MCP)                   │
 │                                 │                                   │
 │              Unix socket IPC    │                                    │
 │                                 ▼                                   │
-│                        zti-daemon                                  │
+│                        zrag-daemon                                  │
 │                                                                     │
 │  tree-sitter  ·  DSL chunking  ·  embedding  ·  ANN  ·  rerank    │
 │  AST parsing     recursive       (Candle)    (usearch)  (Turbo)    │
@@ -302,28 +302,28 @@ Hardware is auto-probed at daemon startup and the fastest available backend is s
 ## CLI Reference
 
 ```bash
-zebraindex                              # Launch the terminal UI
-zebraindex daemon --model <id>          # Start the background indexer daemon
-zebraindex index -r <path>              # Index a project
-zebraindex index -r <path> --refresh    # Force full re-index
-zebraindex search -r <path> <query>     # Semantic search
-zebraindex chat -r <path>               # Interactive search loop
-zebraindex status [-r <path>]           # Show indexed project status
-zebraindex doctor [-r <path>]           # Run diagnostics
-zebraindex env                          # Show daemon environment info
-zebraindex stop                         # Stop the daemon
-zebraindex projects                     # List all indexed projects
-zebraindex remove -r <path>             # Remove a project from the index
-zebraindex --mcp                        # Run as MCP server (stdio)
+zebrarag                              # Launch the terminal UI
+zebrarag daemon --model <id>          # Start the background indexer daemon
+zebrarag index -r <path>              # Index a project
+zebrarag index -r <path> --refresh    # Force full re-index
+zebrarag search -r <path> <query>     # Semantic search
+zebrarag chat -r <path>               # Interactive search loop
+zebrarag status [-r <path>]           # Show indexed project status
+zebrarag doctor [-r <path>]           # Run diagnostics
+zebrarag env                          # Show daemon environment info
+zebrarag stop                         # Stop the daemon
+zebrarag projects                     # List all indexed projects
+zebrarag remove -r <path>             # Remove a project from the index
+zebrarag --mcp                        # Run as MCP server (stdio)
 
 # DSL debugging tools
-zebraindex dsl -r <path> <subcommand>   # Dump DSL graph / dependency tree / project map
+zebrarag dsl -r <path> <subcommand>   # Dump DSL graph / dependency tree / project map
 ```
 
 ### Search options
 
 ```bash
-zebraindex search -r <path> <query> \
+zebrarag search -r <path> <query> \
   --limit 10 \            # Max results (default: 5)
   --lang rust,ts \        # Filter by language
   --glob "src/**/*.rs" \   # Filter by file pattern
@@ -369,11 +369,11 @@ When running as an MCP server, Zebra exposes these tools to agents:
 
 ## Troubleshooting
 
-**"Daemon not running"** — Start it with `zebraindex daemon --model <id>` or launch the TUI (`zebraindex`) which starts the daemon automatically.
+**"Daemon not running"** — Start it with `zebrarag daemon --model <id>` or launch the TUI (`zebrarag`) which starts the daemon automatically.
 
-**"No indexed projects found"** — Run `zebraindex index -r /path/to/project` first. Use `zebraindex projects` to see what's indexed.
+**"No indexed projects found"** — Run `zebrarag index -r /path/to/project` first. Use `zebrarag projects` to see what's indexed.
 
-**Search returns no results** — The project may use a language not yet supported. Check `zebraindex status` to see file counts. Try `--exhaustive` to bypass ANN.
+**Search returns no results** — The project may use a language not yet supported. Check `zebrarag status` to see file counts. Try `--exhaustive` to bypass ANN.
 
 **Indexing is slow on first run** — Expected. The initial backfill parses, chunks, and embeds every file. Subsequent runs are incremental and fast.
 

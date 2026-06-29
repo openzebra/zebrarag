@@ -1,0 +1,53 @@
+[package]
+name    = "zebrarag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zebrarag"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda  = ["zrag-embed/cuda", "zrag-hw/cuda"]
+metal = ["zrag-embed/metal", "zrag-hw/metal"]
+
+[dependencies]
+mimalloc.workspace = true
+zrag-daemon.workspace      = true
+zrag-ipc-client.workspace   = true
+zrag-protocol.workspace     = true
+zrag-store.workspace        = true
+zrag-common.workspace       = true
+zrag-ann.workspace          = true
+zrag-embed.workspace        = true
+zrag-remote-embed.workspace = true
+zrag-hw.workspace           = true
+zrag-dsl.workspace          = true
+zrag-tree-sitter.workspace  = true
+zrag-ts-core.workspace      = true
+zrag-recursive-chunk.workspace = true
+
+tokio.workspace            = true
+anyhow.workspace           = true
+clap.workspace             = true
+tracing.workspace          = true
+tracing-subscriber.workspace = true
+log.workspace              = true
+serde.workspace            = true
+serde_json.workspace       = true
+toml.workspace             = true
+time.workspace             = true
+reqwest.workspace          = true
+
+rmcp.workspace             = true
+schemars.workspace         = true
+globset.workspace          = true
+indicatif.workspace        = true
+rustyline.workspace        = true
+indoc.workspace            = true
+
+ratatui.workspace          = true
+crossterm.workspace        = true

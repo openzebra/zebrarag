@@ -1,32 +1,32 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/zti-common",
-  "crates/zti-hw-core",
-  "crates/zti-hw",
-  "crates/zti-ts-core",
-  "crates/zti-ts-rust",
-  "crates/zti-ts-typescript",
-  "crates/zti-ts-dart",
-  "crates/zti-ts-solidity",
-  "crates/zti-ts-python",
-  "crates/zti-ts-javascript",
-  "crates/zti-ts-go",
-  "crates/zti-ts-ocaml",
-  "crates/zti-tree-sitter",
-  "crates/zti-dsl",
-  "crates/zti-remote-embed",
-  "crates/zti-embed",
-  "crates/zti-rerank",
-  "crates/zti-store",
-  "crates/zti-pipeline",
-  "crates/zti-protocol",
-  "crates/zti-ann",
-  "crates/zti-ipc-client",
-  "crates/zti-daemon",
-  "crates/zti-recursive-chunk",
-  "crates/zti-pdf",
-  "crates/apps/zebraindex",
+  "crates/zrag-common",
+  "crates/zrag-hw-core",
+  "crates/zrag-hw",
+  "crates/zrag-ts-core",
+  "crates/zrag-ts-rust",
+  "crates/zrag-ts-typescript",
+  "crates/zrag-ts-dart",
+  "crates/zrag-ts-solidity",
+  "crates/zrag-ts-python",
+  "crates/zrag-ts-javascript",
+  "crates/zrag-ts-go",
+  "crates/zrag-ts-ocaml",
+  "crates/zrag-tree-sitter",
+  "crates/zrag-dsl",
+  "crates/zrag-remote-embed",
+  "crates/zrag-embed",
+  "crates/zrag-rerank",
+  "crates/zrag-store",
+  "crates/zrag-pipeline",
+  "crates/zrag-protocol",
+  "crates/zrag-ann",
+  "crates/zrag-ipc-client",
+  "crates/zrag-daemon",
+  "crates/zrag-recursive-chunk",
+  "crates/zrag-pdf",
+  "crates/apps/zebrarag",
   "benches",
 ]
 
@@ -110,31 +110,31 @@ criterion = { version = "0.5", default-features = false, features = ["html_repor
 ratatui   = "0.30"
 crossterm = "0.29"
 
-zti-common       = { path = "crates/zti-common" }
-zti-hw-core      = { path = "crates/zti-hw-core" }
-zti-hw           = { path = "crates/zti-hw" }
-zti-ts-core      = { path = "crates/zti-ts-core" }
-zti-ts-rust      = { path = "crates/zti-ts-rust" }
-zti-ts-typescript = { path = "crates/zti-ts-typescript" }
-zti-ts-dart      = { path = "crates/zti-ts-dart" }
-zti-ts-solidity  = { path = "crates/zti-ts-solidity" }
-zti-ts-python    = { path = "crates/zti-ts-python" }
-zti-ts-javascript = { path = "crates/zti-ts-javascript" }
-zti-ts-go        = { path = "crates/zti-ts-go" }
-zti-ts-ocaml     = { path = "crates/zti-ts-ocaml" }
-zti-tree-sitter  = { path = "crates/zti-tree-sitter" }
-zti-dsl          = { path = "crates/zti-dsl" }
-zti-remote-embed = { path = "crates/zti-remote-embed" }
-zti-embed        = { path = "crates/zti-embed" }
-zti-rerank       = { path = "crates/zti-rerank" }
-zti-store        = { path = "crates/zti-store" }
-zti-pipeline     = { path = "crates/zti-pipeline" }
-zti-protocol     = { path = "crates/zti-protocol" }
-zti-ann           = { path = "crates/zti-ann" }
-zti-ipc-client   = { path = "crates/zti-ipc-client" }
-zti-daemon       = { path = "crates/zti-daemon" }
-zti-recursive-chunk = { path = "crates/zti-recursive-chunk" }
-zti-pdf          = { path = "crates/zti-pdf" }
+zrag-common       = { path = "crates/zrag-common" }
+zrag-hw-core      = { path = "crates/zrag-hw-core" }
+zrag-hw           = { path = "crates/zrag-hw" }
+zrag-ts-core      = { path = "crates/zrag-ts-core" }
+zrag-ts-rust      = { path = "crates/zrag-ts-rust" }
+zrag-ts-typescript = { path = "crates/zrag-ts-typescript" }
+zrag-ts-dart      = { path = "crates/zrag-ts-dart" }
+zrag-ts-solidity  = { path = "crates/zrag-ts-solidity" }
+zrag-ts-python    = { path = "crates/zrag-ts-python" }
+zrag-ts-javascript = { path = "crates/zrag-ts-javascript" }
+zrag-ts-go        = { path = "crates/zrag-ts-go" }
+zrag-ts-ocaml     = { path = "crates/zrag-ts-ocaml" }
+zrag-tree-sitter  = { path = "crates/zrag-tree-sitter" }
+zrag-dsl          = { path = "crates/zrag-dsl" }
+zrag-remote-embed = { path = "crates/zrag-remote-embed" }
+zrag-embed        = { path = "crates/zrag-embed" }
+zrag-rerank       = { path = "crates/zrag-rerank" }
+zrag-store        = { path = "crates/zrag-store" }
+zrag-pipeline     = { path = "crates/zrag-pipeline" }
+zrag-protocol     = { path = "crates/zrag-protocol" }
+zrag-ann           = { path = "crates/zrag-ann" }
+zrag-ipc-client   = { path = "crates/zrag-ipc-client" }
+zrag-daemon       = { path = "crates/zrag-daemon" }
+zrag-recursive-chunk = { path = "crates/zrag-recursive-chunk" }
+zrag-pdf          = { path = "crates/zrag-pdf" }
 
 [profile.profiling]
 inherits = "release"

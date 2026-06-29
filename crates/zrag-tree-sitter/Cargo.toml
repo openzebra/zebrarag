@@ -1,0 +1,24 @@
+[package]
+name = "zrag-tree-sitter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tree-sitter.workspace = true
+zrag-ts-core.workspace = true
+zrag-ts-rust.workspace = true
+zrag-ts-typescript.workspace = true
+zrag-ts-dart.workspace = true
+zrag-ts-solidity.workspace = true
+zrag-ts-python.workspace = true
+zrag-ts-javascript.workspace = true
+zrag-ts-go.workspace = true
+zrag-ts-ocaml.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

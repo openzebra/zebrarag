@@ -1,12 +1,12 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: MCP Tools
-description: Reference for all six MCP tools exposed by zebraindex
+description: Reference for all six MCP tools exposed by zebrarag
 ---
 
 # MCP Tools
 
-zebraindex exposes six tools over the MCP stdio protocol. The `project` parameter auto-resolves to
+zebrarag exposes six tools over the MCP stdio protocol. The `project` parameter auto-resolves to
 the most recently indexed project if omitted — you rarely need to specify it.
 
 ---
@@ -91,7 +91,7 @@ Returns the **project file tree**, optionally filtered by a glob pattern.
 | `pathGlob` | `string?` | — | Filter, e.g. `"**/*.rs"` |
 
 ```json
-{ "tool": "fileTree", "pathGlob": "crates/zti-pipeline/**" }
+{ "tool": "fileTree", "pathGlob": "crates/zrag-pipeline/**" }
 ```
 
 ---

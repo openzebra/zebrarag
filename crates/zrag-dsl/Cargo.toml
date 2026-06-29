@@ -1,0 +1,21 @@
+[package]
+name = "zrag-dsl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zrag-tree-sitter.workspace = true
+zrag-ts-core.workspace = true
+zrag-common.workspace = true
+ignore.workspace = true
+blake3.workspace = true
+serde.workspace = true
+globset.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

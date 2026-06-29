@@ -1,0 +1,17 @@
+[package]
+name = "zrag-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+bincode.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+zrag-common.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

@@ -1,16 +1,16 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: Embedding Models
-description: Embedding model registry for zebraindex — 12 models from 22M to 567M parameters
+description: Embedding model registry for zebrarag — 12 models from 22M to 567M parameters
 ---
 
 # Embedding Models
 
-zebraindex ships with a registry of 13 embedding models. Models are downloaded automatically on
+zebrarag ships with a registry of 13 embedding models. Models are downloaded automatically on
 first use from HuggingFace. Switch models with `--model`:
 
 ```sh
-zebraindex --model BAAI/bge-small-en-v1.5 index .
+zebrarag --model BAAI/bge-small-en-v1.5 index .
 ```
 
 **Note:** changing the model requires re-indexing — embeddings from different models are not compatible.
@@ -66,7 +66,7 @@ zebraindex --model BAAI/bge-small-en-v1.5 index .
 | CUDA GPU (≥4 GB VRAM) | Any model up to bge-base |
 | CUDA GPU (≥12 GB VRAM) | bge-m3, multilingual-e5-base |
 
-Run `zebraindex doctor` to see which device zebraindex is using and whether the current model
+Run `zebrarag doctor` to see which device zebrarag is using and whether the current model
 fits in available memory.
 
 ---
@@ -81,7 +81,7 @@ Models from the E5 and Jina families use instruction prefixes at inference time:
 Configure custom prefixes when starting the daemon:
 
 ```sh
-zebraindex --query-prefix "query: " --passage-prefix "passage: " index .
+zebrarag --query-prefix "query: " --passage-prefix "passage: " index .
 ```
 
 BGE, GTE, and MiniLM models do **not** require prefixes.

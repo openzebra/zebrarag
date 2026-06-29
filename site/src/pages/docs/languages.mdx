@@ -1,12 +1,12 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: Supported Languages
-description: Languages and chunking strategies supported by zebraindex
+description: Languages and chunking strategies supported by zebrarag
 ---
 
 # Supported Languages
 
-zebraindex uses **tree-sitter** to parse source code into an AST, then extracts semantic chunks
+zebrarag uses **tree-sitter** to parse source code into an AST, then extracts semantic chunks
 aligned with the actual symbol boundaries of each language.
 
 ## Language table
@@ -37,7 +37,7 @@ This is what powers `searchDep` — the call graph is built at index time from t
 
 ### Recursive chunking (fallback)
 
-For files without a tree-sitter frontend (config, docs, generated code), zebraindex falls back
+For files without a tree-sitter frontend (config, docs, generated code), zebrarag falls back
 to a recursive splitter that respects token limits while trying to break at paragraph/line
 boundaries. These chunks have no symbol metadata.
 
@@ -56,10 +56,10 @@ Pass `includeTests: true` in `searchQuery` to include test files in results.
 
 ## Adding language support
 
-zebraindex language frontends live in `crates/zti-ts-*`. Each crate wraps a tree-sitter grammar
-and implements the `Frontend` trait from `zti-tree-sitter`. Adding a new language means:
+zebrarag language frontends live in `crates/zrag-ts-*`. Each crate wraps a tree-sitter grammar
+and implements the `Frontend` trait from `zrag-tree-sitter`. Adding a new language means:
 
-1. Add a `zti-ts-<lang>` crate with the tree-sitter grammar dependency
+1. Add a `zrag-ts-<lang>` crate with the tree-sitter grammar dependency
 2. Implement `Frontend` — define which node types map to which symbol kinds
-3. Register it in `crates/zti-tree-sitter/src/registry.rs`
-4. Add the file extension mapping in `crates/zti-tree-sitter/src/detect.rs`
+3. Register it in `crates/zrag-tree-sitter/src/registry.rs`
+4. Add the file extension mapping in `crates/zrag-tree-sitter/src/detect.rs`

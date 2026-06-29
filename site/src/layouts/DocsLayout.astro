@@ -9,8 +9,8 @@ const path = Astro.url.pathname.replace(/\/$/, '');
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <title>{frontmatter.title} — zebraindex</title>
-  <meta name="description" content={frontmatter.description ?? 'zebraindex documentation'} />
+  <title>{frontmatter.title} — zebrarag</title>
+  <meta name="description" content={frontmatter.description ?? 'zebrarag documentation'} />
   <script is:inline>
     const stored = localStorage.getItem('theme');
     if (stored === 'dark') document.documentElement.classList.add('dark');
@@ -18,7 +18,7 @@ const path = Astro.url.pathname.replace(/\/$/, '');
 </head>
 <body class="docs-body">
   <header class="topbar">
-    <a class="brand" href="/">zebraindex</a>
+    <a class="brand" href="/">zebrarag</a>
     <nav aria-label="links">
       <a href="/docs">docs</a>
       <a href="https://github.com/hicaru/zebra_tree_indexer" target="_blank" rel="noopener">git</a>

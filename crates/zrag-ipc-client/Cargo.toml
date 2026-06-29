@@ -1,0 +1,15 @@
+[package]
+name = "zrag-ipc-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+zrag-protocol.workspace = true
+zrag-common.workspace = true
+zrag-remote-embed.workspace = true
+fs2.workspace = true
+tokio = { workspace = true, features = ["net", "process", "time", "io-util"] }

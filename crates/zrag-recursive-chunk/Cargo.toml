@@ -1,0 +1,14 @@
+[package]
+name = "zrag-recursive-chunk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tree-sitter.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tree-sitter-rust.workspace = true

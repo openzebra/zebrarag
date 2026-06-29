@@ -1,0 +1,21 @@
+[package]
+name = "zrag-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+lancedb.workspace = true
+lance.workspace = true
+lance-io.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+zrag-common.workspace = true
+zrag-ann.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

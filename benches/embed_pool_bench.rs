@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Tensor};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use zti_embed::normalize::normalize_l2;
-use zti_embed::pooling::{PoolingStrategy, pool_on_device, pool_row_into};
+use zrag_embed::normalize::normalize_l2;
+use zrag_embed::pooling::{PoolingStrategy, pool_on_device, pool_row_into};
 
 const BATCH: usize = 32;
 const SEQ: usize = 256;

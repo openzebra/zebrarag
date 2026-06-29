@@ -1,0 +1,213 @@
+use std::sync::Mutex;
+
+pub trait ProgressReporter: Send + Sync {
+    fn start(&self, total: u64);
+    fn set_phase(
+        &self,
+        phase: zrag_protocol::response::IndexPhase,
+        current: u64,
+        total: u64,
+        message: &str,
+    );
+    fn inc(&self, n: u64);
+    fn finish_with_message(&self, msg: &str);
+}
+
+pub struct IndicatifReporter {
+    bar: Mutex<Option<indicatif::ProgressBar>>,
+}
+
+impl IndicatifReporter {
+    pub fn new() -> Self {
+        Self {
+            bar: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for IndicatifReporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProgressReporter for IndicatifReporter {
+    fn start(&self, total: u64) {
+        let mut guard = self.bar.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = guard.take() {
+            old.finish_and_clear();
+        }
+        let bar = indicatif::ProgressBar::new(total);
+        bar.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()),
+        );
+        *guard = Some(bar);
+    }
+
+    fn set_phase(
+        &self,
+        _phase: zrag_protocol::response::IndexPhase,
+        _current: u64,
+        _total: u64,
+        message: &str,
+    ) {
+        let guard = self.bar.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bar) = guard.as_ref() {
+            bar.set_message(message.to_string());
+        }
+    }
+
+    fn inc(&self, n: u64) {
+        let guard = self.bar.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bar) = guard.as_ref() {
+            bar.inc(n);
+        }
+    }
+
+    fn finish_with_message(&self, msg: &str) {
+        let mut guard = self.bar.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bar) = guard.take() {
+            bar.finish_with_message(msg.to_string());
+        }
+    }
+}
+
+pub struct SilentReporter;
+
+impl ProgressReporter for SilentReporter {
+    fn start(&self, _total: u64) {}
+    fn set_phase(
+        &self,
+        _phase: zrag_protocol::response::IndexPhase,
+        _current: u64,
+        _total: u64,
+        _message: &str,
+    ) {
+    }
+    fn inc(&self, _n: u64) {}
+    fn finish_with_message(&self, _msg: &str) {}
+}
+
+/// Pushes progress events as `IndexingProgress` frames onto an mpsc channel.
+/// The listener task drains the channel and writes each frame to the client.
+pub struct IpcReporter {
+    tx: tokio::sync::mpsc::UnboundedSender<zrag_protocol::response::IndexingProgress>,
+    current: std::sync::atomic::AtomicU64,
+    total: std::sync::atomic::AtomicU64,
+}
+
+impl IpcReporter {
+    pub fn new(
+        tx: tokio::sync::mpsc::UnboundedSender<zrag_protocol::response::IndexingProgress>,
+    ) -> Self {
+        Self {
+            tx,
+            current: std::sync::atomic::AtomicU64::new(0),
+            total: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl ProgressReporter for IpcReporter {
+    fn start(&self, total: u64) {
+        self.total
+            .store(total, std::sync::atomic::Ordering::Relaxed);
+        self.current.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send(zrag_protocol::response::IndexingProgress {
+            phase: zrag_protocol::response::IndexPhase::Start,
+            current: 0,
+            total,
+            message: String::new(),
+        });
+    }
+
+    fn set_phase(
+        &self,
+        phase: zrag_protocol::response::IndexPhase,
+        current: u64,
+        total: u64,
+        message: &str,
+    ) {
+        let _ = self.tx.send(zrag_protocol::response::IndexingProgress {
+            phase,
+            current,
+            total,
+            message: message.to_string(),
+        });
+    }
+
+    fn inc(&self, n: u64) {
+        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
+        let current = self
+            .current
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
+            + n;
+        let _ = self.tx.send(zrag_protocol::response::IndexingProgress {
+            phase: zrag_protocol::response::IndexPhase::Embed,
+            current,
+            total,
+            message: String::new(),
+        });
+    }
+
+    fn finish_with_message(&self, msg: &str) {
+        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
+        let current = self.current.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send(zrag_protocol::response::IndexingProgress {
+            phase: zrag_protocol::response::IndexPhase::Finish,
+            current,
+            total,
+            message: msg.to_string(),
+        });
+    }
+}
+
+/// Enum-dispatched reporter — avoids `dyn` vtable overhead.
+pub enum Reporter {
+    Indicatif(IndicatifReporter),
+    Silent(SilentReporter),
+    Ipc(IpcReporter),
+}
+
+impl ProgressReporter for Reporter {
+    fn start(&self, total: u64) {
+        match self {
+            Reporter::Indicatif(r) => r.start(total),
+            Reporter::Silent(r) => r.start(total),
+            Reporter::Ipc(r) => r.start(total),
+        }
+    }
+
+    fn set_phase(
+        &self,
+        phase: zrag_protocol::response::IndexPhase,
+        current: u64,
+        total: u64,
+        message: &str,
+    ) {
+        match self {
+            Reporter::Indicatif(r) => r.set_phase(phase, current, total, message),
+            Reporter::Silent(r) => r.set_phase(phase, current, total, message),
+            Reporter::Ipc(r) => r.set_phase(phase, current, total, message),
+        }
+    }
+
+    fn inc(&self, n: u64) {
+        match self {
+            Reporter::Indicatif(r) => r.inc(n),
+            Reporter::Silent(r) => r.inc(n),
+            Reporter::Ipc(r) => r.inc(n),
+        }
+    }
+
+    fn finish_with_message(&self, msg: &str) {
+        match self {
+            Reporter::Indicatif(r) => r.finish_with_message(msg),
+            Reporter::Silent(r) => r.finish_with_message(msg),
+            Reporter::Ipc(r) => r.finish_with_message(msg),
+        }
+    }
+}

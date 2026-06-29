@@ -1,0 +1,44 @@
+[package]
+name = "zrag-embed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+candle-transformers.workspace = true
+tokenizers.workspace = true
+hf-hub.workspace = true
+zrag-hw.workspace = true
+zrag-common.workspace = true
+zrag-remote-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+walkdir.workspace = true
+arrow.workspace = true
+arrow-array.workspace = true
+
+[features]
+default = []
+cuda  = [
+  "candle-core/cuda",
+  "candle-nn/cuda",
+  "candle-transformers/cuda",
+  "zrag-hw/cuda",
+]
+metal = [
+  "candle-core/metal",
+  "candle-nn/metal",
+  "candle-transformers/metal",
+  "zrag-hw/metal",
+]
+clap  = ["dep:clap"]
+
+[dependencies.clap]
+workspace = true
+optional = true

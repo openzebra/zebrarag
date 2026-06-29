@@ -1,0 +1,16 @@
+[package]
+name = "zrag-ts-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python = "0.25"
+zrag-ts-core.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

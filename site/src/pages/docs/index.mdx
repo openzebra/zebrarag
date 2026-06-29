@@ -1,12 +1,12 @@
 ---
 layout: ../../layouts/DocsLayout.astro
 title: Overview
-description: zebraindex — local-first semantic code search for AI agents
+description: zebrarag — local-first semantic code search for AI agents
 ---
 
 # Overview
 
-**zebraindex** is a local-first semantic code index and MCP server. It parses your codebase with tree-sitter, chunks it by structure, embeds everything on your own hardware, and exposes fast query tools for AI coding agents — no cloud, no API keys.
+**zebrarag** is a local-first semantic code index and MCP server. It parses your codebase with tree-sitter, chunks it by structure, embeds everything on your own hardware, and exposes fast query tools for AI coding agents — no cloud, no API keys.
 
 ## How it works
 
@@ -26,20 +26,20 @@ AI agent tools: searchQuery · searchDep · fileTree · …
 
 ## Architecture
 
-zebraindex is a workspace of focused Rust crates:
+zebrarag is a workspace of focused Rust crates:
 
 | Crate | Role |
 |-------|------|
-| `zti-daemon` | Background process, handles IPC requests |
-| `zti-pipeline` | Index + search pipeline orchestration |
-| `zti-dsl` | Tree-sitter code parsing, chunking, call graphs |
-| `zti-embed` | Candle-based embedding engine (BERT, Jina, BGE, …) |
-| `zti-ann` | ANN index (usearch) + TurboQuant reranker |
-| `zti-store` | LanceDB storage layer |
-| `zti-protocol` | IPC request/response types |
-| `zti-tree-sitter` | Language detection + tree-sitter frontends |
-| `zti-rerank` | TurboQuant reranking (CPU & GPU) |
-| `apps/zebraindex` | CLI, TUI, and MCP server entry point |
+| `zrag-daemon` | Background process, handles IPC requests |
+| `zrag-pipeline` | Index + search pipeline orchestration |
+| `zrag-dsl` | Tree-sitter code parsing, chunking, call graphs |
+| `zrag-embed` | Candle-based embedding engine (BERT, Jina, BGE, …) |
+| `zrag-ann` | ANN index (usearch) + TurboQuant reranker |
+| `zrag-store` | LanceDB storage layer |
+| `zrag-protocol` | IPC request/response types |
+| `zrag-tree-sitter` | Language detection + tree-sitter frontends |
+| `zrag-rerank` | TurboQuant reranking (CPU & GPU) |
+| `apps/zebrarag` | CLI, TUI, and MCP server entry point |
 
 ## Key properties
 
@@ -55,13 +55,13 @@ zebraindex is a workspace of focused Rust crates:
 cargo install --git https://github.com/hicaru/zebra_tree_indexer
 
 # index the current project
-zebraindex index .
+zebrarag index .
 
 # search from the terminal
-zebraindex search "retry logic"
+zebrarag search "retry logic"
 
 # start as MCP stdio server for AI agents
-zebraindex --mcp
+zebrarag --mcp
 ```
 
 See [install](/docs/install) for full setup and MCP config snippets.

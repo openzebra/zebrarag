@@ -1,7 +1,7 @@
 use candle_core::Device;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use zti_rerank::TurboReranker;
-use zti_rerank::gpu::{
+use zrag_rerank::TurboReranker;
+use zrag_rerank::gpu::{
     GpuTurboCore, GpuTurboScratch, TurboCodeBatch, TurboScorerCache, parse_turbo_code_into,
     score_batch,
 };
@@ -19,7 +19,7 @@ fn bench_name(base: &str) -> String {
 fn bench_reranker() -> TurboReranker {
     TurboReranker::with_params(
         BENCH_DIM,
-        zti_rerank::turbo::RerankParams {
+        zrag_rerank::turbo::RerankParams {
             bits: 3,
             projections: 0,
             seed: BENCH_SEED,
