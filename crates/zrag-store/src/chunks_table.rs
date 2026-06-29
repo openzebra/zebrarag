@@ -558,7 +558,11 @@ fn build_lang_path_filter(
         filters.push(Cow::Owned(format!("language IN ({list})")));
     }
     if let Some(pattern) = path_glob.and_then(glob_to_like) {
-        filters.push(Cow::Owned(format!("file_path LIKE '{pattern}'")));
+        // `file_path` is stored as an ABSOLUTE path (`<root>/<rel>`), but users
+        // pass globs relative to the project root. Anchor the pattern on a
+        // leading `%/` so the relative glob matches as a path-component suffix
+        // of the absolute path (the leading `%` absorbs the root prefix).
+        filters.push(Cow::Owned(format!("file_path LIKE '%/{pattern}'")));
     }
     (!filters.is_empty()).then(|| filters.join(" AND "))
 }
@@ -677,13 +681,37 @@ fn decode_batch(batch: &RecordBatch, has_distance: bool, out: &mut Vec<ChunkHit>
 }
 
 fn glob_to_like(glob: &str) -> Option<String> {
+    let chars: Vec<char> = glob.chars().collect();
     let mut pattern = String::with_capacity(glob.len());
-    for ch in glob.chars() {
-        match ch {
-            '*' => pattern.push('%'),
-            '?' => pattern.push('_'),
-            '\'' | '\\' | '%' | '_' => return None,
-            _ => pattern.push(ch),
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '*' {
+            // Globstar (`**`): matches zero or more path segments. Emit a single
+            // SQL `%` (which spans `/`) and consume one immediately following
+            // `/` so `lib/**/*.dart` also matches `lib/a.dart`, not only deeply
+            // nested files.
+            if i + 1 < chars.len() && chars[i + 1] == '*' {
+                i += 2;
+                while i < chars.len() && chars[i] == '*' {
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == '/' {
+                    i += 1;
+                }
+                pattern.push('%');
+            } else {
+                i += 1;
+                pattern.push('%');
+            }
+        } else if c == '?' {
+            i += 1;
+            pattern.push('_');
+        } else if matches!(c, '\'' | '\\' | '%' | '_') {
+            return None;
+        } else {
+            i += 1;
+            pattern.push(c);
         }
     }
     Some(pattern)
@@ -697,9 +725,16 @@ mod tests {
 
     #[test]
     fn glob_to_like_translates_wildcards() {
-        assert_eq!(glob_to_like("src/**").as_deref(), Some("src/%%"));
+        assert_eq!(glob_to_like("src/**").as_deref(), Some("src/%"));
         assert_eq!(glob_to_like("a?b").as_deref(), Some("a_b"));
         assert_eq!(glob_to_like("plain").as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn glob_to_like_globstar_matches_zero_dirs() {
+        // `lib/**/*.dart` must also match `lib/a.dart`, not only deeply nested
+        // files: the globstar consumes its trailing `/`.
+        assert_eq!(glob_to_like("lib/**/*.dart").as_deref(), Some("lib/%%.dart"));
     }
 
     #[test]
@@ -724,7 +759,9 @@ mod tests {
         let languages = vec!["rust".to_string(), "solidity".to_string()];
         assert_eq!(
             build_lang_path_filter(Some(&languages), Some("src/**"), false).as_deref(),
-            Some("file_type != 1 AND language IN ('rust','solidity') AND file_path LIKE 'src/%%'"),
+            Some(
+                "file_type != 1 AND language IN ('rust','solidity') AND file_path LIKE '%/src/%'",
+            ),
         );
     }
 

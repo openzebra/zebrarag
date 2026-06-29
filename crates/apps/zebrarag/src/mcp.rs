@@ -45,8 +45,6 @@ pub struct SearchQueryParams {
     pub path_glob: Option<String>,
     #[schemars(description = "Language filter, e.g. [\"rust\", \"dart\"].")]
     pub languages: Option<Vec<String>>,
-    #[schemars(description = "Include test files in results (default: false).")]
-    pub include_tests: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -66,8 +64,6 @@ pub struct SearchPassageParams {
     pub path_glob: Option<String>,
     #[schemars(description = "Language filter, e.g. [\"rust\", \"dart\"].")]
     pub languages: Option<Vec<String>>,
-    #[schemars(description = "Include test files in results (default: false).")]
-    pub include_tests: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -107,7 +103,6 @@ struct SearchCall<'a> {
     limit: Option<usize>,
     path_glob: Option<String>,
     languages: Option<Vec<String>>,
-    include_tests: Option<bool>,
     mode: SearchMode,
 }
 
@@ -225,6 +220,9 @@ impl ZebraMcpServer {
             .await
             .map_err(|e| internal_err(format!("{e}")))?;
         let limit = call.limit.unwrap_or(5);
+        // No explicit flag: include test files automatically when the query
+        // text mentions "test" or "tests".
+        let include_tests = wants_tests(&call.text);
 
         let req = SearchReq {
             project_root,
@@ -235,7 +233,7 @@ impl ZebraMcpServer {
             path_glob: call.path_glob,
             refresh_index: false,
             exhaustive: false,
-            include_tests: call.include_tests.unwrap_or(false),
+            include_tests,
             mode: call.mode,
         };
 
@@ -271,6 +269,14 @@ fn match_file(file_path: &str, root: &str, matcher: Option<&globset::GlobMatcher
         .unwrap_or(file_path)
         .trim_start_matches('/');
     m.is_match(rel) || m.is_match(file_path)
+}
+
+/// Auto-detect test intent from the query text so callers don't pass an
+/// explicit flag: if the text contains the words "test" or "tests" (as
+/// standalone tokens), include test files in the results.
+fn wants_tests(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|tok| tok.eq_ignore_ascii_case("test") || tok.eq_ignore_ascii_case("tests"))
 }
 
 fn ok_text(text: impl Into<String>) -> CallToolResult {
@@ -372,7 +378,6 @@ impl ZebraMcpServer {
             limit: params.limit,
             path_glob: params.path_glob,
             languages: params.languages,
-            include_tests: params.include_tests,
             mode: SearchMode::Query,
         })
         .await
@@ -392,7 +397,6 @@ impl ZebraMcpServer {
             limit: params.limit,
             path_glob: params.path_glob,
             languages: params.languages,
-            include_tests: params.include_tests,
             mode: SearchMode::Passage,
         })
         .await
@@ -502,7 +506,7 @@ impl rmcp::ServerHandler for ZebraMcpServer {
                 Use this to find code that behaves similarly to a specific snippet or error trace you have encountered.\n\
              \n\
              ## Managing Dependencies & Noise\n\
-             External dependency directories are excluded at index time. Test files are indexed but hidden by default; set `include_tests: true` only when you explicitly need test code. Use `path_glob` to restrict searches to a specific source area when necessary.\n\
+             External dependency directories are excluded at index time. Test files are indexed but hidden by default; they are included automatically when your query mentions \"test\" or \"tests\". Use `path_glob` to restrict searches to a specific source area when necessary.\n\
              \n\
              ## Pro Tips\n\
              * The `project` parameter auto-resolves if omitted. You can pass a name, index number, or root path.\n\
